@@ -1,0 +1,30 @@
+# F-0004: reduce false-positive noise so real leaks stay visible.
+# Real production keys must never be allowlisted here — only gitignored local
+# paths, deterministic test fixtures, and deleted formal/eval harness paths.
+
+title = "JourneyPilot"
+
+[extend]
+# Keep default gitleaks rules (sk-*, cloud tokens, etc.).
+useDefault = true
+
+[allowlist]
+description = "Local-only paths + known non-secret fixtures from test/eval history"
+paths = [
+  # Local runtime secrets (already .gitignore'd; still hit by --no-git scans)
+  '''(^|/)config\.yaml$''',
+  '''(^|/)\.env(\..+)?$''',
+  '''(^|/)cookies\.json$''',
+  '''(^|/)secrets\..+$''',
+  # Removed by F-SCOPE-01 / S13; history still scanned by `gitleaks detect`
+  '''(^|/)evals/''',
+  '''tests/test_controlled_eval_attestation\.py''',
+  '''tests/test_eval_faults\.py''',
+  '''tests/test_formal_''',
+  '''tests/test_demo_''',
+]
+# Deterministic 32-byte test seed (0x00..0x1f) base64 — not a production key.
+# Used historically in config/attestation unit tests for Ed25519 fixtures.
+regexes = [
+  '''AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8''',
+]

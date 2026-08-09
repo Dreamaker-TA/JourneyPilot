@@ -1,0 +1,7 @@
+{
+  "name": "journeypilot",
+  "private": true,
+  "dependencies": {
+    "@baidumap/mcp-server-baidu-map": "^1.0.5"
+  }
+}

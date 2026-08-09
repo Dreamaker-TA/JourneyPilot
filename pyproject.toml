@@ -1,0 +1,75 @@
+# JourneyPilot — Python 依赖由 uv 管理（见 uv.lock）
+# 运行：uv sync && uv run python main.py
+
+[project]
+name = "journeypilot"
+version = "2.0.0"
+description = "旅游规划智能体后端"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    # Pin floors for HTTP/upload/MCP security surface; avoid
+    # blind major bumps of langchain/langgraph/torch stacks in this pass.
+    "fastapi>=0.115.12",
+    "uvicorn[standard]>=0.34.3",
+    "python-multipart>=0.0.31",
+    "sse-starlette>=2.3.6",
+    "starlette>=0.47.2,<1",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres==3.0.5",
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "openai>=1.85.0",
+    "httpx>=0.27,<0.28",
+    "urllib3>=2.7.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "psycopg[binary,pool]>=3.2.0",
+    "greenlet>=1.0.0",
+    "redis[hiredis]>=5.0.0",
+    "pydantic>=2.11.5",
+    "pydantic-settings>=2.14.2",
+    "pydantic-core>=2.33.2",
+    # cryptography removed: only used by deleted formal/controlled-eval signing.
+    "mcp>=1.9.4",
+    "mcp-server-fetch",
+    "PyYAML>=6.0.2",
+    "python-dotenv>=1.1.0",
+    "aiofiles>=24.1.0",
+    "rich>=14.0.0",
+    "loguru>=0.7.0",
+    "beautifulsoup4>=4.12.0",
+    "duckduckgo-search>=4.0.0",
+    "requests>=2.33.0",
+    "pypdf>=6.13.3",
+    "reportlab>=4.4.0",
+    "python-docx>=1.1.0",
+    # Embedding 推理链路（Qwen3-Embedding-0.6B ONNX 本地推理）
+    "onnxruntime>=1.20.0",
+    "tokenizers>=0.20.0",
+    "huggingface-hub>=0.26.0",
+    "numpy>=1.26.0",
+    "sentence-transformers>=5.5.1",
+    "ddgs>=9.14.3",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=7.1.0",
+]
+
+# Minimal lint gate (E/F only). Not a full style rewrite.
+[tool.ruff]
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+# Line-length stylistic E5xx left out of the gate to keep diffs focused.
+ignore = ["E501"]

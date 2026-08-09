@@ -1,0 +1,69 @@
+/* ─── Embedded typefaces ───────────────────────────────────────────────────────
+   **每一个字形都由仓里的文件负责，不再由用户机器上装了什么决定。**
+
+   在这一份之前，字体栈是纯系统栈：
+   `-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui`。
+   同一个界面在 mac 上是苹方、Windows 上是微软雅黑、Linux 上是发行版随便给的一只 —— 三只字
+   的字面高度、笔画粗细、数字宽度全不一样，而**产品的整张类型表（11…36px 与 400/500/600/700）
+   是按其中某一只调出来的**。一份按苹方定的 13px/600 在雅黑上偏胖，在只有一个字重的兜底字上
+   会被浏览器**合成**加粗。「合同写了一份值、产品渲染出另一份」这一形状，在字体这一层是
+   **按机器**发生的，而且没有任何判据能在一台机器上看见它。
+
+   三只字，三件事：
+
+   | 家族 | 管什么 | 为什么是它 |
+   |---|---|---|
+   | Inter Variable | 拉丁字母、数字、西文标点 | 屏幕 UI 拉丁的标杆，OFL；x 高大、小字号可读 |
+   | Noto Sans SC Variable | 汉字与全角标点 | OFL 里**唯一**覆盖完整的 UI 黑体（= 思源黑体） |
+   | Noto Serif SC Variable | 展示衬线（首页 H1 之外的字） | 与既有 14 字子集同源 |
+
+   **为什么是 variable 版**：静态版每个字重各一套切片，首页实测要拉 **29 个文件 / 821 KB**
+   （400、500、600 三档各拉同样那几片）；variable 版一片覆盖 100–900 全部字重，同一屏实测
+   **14 个文件 / 711 KB**。磁盘上 4.8 MB 对 76 MB。字重不再是「挑最近的一档」而是真插值，
+   所以 500 与 600 之间的差是字体设计者给的，不是浏览器合成的。
+
+   **711 KB 是量出来的，不是估的，而且它没有小到可以不提。** 首屏印了约 215 个汉字字形，
+   散落在 11 片里，每片 45–75 KB —— 切片的代价就是**局部性差**：多印 20 个字可能多拉一整片。
+   缓解它的办法是再做一层「产品自有 UI 词表」的手工子集（就是首页 H1 那 14 字子集的做法，
+   放大到整个界面用字），压到约 200 KB 一个文件；那需要 `fontTools`，本轮没做，量过了、
+   记在分册 38。`font-display: swap` 在场，所以这 711 KB 不阻塞首屏可读。
+
+   **为什么按 unicode-range 切片、而不是 `chinese-simplified.css` 那一个整文件**：后者是
+   1.1 MB 一整块，首屏要整块拉下来；切片版浏览器只取真正印到屏幕上的那几片。
+   `static/`（构建产物）与 `node_modules/` 都在 gitignore 里，字体文件不进 git。
+
+   **苹方本身不能嵌**（专有）。MiSans / HarmonyOS Sans 这类「形上更接近苹方」的都是厂商自有
+   许可、且没有切片版，只能整文件下发。Noto Sans SC 是「开源 + 覆盖完整 + 可切片」三条同时
+   成立的那一只，拉丁配 Inter。
+
+   等宽栈（`font-mono`，读数用）**仍是系统栈**：用户本轮明确只要拉丁 + 汉字两只。所以耗时 /
+   价格这些读数的字形仍按机器变，而且 `font-mono` 里的**汉字**会掉到系统 CJK 字体（实测首页
+   仍有 6 个字形由 `Noto Sans CJK SC` 渲染，12 个由 `DejaVu Sans Mono`）。这是本轮**有意
+   留下**的一条，见分册 38。正因为如此，`RollingNumber` 的基线修法必须与字体度量无关。 */
+
+/* Latin / digits — Inter。七个 subset 都在，但都带 unicode-range：除拉丁之外一个都不会下载。 */
+@import '@fontsource-variable/inter/wght.css';
+
+/* 汉字与全角标点 — Noto Sans SC，101 片，每片覆盖 100–900。 */
+@import '@fontsource-variable/noto-sans-sc/wght.css';
+
+/* 展示衬线 — Noto Serif SC，同样 101 片全字重。 */
+@import '@fontsource-variable/noto-serif-sc/wght.css';
+
+/* 首页 H1 那一句的 14 字子集（3.9 KB），仍然留着，但**现在把字符表写进 CSS 了**。
+   此前这条 `@font-face` 没有 `unicode-range`，等于声称覆盖全部码位；子集里没有的字要靠
+   「这一只渲不出来就换下一个家族」逃出去，而下一个家族是 `Songti SC` —— 多数机器上没有。
+   于是改文案时，产品最大的一句话变成了两种字体拼的。写上 unicode-range 之后，
+   precedence 是声明出来的、不是碰巧的：这 14 个码位走子集（3.9 KB，首屏即到），
+   其余走上面的全量 Noto Serif SC。
+
+   **文案不再被字体文件锁死**：改这一句只会让新字从全量衬线里出，不会掉出家族。
+   判据是「H1 的每一个字都由嵌入的展示衬线渲出，没有一个落到系统字体」。 */
+@font-face {
+  font-family: 'Noto Serif SC Subset';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./noto-serif-sc-600-trip.woff2') format('woff2');
+  unicode-range: U+4E00, U+53D8, U+53E5, U+53EF, U+60F3, U+6210, U+6267, U+628A, U+65C5, U+6CD5, U+7684, U+7A0B, U+884C, U+FF0C;
+}

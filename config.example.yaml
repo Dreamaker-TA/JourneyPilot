@@ -1,0 +1,233 @@
+# JourneyPilot example config
+# Copy this file to config.yaml and fill in your own values.
+
+env: development
+debug: false
+
+primary_model:
+  api_key: ""
+  model_name: "deepseek-v4-pro"
+  base_url: "https://api.deepseek.com"
+  max_tokens: 32768
+  temperature: 0.7
+  timeout: 120
+
+fast_model:
+  api_key: ""
+  model_name: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com"
+  max_tokens: 32768
+  temperature: 0.5
+  timeout: 30
+
+# RAG vectorisation. Three providers, and which keys matter depends on which one:
+# - "qwen3" (default): local Qwen3-Embedding-0.6B ONNX. Downloads ~1.2GB from HuggingFace
+#   on first start; api_key / base_url are unused.
+# - "openai": any OpenAI-compatible embedding endpoint. Then api_key and base_url are
+#   the two you must fill in — README's config table points here for exactly this swap.
+# - "hash": built-in deterministic hash vectors. Zero dependencies, poor semantics;
+#   only for getting the RAG path to run end to end.
+# dimensions must match the model you point at, and must match the pgvector column
+# your database was created with — changing it later means re-indexing.
+# Env overrides: EMBEDDING_PROVIDER / EMBEDDING_MODEL_NAME / EMBEDDING_BASE_URL /
+# EMBEDDING_API_KEY / EMBEDDING_DIMENSIONS.
+embedding:
+  provider: "qwen3"
+  api_key: ""                                          # openai provider only
+  model_name: "n24q02m/Qwen3-Embedding-0.6B-ONNX"      # e.g. "text-embedding-3-small" for openai
+  base_url: "https://api.openai.com/v1"                # openai provider only
+  dimensions: 1024                                     # 1536 for text-embedding-3-small
+
+# Dual-track host ports (see README Quick Start):
+# - This example defaults to 5433/6379 for a local non-compose instance / walkthrough.
+# - This repo's docker-compose.yml maps Postgres 55433:5432 and Redis 16379:6379.
+#   When using that stack from the host (./run.sh backend, psql, integration tests),
+#   set database.port: 55433 and redis.port: 16379 here (or in your config.yaml).
+database:
+  host: "localhost"
+  port: 5433
+  name: "travel_agent"
+  user: "travel_agent"
+  password: "travel_agent_pwd"
+  pool_size: 10
+  max_overflow: 20
+
+redis:
+  host: "localhost"
+  port: 6379
+  password: ""
+  db: 0
+
+# Cross-process cache for strictly scoped, evidence-eligible Provider facts.
+# Redis loss only causes a live miss; it never replays old Candidates or Bundles.
+provider_snapshot_cache:
+  enabled: true
+  redis_key_prefix: "journeypilot:provider-snapshot:v1"
+  redis_timeout_seconds: 0.25
+  place_identity_ttl_seconds: 604800
+  route_ttl_seconds: 300
+
+server:
+  host: "0.0.0.0"
+  port: 8001
+  reload: true
+  log_level: "info"
+  allow_runtime_model_config: false
+  cors_origins:
+    - "http://localhost:8080"
+    - "http://127.0.0.1:8080"
+
+rag:
+  chunk_size: 500
+  chunk_overlap: 50
+  top_k: 5
+  score_threshold: 0.3
+  chunker_type: "contextual"        # "text" | "semantic" | "contextual"
+  semantic_split_threshold: 0.5
+  # Bounds on model-calling chunking. semantic/contextual spend one
+  # embedding per sentence and one fast-model call per chunk, so the call count
+  # scales with the uploaded document — and those calls share the fast-tier
+  # httpx pool with every online request. Retry/backoff is NOT here: that is the
+  # transport's job (openai SDK, exponential, max_retries=2). These three bound
+  # how many calls one ingest may make, how many at once, and when to stop.
+  model_chunking_max_chars: 60000   # above this: zero model calls, fixed-window chunking
+  contextual_max_concurrency: 4     # in-flight per-chunk LLM calls per ingest
+  contextual_failure_threshold: 8   # failures in one document before the rest skip the LLM
+
+# Tool Search: deferred workers get a compact tool catalog + search_tools;
+# full injects every tool schema (debug fallback). Defaults match Settings.tool_exposure.
+tool_exposure:
+  mode: "deferred"          # "deferred" | "full"
+  worker_only: true
+  min_tools_threshold: 8
+
+# Plan gate pause before Deep Research workers. Default true.
+run_control:
+  plan_gate_enabled: true
+
+# Hybrid RAG second-stage rerank (Settings.rerank). llm needs no extra install.
+rerank:
+  enabled: true
+  provider: "llm"           # "llm" | "cross_encoder"
+  model_name: "BAAI/bge-reranker-v2-m3"
+  initial_top_k: 20
+  final_top_k: 5
+
+# OSM place providers: Nominatim + Overpass (Settings.geocoding).
+geocoding:
+  nominatim_base_url: "https://nominatim.openstreetmap.org"
+  user_agent: "JourneyPilot/1.0 (travel itinerary geocoder; https://github.com/journeypilot)"
+  # Baseline timeout for /lookup (batch osm_id, bilingual) and Overpass; both run
+  # only in the identity fallback, off the first-hop synchronous path.
+  timeout_seconds: 10.0
+  # Shorter per-attempt timeout for /search, the blocking hop when a user submits a
+  # destination. Measured healthy round trips here: 0.77 / median 1.34 / worst 2.51s.
+  # Upper bound is the ladder: min_interval_seconds + 2 attempts must stay under 8s
+  # worst case, so 1.1 + 2 x 3.4 = 7.9s makes 3.4 the largest per-attempt timeout.
+  search_timeout_seconds: 3.4
+  # Public Nominatim allows <=1 req/s; 1.1s leaves headroom (global serial rate gate).
+  min_interval_seconds: 1.1
+  # Reuse window for raw /search responses in the Redis-backed cache. OSM city/station
+  # relations do not move, so 7 days matches provider_snapshot_cache.place_identity_ttl_seconds.
+  search_cache_ttl_seconds: 604800
+  search_cache_key_prefix: "journeypilot:nominatim-search:v1"
+  # Cache lookups must not become a new stall: a slow Redis is treated as a miss.
+  search_cache_redis_timeout_seconds: 0.25
+
+# Street / public-transit routing providers (Settings.routing).
+# One tool (`global_route_search`), two upstreams split by geography: amap answers
+# inside the China coordinate box, MOTIS/Transitous answers the rest of the world.
+# The split is a coverage fact, not a preference — MOTIS carries no mainland-China
+# transit feed (measured: zero routes visited for a 7.9 km Shenzhen hop),
+# and amap covers nowhere else. amap reuses the AMAP_MAPS_API_KEY configured on the
+# `amap-maps` MCP server below; there is no second place to put that key.
+routing:
+  transitous_base_url: "https://api.transitous.org"
+  amap_base_url: "https://restapi.amap.com"
+  user_agent: "JourneyPilot/2.0 (https://github.com/journeypilot)"
+  timeout_seconds: 20.0
+  min_interval_seconds: 1.0
+
+# Committed upstream data snapshots (Settings.data_snapshots).
+# 12306 publishes station_name.js with no version token, so age is the only proxy
+# available: this is how long the repo will answer station questions from a table
+# nobody re-checked. Reported by /api/health/ready as a non-blocking component and
+# by preflight item 4 — never blocks readiness.
+data_snapshots:
+  station_max_age_days: 90
+
+# LangGraph checkpoint retention days (Settings.checkpoint_retention).
+# require_on_startup=true → AppBuilder fails hard if Postgres checkpointer init fails.
+checkpoint_retention:
+  completed_days: 30
+  cancelled_days: 30
+  failed_interrupted_days: 90
+  batch_size: 100
+  require_on_startup: false
+
+model_pricing:
+  - pattern: "deepseek-v4-flash"
+    provider: deepseek
+    input_per_1m: 0.14
+    cached_input_per_1m: 0.0028
+    output_per_1m: 0.28
+    currency: USD
+    effective_from: "2026-07-03"
+    source_url: "https://api-docs.deepseek.com/quick_start/pricing"
+  - pattern: "deepseek-v4-pro"
+    provider: deepseek
+    input_per_1m: 0.435
+    cached_input_per_1m: 0.003625
+    output_per_1m: 0.87
+    currency: USD
+    effective_from: "2026-07-03"
+    source_url: "https://api-docs.deepseek.com/quick_start/pricing"
+
+logging:
+  level: "info"
+  file:
+    enabled: true
+    path: "logs/"
+    rotation: "1 day"
+    retention: "7 days"
+
+mcp:
+  servers:
+    baidu-maps:
+      env:
+        BAIDU_MAP_API_KEY: ""
+      # sse_url: "https://mcp.map.baidu.com/sse?ak=YOUR_AK"
+
+    duckduckgo-search:
+      disabled: false
+
+    tavily-search:
+      env:
+        TAVILY_API_KEY: ""
+
+    brave-search:
+      env:
+        BRAVE_API_KEY: ""
+
+    firecrawl:
+      env:
+        FIRECRAWL_API_KEY: ""
+
+    amap-maps:
+      env:
+        AMAP_MAPS_API_KEY: ""
+      # 两次调用之间的最小间隔（秒），默认 0 = 不限速。高德按「每秒并发」拒绝
+      # （CUQPS_HAS_EXCEEDED_THE_LIMIT），而一次这样的拒绝会让整个住宿域少掉候选。
+      # 数值请到高德控制台读当前 key 的 QPS 上限后填这里，不要写进代码：
+      # 3 QPS → 0.34，5 QPS → 0.2。留 0 表示不限速。
+      min_interval_seconds: 0
+
+    duffel-flights:
+      env:
+        DUFFEL_API_KEY_LIVE: ""
+
+    12306-train: {}
+
+    open-meteo: {}
+
+    currency-exchange-mcp: {}

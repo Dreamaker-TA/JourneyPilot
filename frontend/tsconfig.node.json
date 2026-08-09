@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    /*
+     * 产物必须落到别处，不能落在这些配置旁边。
+     *
+     * `composite: true` 蕴含 `declaration: true`，所以这个程序**天生会 emit**，而
+     * `noEmit` 只写在 `package.json` 的命令行上（`tsc -p tsconfig.node.json --noEmit`）。
+     * 于是任何一次不带那个开关的调用（裸 `npx tsc -p tsconfig.node.json`、`tsc -b`）都会
+     * 在 `frontend/` 根上吐出 `tailwind.config.js` / `vite.config.js` 各一份加 `.d.ts`。
+     *
+     * **而 Tailwind 解析配置时 `tailwind.config.js` 排在 `tailwind.config.ts` 前面** ——
+     * 那一刻起，真正生效的是一份**快照**：`theme.borderRadius` / `transitionDuration` /
+     * `boxShadow` 那三张「替换而非扩展」的硬断裂表全部来自快照，而此后对
+     * `.ts` 的任何修改**既不报错也不生效**。典型表现：往 `.ts` 加了一只
+     * `on-accent` 颜色，类名照写、变量能取到值、`.text-on-accent` 这条规则根本没生成，
+     * 主按钮于是继承 `text-ink`，白字变近黑，对比度 2.64。
+     *
+     * 这正是「配置写在错的位置，既不报错也不生效」那个变体。
+     * 那八份产物是未跟踪文件，没有任何东西会清理它们，所以一旦落地就长期有效。
+     * `outDir` 让它们改落到 `node_modules` 里的临时目录 —— 那里不参与任何解析顺序。
+     */
+    "outDir": "./node_modules/.tmp/tsconfig-node"
+  },
+  // Third type-check program: the node-side tooling configs. `references` from
+  // tsconfig.json does not check these outside `tsc -b`, so until this program
+  // was wired into `npm run type-check` every file here had zero coverage.
+  // Both belong in one program — checking only vite.config.ts would leave
+  // the same blind spot this program exists to close.
+  "include": ["vite.config.ts", "tailwind.config.ts"]
+} 

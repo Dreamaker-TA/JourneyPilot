@@ -1,0 +1,1455 @@
+/* 嵌入字体。**必须在这一份里引入、不能只在 `main.tsx` 里引入**：
+   这不只是 `main.tsx` 的产物 — 夹具页各自 `import '../../../src/index.css'`，
+   根本不经过 `main.tsx'。放在那边等于让**别的读取面量到的是没有嵌入字体的产品**，
+   而屏幕上的产品有。一处引入，两边都拿到。 */
+@import './assets/fonts/fonts.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Design System: JourneyPilot Consumer Warm Trip Workspace ─── */
+
+:root {
+  /* 触摸命中区下限（Component Rules）。
+     **这个数只写在这里一次。** 它此前在这份样式表里出现过 5 遍（热区伪元素的
+     width/height、`.touch-row` 的 min-height、地图缩放钮的 width/height/line-height），
+     五处各写一份 44 —— 而「同一件事在两处以上各写一份」是这个仓最贵的那个形状：
+     调一处、剩下四处仍执行旧值，放宽等于死代码。现在全部读这只 token。 */
+  --touch-target-min: 44px;
+  /* Palette source of truth: RGB triplets, so Tailwind opacity modifiers
+     (bg-accent/10 …) compose via rgb(var(--color-*-rgb) / <alpha-value>)
+     in tailwind.config.ts. The --color-* forms derive and can never drift. */
+  --color-bg-rgb: 245 241 228;           /* #F5F1E4 drafting paper */
+  --color-panel-rgb: 252 251 246;        /* #FCFBF6 plot white */
+  --color-surface-rgb: 238 232 216;      /* #EEE8D8 */
+  --color-surface-soft-rgb: 237 246 255; /* #EDF6FF */
+  --color-stroke-rgb: 220 212 191;       /* #DCD4BF */
+  /* 「指头正压在这一行上」的暖底 —— 悬停/点亮的地面，只做底色。
+     它是一个**独立的角色**，不是 `surface` 的别名：`surface` 是抬起来的井与卡的填充
+     （#EEE8D8），而工作台的纸是 `panel` #FCFBF6，两者相差 14/19/30，于是拿 surface 当
+     点亮底色等于在白纸上压一块深米色 —— 又重，又会把落在它上面的 `bg-surface` 卡吃掉
+     （同色嵌套，卡的边界消失）。这只色比 surface 浅得多，所以卡在点亮的行上仍然看得见。 */
+  --color-highlight-rgb: 244 240 227;    /* #F4F0E3 */
+  /* ─── 文字色：每一只都在三种纸面上过 WCAG AA 4.5:1 ───────────────────
+     调深了七只。原来的值在 cream 纸上实测（四屏 242 个印出来的文字节点）**49 个不过 AA**，
+     其中最刺眼的几处是产品的主声部：交互蓝 3.81、次级墨 3.13、绿 3.54、琥珀 2.76，
+     连主按钮上的白字都只有 4.30。「首页对比度有点低」的根不在背景，在这张表 ——
+     把纸调亮救不了蓝色（#2477E8 即使放在纯白上也只有 4.30）。
+
+     **四种底色都要过**：paper #F5F1E4、panel #FCFBF6、surface #EEE8D8，以及**这只色自己
+     10% 的淡底**（`bg-success/10` 那类芯片）。前三种是一眼想到的；第四种是判据第一次跑出来
+     才发现的 —— 收窄到 4.5 之后仍有两处红：绿字压在绿 10% 上 4.28、蓝字压在蓝 10% 上 4.26。
+     **同色淡底是最容易被忘掉的那张纸**，因为它看起来「就是背景色」，而它恰好把对比度往下拉。
+     只按 paper 调会漏掉 `bg-surface` 那一批，只按三种纸调会漏掉芯片那一批 —— 同一个形状。
+
+     墨色三档的对比度是 13.71 / 6.85 / 4.91，一眼分得开。此前是 13.71 / 5.27 / 3.13，
+     第三档根本不合格，而它正是「说明文字、占位符、单位」这些**最需要看清**的东西的颜色。 */
+  --color-ink-rgb: 38 36 32;             /* #262420  paper 13.71 */
+  --color-ink-secondary-rgb: 88 82 71;   /* #585247  paper 6.85（原 #6A6355 = 5.27）*/
+  --color-ink-muted-rgb: 110 104 89;     /* #6E6859  paper 4.91（原 #8F8875 = 3.13，不合格）*/
+  --color-accent-rgb: 21 97 201;         /* #1561C9  paper 5.18 / 自己 10% 淡底上 4.51；白字压在它上面 5.86（原 4.30，不合格）*/
+  --color-accent-hover-rgb: 21 79 168;   /* #154FA8  paper 6.84 —— 必须比 accent 更深才看得出 hover */
+  --color-accent-soft-rgb: 231 241 255;  /* #E7F1FF 只做底色，不承担文字 */
+  --color-chart-rgb: 57 102 162;         /* #3966A2  paper 5.17 / 10% 淡底 4.53（原 #3E6FB0 = 4.53，擦线过）*/
+  --color-vermilion-rgb: 228 87 31;      /* #E4571F brand dot, pins, stamps — never interactive */
+  --color-navy-rgb: 13 31 60;            /* #0D1F3C neatline emphasis（此前也是圆标的环色）*/
+  --color-success-rgb: 38 114 83;        /* #267253  paper 5.14 / 10% 淡底 4.50（原 #2F8F68 = 3.54，不合格）*/
+  --color-error-rgb: 179 58 45;          /* #B33A2D  paper 5.22 / 10% 淡底 4.52（原 #CF4D3F = 3.88，不合格）*/
+  --color-warning-rgb: 139 91 33;        /* #8B5B21  paper 5.14 / 10% 淡底 4.51（原 #C8832F = 2.76，全表最差）*/
+  /* 压在 accent 实底上的那只字色。此前主按钮写死 `text-white` —— 一个**不在
+     十二只命名色里**的字面值，于是「白字压在 accent 上 5.86」这句话合同里有、代码里
+     没有名字可指。深墨底板上 accent 换成亮蓝 #8CBAFF，白字掉到 **1.98**，而一只写死的
+     颜色的定义就是「不参与换档」。 */
+  --color-on-accent-rgb: 255 255 255;    /* 压在 #1561C9 上 5.86 */
+}
+
+/* ─── 只有一张纸 ──────────────────────────────────────────────────────────────
+   此前四个侧屏的正文铺过一块深墨底板（`--color-navy` #0D1F3C，对暖纸 14.54:1），
+   用户看过真产品后否掉了它：**「你这个背景颜色太难看了，改回白底吧」**。
+
+   底板连带它那整套机制一起删掉，而不是留在这里等哪天再用：
+   `.plate` 那 19 只三元组、`.paper` 反向作用域、以及为了让派生 token 在两个作用域各自
+   求值而写的三选择器块，**没有一个还有消费方**。一份没有消费方的深色 ramp 读起来像是
+   「哪天可以在别处再开一块底板」的许可，而这个仓对「一张没有消费方的表」的处理是删掉
+   （对 `TRANSPORT_MODE_GROUPS` 就是这么办的）。
+
+   深墨底的问题陈述**仍然成立**，只有它的答案被换掉了：`bg` #F5F1E4 与 `panel` #FCFBF6
+   相差 **1.09:1**，所以「把正文做成一个面」不能靠换填色实现。白底的正文因此由
+   **描边**画出边界，不由填色画出 —— 这正是 Inputs 给首屏入口框定下的同一条：
+   **一个框是被它的描边定义的，不是被它的底色定义的。**
+   见 `ui/PageShell` 的正文面。
+
+   其余与纸色无关的几条（字号阶梯、间距节奏、芯片描边、字段度量、写死的
+   颜色、判据覆盖面、影子配置），全部保留。 */
+
+/* 派生形式：`--color-X: rgb(var(--color-X-rgb))`。手写 CSS 的消费者读这一层
+   （neatline 的框线与刻线、焦点环、flash 环），Tailwind 工具类直接读三元组。 */
+:root {
+  --color-bg: rgb(var(--color-bg-rgb));
+  --color-panel: rgb(var(--color-panel-rgb));
+  --color-surface: rgb(var(--color-surface-rgb));
+  --color-surface-soft: rgb(var(--color-surface-soft-rgb));
+  --color-highlight: rgb(var(--color-highlight-rgb));
+  --color-stroke: rgb(var(--color-stroke-rgb));
+  --color-ink: rgb(var(--color-ink-rgb));
+  --color-ink-secondary: rgb(var(--color-ink-secondary-rgb));
+  --color-ink-muted: rgb(var(--color-ink-muted-rgb));
+  --color-accent: rgb(var(--color-accent-rgb));
+  --color-accent-hover: rgb(var(--color-accent-hover-rgb));
+  --color-accent-soft: rgb(var(--color-accent-soft-rgb));
+  --color-chart: rgb(var(--color-chart-rgb));
+  --color-vermilion: rgb(var(--color-vermilion-rgb));
+  --color-navy: rgb(var(--color-navy-rgb));
+  --color-success: rgb(var(--color-success-rgb));
+  --color-error: rgb(var(--color-error-rgb));
+  --color-warning: rgb(var(--color-warning-rgb));
+  --color-on-accent: rgb(var(--color-on-accent-rgb));
+
+  /* 键盘焦点环 —— 全站一个值，用法见下面那条 `:focus-visible` 基础规则。
+     从 `--color-accent` 推导，所以它不可能漂到另一个蓝。60% 是量着定的：cream 画布上
+     整值 accent 的 2px 环在小钮上过重，而 30%（此前手写变体里最常见的那一档）在
+     `bg-surface` 上几乎看不见。
+
+     此前这里是 `--focus-ring` / `--focus-ring-soft` 两个 box-shadow 环。两个都删了：
+     一是「环」有两个浓度就是两套值，二是 box-shadow 和元素自己的阴影抢同一个通道
+     （`ui/Modal` 面板与 composer 都带 `shadow-*`），三是 §Motion 明禁动画 box-shadow，
+     用 outline 就不会有人想去过渡它。 */
+  --focus-outline: 2px solid color-mix(in srgb, var(--color-accent) 60%, transparent);
+
+  /* 「刚有新东西落地」那一下的外圈（登机牌 flash）。和焦点环同源不同角色：焦点环说
+     「你在这里」，这一圈说「这里刚变过」，所以浓度更低、只出现一瞬。 */
+  --flash-ring: 0 0 0 3px color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+
+:root {
+  --shadow-sm: 0 1px 2px rgba(42, 38, 26, 0.05);
+  --shadow-md: 0 6px 18px rgba(42, 38, 26, 0.08);
+  --shadow-lg: 0 12px 32px rgba(42, 38, 26, 0.12);
+
+  /* 形状分级 —— 制图室的工作台，而制图桌上没有 20px 圆角。层级靠**边框粗细与留白**
+     分，不靠半径：所以只有两个非零档，加上「本来就是圆的东西」。
+
+     上一版是 sm/md/lg/xl = 8/12/16/20px 四档尺寸名。尺寸名不说用途，于是同一个
+     角色在不同文件落在不同档，实测 164 处越过合同自己写的 8–12px 上限，最脏的
+     一条是工作台 20px 外壳套 20px 卡——外面两层半径相同，看不出层级只看出一团圆。
+     现在是角色名：一个角色一个 token，选错会读起来就不对，而不是差 4px。 */
+  --radius-label: 4px; /* 芯片、读数牌、状态标、内联代码 —— 印刷标签的裁切量级 */
+  --radius-card: 8px;  /* 卡、面板、字段井、按钮、日分隔带 —— 合同 §Component Rules 的下限 */
+  --radius-full: 9999px; /* 仪器：本来就是圆的东西（针 / 节点 / 滑块 / 头像）*/
+  /* 图纸（最外层容器）是 **0**，所以没有 token：它的边界由 neatline 双线框与四角
+     登记刻线给出，不由半径给出。想要直角就是不写 radius，或 `rounded-none`。 */
+
+  /* Motion tokens — single source of truth, mirrored in
+     src/lib/motion.ts. Plain CSS transitions and motion-library animations
+     must both draw from these. */
+  --dur-fast: 120ms; /* high-frequency state, hover/focus echoes */
+  --dur-base: 200ms; /* everyday state changes (default) */
+  --dur-slow: 320ms; /* enter/exit of surfaces, drawers */
+  --dur-emphasis: 480ms; /* expressive axis only — two whitelisted moments */
+  --dur-number-roll: 450ms; /* odometer digit roll (RollingNumber), decelerate */
+  /* 环境循环的两个周期。此前七处「还在忙」的循环各写一个值，跨度
+     900ms–2.6s：思维链信标 2.4s、标题流光 2.6s、等待三点 1.4s、生成三点 1.2s、
+     调研当前脉冲 1.8s、运行环 900ms、纸飞机巡航 2.4s —— 一屏上同时转着三四种节奏。
+     循环的节奏是个 token，不是每处的口味。
+
+     两个而不是一个，因为它们是两件事，各一个值：
+     - `loop`  **脉动**：原地一呼一吸或一转（三点、运行环、信标）。
+     - `drift` **漂移**：持续朝一个方向走（纸飞机巡航、标题流光）。
+     把漂移压到 1.2s 会让一只巡航的纸飞机读起来像在发抖 —— 那不是同一个节奏。 */
+  --dur-loop: 1.2s;
+  --dur-loop-drift: 2.4s;
+  --ease-standard: cubic-bezier(0.2, 0, 0.38, 0.9); /* day-to-day change */
+  --ease-decelerate: cubic-bezier(0, 0, 0.38, 0.9); /* entrances */
+  --ease-accelerate: cubic-bezier(0.2, 0, 1, 0.9); /* exits */
+  --stagger-step: 40ms; /* per-item; hard-cap total 480ms */
+
+  /* Categorical day palette for itinerary projection accents. Sequence is locked:
+     index N maps to day N, so a day keeps its color across renders. */
+  --chart-day-1: #007AFF;
+  --chart-day-2: #34C759;
+  --chart-day-3: #FF9500;
+  --chart-day-4: #FF3B30;
+  --chart-day-5: #AF52DE;
+  --chart-day-6: #5856D6;
+  --chart-day-7: #FF2D55;
+  --chart-day-8: #00C7BE;
+  --chart-day-9: #FFD60A;
+  --chart-day-10: #64D2FF;
+
+  --sidebar-width: 280px;
+  --right-panel-width: 380px;
+}
+
+/* ─── Base Reset ─── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  /* 字体栈只有一处定义：`tailwind.config.ts` 的 `fontFamily.sans`。
+     这一行此前是**把那张表又抄了一遍**的系统栈，而它写在 `body` 上、权重压过
+     Tailwind preflight，所以 `fontFamily.sans` 从来没有真正生效过 —— 改配置不改这里，
+     屏幕上一个像素都不会变。这正是「一个角色两套值」，而这一次错的那一套
+     赢了很久：装了嵌入字体之后第一次实测，正文仍由系统的 Noto Sans CJK SC 渲染，
+     四只嵌入字里只有首页 H1 那一只（走 `font-display` 类）真的在用。 */
+  font-family: theme('fontFamily.sans');
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: color-mix(in srgb, var(--color-accent) 15%, transparent);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background-color: var(--color-bg);
+  color: var(--color-ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/*
+ * `font-variant-numeric: tabular-nums` 曾经写在这里 —— 也就是**整站每一个字**上。
+ *
+ * Typography 的口径是「`tabular-nums` is for **pure numeric columns**
+ * (times, prices) only. Never on a CJK/latin mixed value」，还写明了后果：中文字体在
+ * tabular 数字下会把全角标点也拉成一个数字格宽，于是 `开放：06:00–17:00` 印成
+ * `开放 06 00-17:00`。这条规则被代码注释反复引用（`ui/RuledList` 的
+ * `RuledReadout`、`sidebar/ConversationList` 的日期行都写着「它只用在纯数字列上」），
+ * 而**在根节点上它一直是假的**：那些注释描述的是自己加的那一个 class，不是页面的实况。
+ *
+ * 现在等宽数字只由两处给出，两处都只覆盖纯数字：
+ *   1. `font-mono` —— 等宽字体的每个字形本来就同宽，不需要再声明 feature；
+ *   2. 显式的 `tabular-nums` 工具类（34 处，全在数字列/读数上）。
+ * `ui/RollingNumber` 三层都自己写着 `tabular-nums`，不依赖继承。
+ */
+
+/* ─── 键盘焦点环：一处定义，全站唯一一套 ─── */
+/*
+ * 这一条把「全部 `focus-visible:` 样式删除」的旧指示反转了：焦点环要补上。
+ *
+ * 根因不是「Button 忘了加环」，而是 `ui/Button` 写着 `outline-none`：浏览器默认环本来
+ * 处处都有，是这枚原语**把它摘掉了**，于是 33 个 `<Button>` 一个环都没有，而没经过原语的
+ * 那些手写钮各自留着自己的一套。实测同时活着 8 种配方
+ * （`ring-accent/30` / `/35` / `/25` / 整值 / `ring-error/40` / `/25` /
+ * `shadow-[var(--focus-ring)]` / `focus:ring-accent/15`）—— 同一件事又一次有了多个定义处。
+ *
+ * 所以环写在这里、只写一次，`:focus-visible` 由浏览器决定何时该亮（键盘 Tab 亮、鼠标点
+ * 不亮），产品代码里不再出现任何 focus 环类名。
+ *
+ * 用 `outline` 而不是 `box-shadow`：outline 不进盒模型、不和元素自己的阴影抢通道，
+ * 现代浏览器还会让它跟着 `border-radius` 走 —— 而这一屏上有 0 / 4 / 8 / full 四档半径。
+ */
+:focus-visible {
+  outline: var(--focus-outline);
+  outline-offset: 2px;
+}
+
+/*
+ * 字段走另一个通道：**边线着色**，不套环。
+ *
+ * 两个理由。一是刻线字段是一条**没有盒子**的线（§Shape 的 Rule 档），绕着它画一个矩形
+ * 等于把刚去掉的盒子又长回来。二是字段本来就有自己的活动态 —— `RULED_FIELD` 那条
+ * accent 底线、暖井的 `focus-within` 边色 —— 而且鼠标点进去也亮：那说的是「你在这里
+ * 打字」，和「你的键盘焦点在这里」是两件事，各占一个通道才不打架。
+ *
+ * 这一条同时把**带边框的字段**收进来：工作台里十几口 `border-stroke` 的填色井此前各自
+ * 手写一个 accent 环，现在一律边线转 accent，零调用点。没有边框的字段（透明 input）在
+ * 这条规则下什么也不变，由容器那条 `focus-within` 承担 —— 它已经在了。
+ */
+:where(input, textarea, select):focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+/* 字体声明全部在 `assets/fonts/fonts.css`，由 `main.tsx` 在这一份之前引入。
+   这里曾经放着展示衬线子集那一条 `@font-face` —— 它现在和另外三只嵌入字体待在同一处，
+   因为「产品用哪几只字」是一件事，散在两个文件里就是两处负责。 */
+
+/* Selection uses the interactive blue at low opacity (never vermilion/chart). */
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+
+/* ─── Paper grain — one static app-level noise overlay (≤4%, never animated) ─── */
+
+.paper-grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cg fill='%232a261a' fill-opacity='.04'%3E%3Ccircle cx='9' cy='18' r='.7'/%3E%3Ccircle cx='31' cy='7' r='.45'/%3E%3Ccircle cx='54' cy='29' r='.6'/%3E%3Ccircle cx='83' cy='12' r='.4'/%3E%3Ccircle cx='111' cy='34' r='.55'/%3E%3Ccircle cx='18' cy='63' r='.5'/%3E%3Ccircle cx='45' cy='84' r='.65'/%3E%3Ccircle cx='72' cy='58' r='.4'/%3E%3Ccircle cx='101' cy='78' r='.7'/%3E%3Ccircle cx='8' cy='108' r='.4'/%3E%3Ccircle cx='67' cy='112' r='.55'/%3E%3Ccircle cx='116' cy='103' r='.45'/%3E%3C/g%3E%3C/svg%3E");
+  background-repeat: repeat;
+}
+
+/* ─── Touch Affordances：coarse pointer 专属层 ─── */
+
+@media (pointer: coarse) {
+  /* ≥44px 热区契约：视觉尺寸不变，命中区经透明伪元素对称外扩到至少 44×44。
+     伪元素属于宿主控件，命中即控件命中；紧邻控件的外扩区按 DOM 后者优先。
+
+     **这条规则按元素选，不按类名选。** 它此前写作 `.touch-target`，也就是
+     「每个调用点自己记得加一个类」—— 一条靠记性执行的契约，在一个还在长的代码库里
+     只会覆盖到写它那天存在的那些点。实测账：66 处加了，而**漏的正是频次最高的那些**
+     —— 输入区的发送/停止钮（32×32）、侧栏三条导航行与「新建行程」（40px）、
+     `ui/Chip` 全族（36px，我的偏好那一屏一屏就 30 枚）、`ui/Button` 的 `sm` 与 `md`
+     两档（32 / 40px）。根因不在那四个调用点，也不在 `ui/Button` 的某一档：
+     **在「热区是不是可选项」这件事上**。现在它不是了。
+
+     `a` **不在这份选择器里**，这是有意的：正文里的行内链接（`Markdown.tsx`）与地图署名
+     那行小字都是 `a`，给它们套 44px 命中区等于让相邻行的字互相抢点击、把法务要求的
+     fine print 变成屏幕上第三大的东西。产品里当控件用的 `a` 只有侧栏那三条导航行，
+     而它们自己裁剪 overflow（见下一条），本来也拿不到外扩。
+
+     **`:where()` 不是装饰，是这条规则的必要部分。** 这里要的只是「宿主是个定位
+     元素」，好让 `::after` 有参照；写成单类选择器时，它和 Tailwind 的 `.absolute` 权重
+     相同（都是单个类），而 `index.css` 自己的规则排在 `@tailwind utilities` **之后**
+     —— 于是打平时它靠顺序赢，把宿主自己的定位**换掉**。实测后果：`canvas-pill`
+     （手机上唯一能打开行程的入口）在触摸设备上 `position` 变成 `relative`，不再浮在
+     右上角，而是变成会话列里一条 **366px 宽的横条**。`:where()` 权重为 0，静态元素照样
+     拿到 `relative`，自己定过位的元素保持原样。按元素选之后这一点更重要，不是更不重要：
+     现在每一枚按钮都经过这条规则。 */
+  :where(button, summary, [role='button'], [role='tab']) {
+    position: relative;
+  }
+  :is(button, summary, [role='button'], [role='tab'])::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--touch-target-min));
+    height: max(100%, var(--touch-target-min));
+    transform: translate(-50%, -50%);
+  }
+
+  /* hover-reveal 的触摸替代：操作簇在 coarse pointer 下常显，muted 态由自身配色承担。 */
+  .coarse-show {
+    opacity: 1;
+  }
+
+  /* 触摸行契约：行本身至少 44px 高，行内动作簇的纵向热区不被裁切。
+
+     **它不是上面那条的重复，它是上面那条到不了的地方。** 一个自己裁剪 overflow
+     的控件长不出向外的命中区 —— `::after` 会被宿主自己裁掉，而 CSS 选不出「谁在裁」。
+     侧栏那三条导航行与「新建行程」都必须裁（轨道折叠时靠 `overflow-hidden` 收掉那枚
+     绝对定位的标签），所以它们只能把地板落在**盒子本身**上。判据量的是**裁剪之后**的
+     命中区，所以漏加这一条会红，不会静默。 */
+  .touch-row {
+    min-height: var(--touch-target-min);
+  }
+
+  /* 相邻热区收敛：coarse pointer 下操作簇按钮视觉提到 32px、簇内间距 8px，
+     中心距 = 32 + 8 = 40px；44px 命中区仅重叠 44 − 40 = 4px（≤4px 目标）。
+     fine pointer 维持 24px 视觉 + hover 显现，本层完全不触及。 */
+  .coarse-cluster {
+    gap: 8px;
+  }
+  .coarse-op {
+    height: 32px !important;
+    width: 32px !important;
+    padding: 0 !important;
+    justify-content: center;
+  }
+  /* lucide 图标以 width/height 属性内联 12px；coarse 下等比提到 14px 与 32px 钮相称。 */
+  .coarse-op > svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  /* 地图缩放钮的那一条**不在这里**，在本文件末尾那段 Leaflet 样式之后 —— 理由写在
+     那里：`@media` 不加权重，两条选择器打平时靠出现顺序决定，而那段在后面。放在这里会静默
+     不生效（第一版就放在这里，判据照样报 `Zoom in 30x30`）。 */
+}
+
+/* ─── Reduced Motion：prefers-reduced-motion 专属层（CSS 那一半，全站一处） ─── */
+
+/* 旧指示曾要求删除整套 reduced-motion 体系。**这一条推翻它**（承认
+   reduced-motion 在范围内），理由与 §9.4 焦点环那次反转同形 —— 那次删完之后集中定义没了、
+   逐点的配方留了 8 种；这次删完之后集中定义（本块 + `MotionConfig`）没了、逐点的
+   `motion-reduce:` 工具类留了 40 处。**一条「删除某类样式」的指令，如果没有一处集中定义
+   可以删，落地只能是逐点清扫，而逐点清扫永远只清到当天存在的那些点。** 实测就是这样：
+   12 处 `animate-spin` 里只有 1 处配了 `motion-reduce:animate-none`，另外 11 个在 reduce
+   下照转；23 个用动效库的文件里只有 1 个（`ResearchBoardingPass`）自己手写了 reduce 分支。
+
+   所以这一层现在**只有两处定义，各管一个机制**，两处都不点名任何元素：
+
+   1. 本块 —— CSS 的 transition / animation。不写选择器清单，覆盖面因此不依赖任何人
+      记得加类名，也覆盖 Tailwind 自带的 `animate-spin` / `animate-pulse`（它们读
+      Tailwind 自己的时长，不读 `--dur-*`，所以「把 token 改成 1ms」这种写法漏得掉）。
+   2. `components/motion/MotionProviders.tsx` 的 `MotionConfig reducedMotion="user"` ——
+      动效库的 JS 动画。库的出厂默认是 `reducedMotion: "never"`
+      （`framer-motion/dist/es/context/MotionConfigContext.mjs`），所以不写这一句，
+      23 个文件的动画在 reduce 下一个都不减。
+
+   两处不是「一个角色两套值」：CSS 属性值与 JS 补间是两个互相看不见的机制，各有一处定义、
+   逐点数为零。第三个机制是命令式 JS 行为（Leaflet 的 `flyTo`、首页提示语轮播的
+   `setInterval`），它既不是 CSS 也不是补间，由动效库的 `useReducedMotion()` 钩子读同一个
+   系统设置——那是库里的一处定义，不是我们新造的第三份判断。
+
+   几处值是量着定的，别顺手改：
+
+   - `1ms` 而不是 `0s`：`transitionend` / `animationend` 仍须触发，否则等这两个事件的代码
+     会永远等下去。
+   - `animation-iteration-count: 1`：六条 ambient 循环（呼吸/转身/漂移）首末帧相同，跑完
+     一个 1ms 周期正好停在起始帧。若改成 `animation: none`，带 `both` 填充的那几条
+     （`.hero-contour` 的描边、`.tool-content-in`）会停在**未开始**的那一帧上 —— 等高线
+     一根都不画。这一条是「让它瞬间跑完」而不是「让它别跑」。
+   - `!important`：这一层要压过工具类和内联的 `animation` 简写，而简写会把 duration 一起
+     重设。这是全表两处 `!important` 之一（另一处是 `.coarse-op`），两处都是「专属层压
+     基础层」这一种用法。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    transition-delay: 0s !important;
+    animation-duration: 1ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ─── Shimmer Text Effect ─── */
+
+.text-shimmer {
+  color: var(--color-accent);
+}
+
+/* ─── Scrollbar ─── */
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 120, 128, 0.2);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 120, 128, 0.4);
+}
+
+/* ─── Markdown Content ─── */
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+.markdown-content p {
+  margin: 0.5em 0;
+}
+
+.markdown-content ul, .markdown-content ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+
+.markdown-content li {
+  margin: 0.25em 0;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid var(--color-accent);
+  padding-left: 12px;
+  margin: 0.5em 0;
+  color: var(--color-ink-secondary);
+}
+
+.markdown-content a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid var(--color-stroke);
+  margin: 1em 0;
+}
+
+.markdown-content img {
+  max-width: 100%;
+  /* 图是内容块，走卡这一档。以前是已删除的 `--radius-md`（12px）—— 换成角色 token
+     后这一行会静默失效（未定义变量 → 属性无效），所以一起改。 */
+  border-radius: var(--radius-card);
+}
+
+/* ─── InputArea 展开/收起动画（提示词优化预览向上展开） ─── */
+
+.input-expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  /* `--dur-slow`，不是 `--dur-emphasis`：token 表把 emphasis 写成「Expressive axis
+     only — 两个被批准的瞬间」，而输入区展开不是其中之一（它是一个面的进出，正好是
+     slow 那一挡）。这里此前用 emphasis，等于让合同里唯一那条「只给两处」的规定在
+     代码里有第三、第四个用处。 */
+  transition: grid-template-rows var(--dur-slow) var(--ease-decelerate);
+}
+
+.input-expand.expanded {
+  grid-template-rows: 1fr;
+}
+
+.input-expand > .input-expand-content {
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity var(--dur-slow) var(--ease-decelerate) 60ms,
+    transform var(--dur-slow) var(--ease-decelerate) 60ms;
+}
+
+.input-expand.expanded > .input-expand-content {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+
+/* `.scale-in-center` 与 `@keyframes scaleInCenter` 已删：全仓零消费方，而
+   §Legacy 把它写成「唯一获准的表现轴弹跳」并因此留着一条表外缓动
+   `cubic-bezier(0.34, 1.56, 0.64, 1)` —— 一条为了一个不存在的调用点而破例的规则。 */
+
+.input-normal-row {
+  display: grid;
+  grid-template-rows: 1fr;
+  /* `--dur-slow`，不是 `--dur-emphasis`：token 表把 emphasis 写成「Expressive axis
+     only — 两个被批准的瞬间」，而输入区展开不是其中之一（它是一个面的进出，正好是
+     slow 那一挡）。这里此前用 emphasis，等于让合同里唯一那条「只给两处」的规定在
+     代码里有第三、第四个用处。 */
+  transition: grid-template-rows var(--dur-slow) var(--ease-decelerate);
+}
+
+.input-normal-row.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.input-normal-row > .input-normal-inner {
+  overflow: hidden;
+  opacity: 1;
+  transition: opacity var(--dur-slow) var(--ease-decelerate);
+}
+
+.input-normal-row.collapsed > .input-normal-inner {
+  opacity: 0;
+}
+
+/* ─── waiting_input 消息脉冲动画 ─── */
+
+@keyframes waiting-dot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+.waiting-dot {
+  animation: waiting-dot var(--dur-loop) var(--ease-standard) infinite both;
+}
+.waiting-dot:nth-child(2) { animation-delay: 0.16s; }
+.waiting-dot:nth-child(3) { animation-delay: 0.32s; }
+
+/* ─── Thinking chain: warm operational trace ─── */
+
+.thinking-chain-shell {
+  --thinking-surface: var(--color-bg);
+  --thinking-line: color-mix(in srgb, var(--color-ink-secondary) 17%, transparent);
+  position: relative;
+  isolation: isolate;
+  margin: 0.55rem 0 0.7rem;
+  padding: 0.12rem 0 0.42rem;
+  overflow: visible;
+  background: transparent;
+}
+
+.thinking-chain-shell::before {
+  display: none;
+}
+
+.thinking-chain-shell:hover,
+.thinking-chain-shell:focus-within {
+  transform: none;
+}
+
+.thinking-chain-shell.is-live {
+  --thinking-line: color-mix(in srgb, var(--color-accent) 34%, transparent);
+}
+
+.thinking-chain-shell.is-interrupted {
+  --thinking-line: color-mix(in srgb, var(--color-warning) 31%, transparent);
+}
+
+/* 首个运行事件到达前只是对话流中的状态提示，不应被误读为一条空消息气泡。 */
+.thinking-chain-shell.is-transient {
+  min-height: 34px;
+  margin: 0.55rem 0 0.45rem;
+  padding: 0.16rem 0;
+  overflow: visible;
+}
+
+.thinking-chain-shell.is-transient::before {
+  display: none;
+}
+
+.thinking-chain-shell.is-transient:hover,
+.thinking-chain-shell.is-transient:focus-within {
+  transform: none;
+}
+
+.thinking-chain-shell.is-transient .thinking-chain-summary-row {
+  min-height: 30px;
+}
+
+.thinking-chain-shell.is-transient .thinking-chain-summary-content {
+  gap: 0.6rem;
+}
+
+.thinking-chain-shell.is-transient .thinking-chain-summary-content::before {
+  width: 9px;
+  height: 9px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 11%, transparent);
+}
+
+.thinking-chain-shell.is-transient .thinking-chain-flight {
+  display: none;
+}
+
+.thinking-chain-summary-row {
+  min-height: 28px;
+  transition: color var(--dur-base) var(--ease-standard);
+}
+
+button.thinking-chain-summary-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 0.35rem;
+  padding: 2px 0;
+}
+
+button.thinking-chain-summary-row:hover {
+  color: var(--color-ink);
+}
+
+/* 这里曾经有一条 `button.thinking-chain-summary-row:focus-visible`：`outline: none` +
+   `box-shadow: var(--focus-ring-soft)` —— 全站第 8 种焦点环配方，而且是唯一用样式表
+   （而不是类名）写的那一种，所以任何按类名做的清点都数不到它。它现在由上面那条唯一的
+   `:focus-visible` 承担。 */
+
+.thinking-chain-summary-content {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  /* 0.4rem → 0.55rem：节点离标题太近，读起来像标题上长了个点，而不是一条时间轴的
+     起点。这一档同时是整条链「略微宽松」的基调。 */
+  gap: 0.55rem;
+  /* 节点的外扩光晕不能被摘要容器裁掉；文字自身仍在下一条规则中省略。 */
+  overflow: visible;
+  padding: 3px;
+  margin: -3px;
+}
+
+.thinking-chain-summary-content::before {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  content: '';
+  border: 1px solid color-mix(in srgb, var(--color-ink-secondary) 34%, transparent);
+  border-radius: 999px;
+  background: var(--thinking-surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--thinking-surface) 86%, transparent);
+}
+
+.thinking-chain-shell.is-live .thinking-chain-summary-content::before {
+  border-color: color-mix(in srgb, var(--color-accent) 66%, transparent);
+  background: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 11%, var(--thinking-surface));
+  animation: thinking-chain-beacon var(--dur-loop) var(--ease-standard) infinite;
+}
+
+.thinking-chain-shell.is-live .thinking-chain-summary-content .text-shimmer {
+  color: transparent;
+  /* Seamless left-to-right sheen (issue 4): both gradient ends are the base
+     accent so the repeated tile has no visible seam, and the keyframe travels
+     exactly one tile width (200%), so the highlight makes one clean pass and the
+     loop restart is invisible — no mid-sweep jump back to the left. */
+  background-image: linear-gradient(
+    100deg,
+    var(--color-accent) 0%,
+    var(--color-accent) 30%,
+    #9dcbff 50%,
+    var(--color-accent) 70%,
+    var(--color-accent) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: thinking-chain-title-sheen var(--dur-loop-drift) linear infinite;
+}
+
+.thinking-chain-shell.is-interrupted .thinking-chain-summary-content::before {
+  border-color: color-mix(in srgb, var(--color-warning) 60%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 68%, var(--thinking-surface));
+}
+
+.thinking-chain-summary-content > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+}
+
+.thinking-chain-summary-content > :not(:first-child) {
+  flex: 0 0 auto;
+  /* 颜色**不在这里给**。它此前是 `color-mix(ink-secondary 70%, transparent)`，
+     实测对比度 3.56 —— 而调用点自己已经在 className 上写了 `text-ink-muted`。
+     两处负责同一件事，而这一条按选择器权重（0-2-0）赢过 Tailwind 的工具类：
+     顺带把「· 已中断」那枚 `text-warning` 也一起吃掉了，琥珀色从来没出现在屏幕上。 */
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.015em;
+  white-space: nowrap;
+}
+
+.thinking-chain-metric {
+  letter-spacing: 0.015em;
+  font-variant-numeric: tabular-nums;
+}
+
+.thinking-chain-summary-row .thinking-chain-chevron {
+  width: 28px;
+  height: 28px;
+  padding: 7px;
+  color: var(--color-ink-muted);
+  background: transparent;
+}
+
+button.thinking-chain-summary-row:hover .thinking-chain-chevron {
+  color: var(--color-accent);
+}
+
+@keyframes thinking-chain-beacon {
+  0%, 100% { transform: scale(1); opacity: 0.94; }
+  48% { transform: scale(1.16); opacity: 0.68; }
+}
+
+@keyframes thinking-chain-title-sheen {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+.thinking-chain-toggle {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-slow) var(--ease-standard);
+}
+
+.thinking-chain-toggle.expanded {
+  grid-template-rows: 1fr;
+}
+
+.thinking-chain-toggle > .thinking-chain-content {
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition:
+    opacity var(--dur-slow) var(--ease-standard),
+    transform var(--dur-slow) var(--ease-standard);
+}
+
+.thinking-chain-toggle.expanded > .thinking-chain-content {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.thinking-chain-chevron {
+  transition: transform var(--dur-base) var(--ease-decelerate);
+}
+
+.thinking-scroll-max {
+  /* 展开态完整容纳至少 3 条工具调用条目（含合并组条目高度）。 */
+  max-height: min(48vh, 420px);
+}
+
+/* 运行中的思维链是这一阶段的页面主体（issue 6）：给它一个下限高度，避免只有一两条
+   条目时下方大片留白，读起来像一块正在推进的调研控制台，而非一个孤零零的加载点。 */
+.thinking-chain-shell.is-live .thinking-chain-actions {
+  min-height: 150px;
+}
+
+.thinking-chain-rail::before {
+  position: absolute;
+  top: 6px;
+  bottom: 9px;
+  left: 8px;
+  width: 1px;
+  content: '';
+  background: var(--thinking-line);
+}
+
+.thinking-chain-actions {
+  padding-top: 0.35rem;
+  padding-bottom: 0.2rem;
+}
+
+/* 步与步之间的节奏。**大步骤头上的空气比小步骤多**，这是「大步骤 / 小步骤」这层
+   关系除字号之外的另一半表达 —— 用户要的「通过行距和字体大小体现层级」。
+
+   这一份此前写在 TSX 上（`space-y-3`，一律 0.75rem）。移过来的原因不是好看：Tailwind 的
+   `space-y-*` 选择器是 `.space-y-3 > :not([hidden]) ~ :not([hidden])`，权重比这里任何按类名
+   写的规则都高，**留着它就没法在 CSS 里表达「哪一档该多留白」** —— 只能每个调用点自己算，
+   而那正是同一件事多了一个定义处的入口。节奏由结构决定，一处定义。 */
+.thinking-chain-actions > * + * {
+  margin-top: 0.62rem;
+}
+
+.thinking-chain-actions > * + .thinking-chain-action--agent {
+  margin-top: 1.15rem;
+}
+
+/* 背景步骤（读站表、命中缓存这类）挨着上一条，它们是上一步的脚注而不是新的一步。 */
+.thinking-chain-actions > * + .thinking-chain-action--internal {
+  margin-top: 0.4rem;
+}
+
+.thinking-chain-action {
+  padding: 0.18rem 0.35rem 0.24rem 0.16rem;
+  border-radius: 4px;
+  transition:
+    background-color var(--dur-base) var(--ease-standard),
+    opacity var(--dur-base) var(--ease-standard),
+    transform var(--dur-base) var(--ease-standard);
+}
+
+.thinking-chain-action:hover {
+  background: color-mix(in srgb, var(--color-accent) 4%, transparent);
+}
+
+.thinking-chain-action.is-active {
+  background: color-mix(in srgb, var(--color-accent) 5%, transparent);
+}
+
+/* 背景步骤的「退到后面」由**墨色档位**表达，不由 opacity 表达。
+   这里此前是 `opacity: 0.72`：它把已经是第三档的墨色再乘一次，实测对比度掉到 3.2 —— 而
+   opacity 乘出来的颜色不在调色板里，也没有名字，所以没有任何一处能说出它该是多少。
+   规则是：**文字的颜色是一只有名字的 token，浓度只有 100%。** 想更淡就换档，不是加透明度。 */
+.thinking-chain-action--internal .thinking-chain-action-title,
+.thinking-chain-action--internal {
+  color: var(--color-ink-muted);
+}
+
+.thinking-chain-action--internal:hover {
+  background: color-mix(in srgb, var(--color-ink) 2.5%, transparent);
+}
+
+/* 节点几何只有一处定义。这四条此前带 `!important`，而它要压的不是别人 ——
+   是**四个调用点自己写在 className 上的另一套值**（`-left-[17px] top-[3.5px] h-2 w-2` /
+   `h-2.5 w-2.5`，两种尺寸）。也就是说：TSX 里写着两种节点大小，屏幕上一直是同一种 13px，
+   而那两个值一个都没生效过。删掉调用点的死值之后，`!important` 也就没有要压的东西了。 */
+.thinking-chain-marker {
+  display: grid;
+  width: 13px;
+  height: 13px;
+  place-items: center;
+  left: -18px;
+  /* 顶部对齐随大步骤字号变化：14px/1.5 的行盒比原来的 11px 行盒高，节点要跟着下移，
+     否则它会顶在标题第一行的上缘之上。 */
+  top: 4px;
+  border: 1.5px solid color-mix(in srgb, var(--color-ink-secondary) 26%, var(--thinking-surface));
+  border-radius: 999px;
+  background: var(--thinking-surface);
+  transition:
+    border-color var(--dur-base) var(--ease-standard),
+    background-color var(--dur-base) var(--ease-standard),
+    transform var(--dur-base) var(--ease-standard);
+}
+
+.thinking-chain-marker::after {
+  color: color-mix(in srgb, var(--color-ink) 80%, var(--color-ink-secondary));
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.thinking-chain-action.is-complete .thinking-chain-marker {
+  border-color: color-mix(in srgb, var(--color-ink-secondary) 38%, var(--thinking-surface));
+}
+
+.thinking-chain-action.is-complete .thinking-chain-marker::after {
+  content: '✓';
+}
+
+.thinking-chain-action.is-active .thinking-chain-marker {
+  border-color: color-mix(in srgb, var(--color-accent) 76%, transparent);
+  background: var(--thinking-surface);
+  transform: none;
+}
+
+.thinking-chain-action.is-active .thinking-chain-marker::before {
+  position: absolute;
+  inset: -4px;
+  content: '';
+  border: 1.5px solid color-mix(in srgb, var(--color-accent) 16%, transparent);
+  border-top-color: var(--color-accent);
+  border-right-color: color-mix(in srgb, var(--color-accent) 72%, transparent);
+  border-radius: inherit;
+  animation: thinking-chain-running-ring var(--dur-loop) linear infinite;
+}
+
+.thinking-chain-action.is-active .thinking-chain-marker::after {
+  width: 5px;
+  height: 5px;
+  content: '';
+  border-radius: 999px;
+  background: var(--color-accent);
+}
+
+.thinking-chain-action.is-failed .thinking-chain-marker::after {
+  content: '×';
+  color: var(--color-error);
+}
+
+@keyframes thinking-chain-running-ring {
+  to { transform: rotate(360deg); }
+}
+
+.thinking-chain-action.is-failed .thinking-chain-marker {
+  border-color: color-mix(in srgb, var(--color-error) 62%, transparent);
+  background: color-mix(in srgb, var(--color-error) 30%, var(--thinking-surface));
+}
+
+/* 日期能力判定（服务端在调用前声明该数据源答不了这个日期）：中性态。
+   刻意不用 error / warning 色——它是设计内的结果，不是错误；但也不复用
+   is-complete 的 ✓，否则用户看不出这一轮只拿到参考资料。 */
+.thinking-chain-action.is-capability .thinking-chain-marker {
+  border-color: color-mix(in srgb, var(--color-ink-secondary) 46%, var(--thinking-surface));
+}
+
+.thinking-chain-action.is-capability .thinking-chain-marker::after {
+  content: '–';
+  color: var(--color-ink-secondary);
+}
+
+.thinking-chain-action.is-capability .thinking-chain-action-title {
+  color: color-mix(in srgb, var(--color-ink) 62%, var(--color-ink-secondary));
+}
+
+.thinking-chain-action.is-capability .thinking-chain-duration {
+  color: var(--color-ink-muted);
+}
+
+.thinking-chain-action:hover .thinking-chain-marker {
+  transform: scale(1.08);
+}
+
+.thinking-chain-inline-status {
+  display: none;
+}
+
+.thinking-chain-action.is-complete .thinking-chain-action-title {
+  color: var(--color-ink);
+}
+
+.thinking-chain-action.is-complete .thinking-chain-category-icon {
+  color: color-mix(in srgb, var(--color-ink) 70%, var(--color-ink-secondary)) !important;
+}
+
+.thinking-chain-action.is-complete .thinking-chain-duration {
+  color: var(--color-ink-muted);
+}
+
+.thinking-chain-duration {
+  min-width: 3.75rem;
+  color: color-mix(in srgb, var(--color-accent) 68%, var(--color-ink-secondary));
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.015em;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* `.thinking-chain-developer-detail` 已删：零消费方，而它是整张样式表里
+   唯一一个表外半径（7px —— §Shape 只有 0 / 4 / 8 / full 四档）。 */
+
+.thinking-scroll {
+  scroll-behavior: smooth;
+}
+
+/* 顶部渐隐只在「上方有被裁剪内容」时出现（容器滚动后由 JS 加 has-clip-top）；
+   底部永不渐隐——最新条目在底部，必须始终清晰完整。 */
+.thinking-scroll.has-clip-top {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    black 24px
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    black 24px
+  );
+}
+
+.thinking-scroll::-webkit-scrollbar {
+  width: 3px;
+}
+.thinking-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.thinking-scroll::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  opacity: 0.2;
+  border-radius: 3px;
+}
+
+/* ─── 工具调用内容切换动画（相同工具连续调用合并展示时内容切换） ─── */
+
+@keyframes tool-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.tool-content-animate {
+  animation: tool-content-in var(--dur-slow) var(--ease-decelerate) both;
+}
+
+.thinking-chain-flight {
+  margin: 0.18rem 0 0.02rem 1.2rem;
+}
+
+@media (max-width: 640px) {
+  .thinking-chain-shell {
+    margin: 0.25rem 0 0.45rem;
+    padding: 0.48rem 0.45rem 0.5rem;
+    border-radius: 11px 12px 11px 8px;
+  }
+
+  .thinking-chain-summary-content {
+    gap: 0.3rem;
+  }
+
+  .thinking-chain-summary-content > :not(:first-child) {
+    font-size: 9px;
+  }
+
+  .thinking-chain-rail {
+    margin-left: 0.35rem;
+  }
+
+  .thinking-chain-actions {
+    padding-left: 1.05rem;
+    row-gap: 0.55rem;
+  }
+
+  .thinking-chain-action {
+    padding-right: 0.16rem;
+  }
+
+  .thinking-chain-duration {
+    min-width: 3.3rem;
+    font-size: 9px;
+  }
+}
+
+/* ─── Research Summary（调研执行阶段置顶摘要） ─── */
+
+.research-ticket {
+  isolation: isolate;
+  background: var(--color-panel);
+}
+
+/* `.research-pass-sticky` 与 `.research-pass-current::after`（含
+   `@keyframes research-pass-current-pulse`）已删：两者全仓零消费方。 */
+
+/* ─── Synthesizer 过渡三点动效 ─── */
+
+@keyframes synthesizing-dot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* ─── 流式输出占位：航向摆动 glyph ─── */
+
+/* 产品 logo（lucide PlaneTakeoff）的路径做成 mask 资产，与顶栏 logo 同形。 */
+:root {
+  --streaming-glyph-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 22h20'/%3E%3Cpath d='M6.36 17.4 4 17l-2-4 1.1-.55a2 2 0 0 1 1.8 0l.17.1a2 2 0 0 0 1.8 0L8 12 5 6l.9-.45a2 2 0 0 1 2.09.2l4.02 3a2 2 0 0 0 2.1.2l4.19-2.06a2.41 2.41 0 0 1 1.73-.17L21 7a1.4 1.4 0 0 1 .87 1.99l-.38.76c-.23.46-.6.84-1.07 1.08L7.58 17.2a2 2 0 0 1-1.22.18Z'/%3E%3C/svg%3E");
+}
+
+/* 航向摆动：纸飞机轻微航向摇摆 + 前倾漂移，透明度恒定，靠运动传达「输出中」。 */
+@keyframes streaming-glyph-cruise {
+  0%, 100% { transform: rotate(-6deg) translate(0, 0); }
+  50% { transform: rotate(5deg) translate(1.5px, -1.5px); }
+}
+
+/* glyph 共用基座：约 1em 见方，accent 色经 mask 上色，行内跟随文字末尾。 */
+.streaming-glyph {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.15em;
+  background-color: var(--color-accent);
+  -webkit-mask-image: var(--streaming-glyph-mask);
+  mask-image: var(--streaming-glyph-mask);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  animation: streaming-glyph-cruise var(--dur-loop-drift) var(--ease-standard) infinite;
+}
+
+/* 流式内容末尾的行内 glyph（通过 ::after 伪元素注入到最后一个块级元素内部）。 */
+.markdown-content.is-streaming > *:last-child::after,
+.markdown-content.is-streaming > :is(ul, ol):last-child > li:last-child::after {
+  content: '';
+  margin-left: 6px;
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.15em;
+  background-color: var(--color-accent);
+  -webkit-mask-image: var(--streaming-glyph-mask);
+  mask-image: var(--streaming-glyph-mask);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  animation: streaming-glyph-cruise var(--dur-loop-drift) var(--ease-standard) infinite;
+}
+
+/* 列表：将 glyph 挂到最后一个 li 上，而非 ul/ol 本身。 */
+.markdown-content.is-streaming > :is(ul, ol):last-child::after {
+  content: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Jet-Age Chartroom — homepage empty state (Sheet No.1)
+
+   Drafting furniture (grid / contours / neatline / waypoint pins) + a
+   register-strip composer, revealed by one restrained-axis chart-draw entrance.
+   Motion is tokens-only (transform/opacity), hover is gated to fine pointers,
+   and shadows never transition.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Sheet canvas + faint lat/long grid (chart ink at whisper opacity). */
+.hero-sheet::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(to right, color-mix(in srgb, var(--color-chart) 8%, transparent) 0 1px, transparent 1px 48px),
+    repeating-linear-gradient(to bottom, color-mix(in srgb, var(--color-chart) 8%, transparent) 0 1px, transparent 1px 48px);
+  animation: hero-fade var(--dur-slow) var(--ease-decelerate) both;
+}
+
+/* Contours — four concentric arcs in the top-right, drawn once via dashoffset. */
+.hero-contours {
+  position: absolute;
+  top: -40px;
+  right: -40px;
+  z-index: 0;
+  pointer-events: none;
+}
+.hero-contour {
+  fill: none;
+  stroke: color-mix(in srgb, var(--color-chart) 16%, transparent);
+  stroke-width: 1;
+  animation: hero-contour-draw var(--dur-slow) var(--ease-decelerate) both;
+}
+.hero-contour:nth-child(1) { stroke-dasharray: 566; stroke-dashoffset: 566; animation-delay: 100ms; }
+.hero-contour:nth-child(2) { stroke-dasharray: 880; stroke-dashoffset: 880; animation-delay: 160ms; }
+.hero-contour:nth-child(3) { stroke-dasharray: 1194; stroke-dashoffset: 1194; animation-delay: 220ms; }
+.hero-contour:nth-child(4) { stroke-dasharray: 1508; stroke-dashoffset: 1508; animation-delay: 280ms; }
+
+/* ─── 嵌套自动降档 ─────────────────────────────────────────────────────────────
+   卡档元素套在另一个卡档元素里时，内层落到标签档。
+
+   为什么是一条 CSS 规则、而不是逐个调用点改对：`Button` 这类共享原语在**定义处**
+   根本不知道自己会不会被放进一张卡里 —— 同一枚按钮出现在页面顶层时该是卡档，出现在
+   卡里时该是标签档。逐处判断等于要求每个调用点都记得这件事，而这一轮的起因正是
+   「一个角色两套值」。写成结构规则后，层级由 DOM 决定，不由记性决定。
+
+   这条也是 §Layout「不许卡套卡」的可见对应物：真出现卡套卡时，内层会自己降成标签档，
+   一眼看出来它不是一张独立的卡。 */
+.rounded-card .rounded-card,
+.rounded-card .rounded-t-card {
+  border-radius: var(--radius-label);
+}
+
+/* ─── 地图控件：Leaflet 自带那一套改成产品的语汇 ─────────────────────────────
+   地图是交付面上最大的一块，而它上面的缩放钮与署名一直是 **Leaflet 出厂样式**：纯白底、
+   `rgba(0,0,0,0.2)` 的 2px 边、2px 圆角、22px 的 `+` / `−`、蓝色下划线链接。这些值一个都
+   不在这个产品的表里 —— 半径表是 0/4/8/full，边线只有 `stroke` 两档，字号地板是 11px，
+   而纯黑本身在 §Color 里就不存在（画布是 cream，墨是 `#262420`）。
+
+   一张 cream 图纸中间嵌着一块 Material 风的白色控件，是这一屏最扎眼的一处「不是我们画的」。
+   （Map 控件此前不在任何样式清扫的名单里，工作台/报告的控件从来没被看过。）
+
+   选择器都写成**三个类**（`.leaflet-container .leaflet-bar.leaflet-control`）：`leaflet.css`
+   由组件自己 `import`，Vite 把它排在 `index.css` **之后**，所以两个类打平时它靠顺序赢。
+   这不是权重竞赛的爱好，是那一份样式表的加载位置决定的。 */
+/* ─── 底图的颜色：**这里没有规则，而这是刻意的** ─────────────────────────────
+   早些时候这里有一条 `.leaflet-container .leaflet-tile-pane { filter:
+   grayscale(1) contrast(.92) sepia(.12) brightness(1.04) }`。用户看到真产品之后推翻了
+   它，原话是「为啥他妈的我的地图是黑白的啊」。
+
+   **满格去色的理由是对的，改法不对。** 理由：底图是工作台上面积最大的一块，饱和度完全
+   不同的、一道彩色坐在 cream 图纸中间，等于「这一屏上最大的东西不是这个产品画的」。而
+   `grayscale(1)` 是**满格**去色 —— 底图上的颜色不是装饰，它是水和陆地、公园、道路等级、
+   地铁线。**一个旅行产品把这些压成同一个灰，等于把地图扔了、留下一张地图的画。**
+
+   还有一层：**这个决定的前提后来变了。** 瓦片源从 OSM 默认样式换成了高德 `style=8`，
+   后者的配色承载的信息严格更多 —— 于是同一句滤镜后来扔掉的东西比它被批准时更多。
+   换源那一轮只在注释里写了「这条滤镜对它同样需要」，没有重新量过代价。
+
+   哪天底图又显得吵：走**部分**去色（`grayscale(0.6)` 那一档已经渲出来给用户看过、被否了），
+   或者换一张本来就是浅灰的瓦片源（CARTO Positron / Stadia Toner Lite —— 那是新增外部依赖：
+   配额、ToS、Stadia 还要 key）。**不要再回到满格去色。**
+
+   **而这条的另一半仍然成立**：不论底图怎么处理，
+   **信息层一律不许被滤** —— 图钉、路线、天数色点、弹出框在 `overlay-pane` /
+   `marker-pane` / `popup-pane` 里，滤镜写到 `.leaflet-container` 上会把它们一起漂白，
+   而那时「底图变灰了」也仍然是真的，所以一枚只看瓦片的判据看不出差别。 */
+
+.leaflet-container .leaflet-bar.leaflet-control {
+  border: 1px solid var(--color-stroke);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.leaflet-container .leaflet-bar.leaflet-control a {
+  width: 30px;
+  height: 30px;
+  line-height: 30px;
+  border-bottom: 1px solid var(--color-stroke);
+  background: var(--color-panel);
+  color: var(--color-ink-secondary);
+  /* 字号回到表内：Leaflet 出厂是 22px（`+`/`−` 两个字形），表里没有这一挡。 */
+  font-size: 16px;
+  border-radius: 0;
+  transition: background-color var(--dur-fast) var(--ease-standard),
+              color var(--dur-fast) var(--ease-standard);
+}
+/* 首末两枚要单独写：`leaflet.css` 给它们各一条 `border-radius: 2px 2px 0 0`，权重同为
+   0-3-0，而它加载在后面。外层虽有 `overflow: hidden` 会裁掉，但 2px 这个值不该还在表上。 */
+.leaflet-container .leaflet-bar.leaflet-control a:first-child,
+.leaflet-container .leaflet-bar.leaflet-control a:last-child { border-radius: 0; }
+.leaflet-container .leaflet-bar.leaflet-control a:last-child { border-bottom: 0; }
+
+/* 触摸档的命中区契约在这里补一条 —— **它属于上面第 229 行那一层，只是必须写在这个
+   位置**：`@media` 不增加权重，这条和上面那条 `…a { width: 30px }` 同为 0-3-1，打平时靠出现
+   顺序决定，所以写在触摸块里会静默输给它（第一版就是那么写的）。改动这两段的相对顺序会让这条失效。
+
+   为什么这两枚必须由 CSS 给尺寸：Leaflet 自己生成它们，而它们是 `a` —— 上面那条按元素选的
+   外扩规则**不含 `a`**（含了会伤到正文行内链接与地图署名），所以工作台上这唯一两枚不经过
+   任何产品组件的控件只能在这里直接拿到 44 见方的盒子。
+   字号随之 16px → 18px（两档都在类型表里）：44px 的钮里放 16px 字形显得空。
+   署名那一行不动：13px 小字正是署名该有的样子，它不是控件（判据也照这个条件豁免它）。 */
+@media (pointer: coarse) {
+  .leaflet-container .leaflet-bar.leaflet-control a {
+    width: var(--touch-target-min);
+    height: var(--touch-target-min);
+    line-height: var(--touch-target-min);
+    font-size: 18px;
+  }
+}
+.leaflet-container .leaflet-bar.leaflet-control a:hover {
+  background: var(--color-surface);
+  color: var(--color-ink);
+}
+.leaflet-container .leaflet-bar.leaflet-control a.leaflet-disabled {
+  color: var(--color-ink-muted);
+  background: var(--color-panel);
+}
+.leaflet-container .leaflet-control-attribution.leaflet-control {
+  background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+  color: var(--color-ink-muted);
+  /* 11px 是全站字号地板（§Typography）；Leaflet 出厂配的是纯蓝下划线链接。 */
+  font-size: 11px;
+  padding: 2px 6px;
+}
+.leaflet-container .leaflet-control-attribution.leaflet-control a {
+  color: var(--color-ink-secondary);
+  text-decoration: none;
+}
+.leaflet-container .leaflet-control-attribution.leaflet-control a:hover {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.leaflet-container .leaflet-popup-content-wrapper,
+.leaflet-container .leaflet-popup-tip {
+  border-radius: var(--radius-card);
+  background: var(--color-panel);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ─── 图纸边界 —— neatline 与四角登记刻线 ──────────────────────────────────
+   **一份实现，四个消费者**：空首页图纸、报告封面、工作台外壳、正式结果面。
+
+   此前是两份同名家具，值互不相同：
+     `.hero-neatline` / `.hero-tick*`   inset 20px、框线 .18、刻线 15px / .25、偏移 -1px
+     `.report-cover::before` / `-tick*` inset 0、  框线 .16、刻线 13px / .3、 偏移 0
+   同一件东西两套值 —— 与影子色板、读数声部同一形态。
+
+   哪个值胜出、为什么：框线与刻线取 report 的 .16 / 13px / .3（当时为「读」
+   而不是「绘」专门调过，更克制，且 §Color 的 whisper 上限是 .25 线）；偏移取 hero
+   的 **-1px**，因为刻线要**压在**那条 1px 框线上而不是缩在里面 —— report 的 0
+   会让刻线与框线并排，拐角处看着是两层。
+   `--neatline-inset` 是位置参数（首页图纸留 20px 天头，其余贴边），不是新的一套值。
+
+   ── 框线与刻线走 `--color-ink-rgb`，不写死 `rgba(38, 36, 32, …)` ──────────
+   此前这六行是六个字面 rgba。那既违反「每一只颜色都是一只有名字的 token」，
+   又在深墨底板落地那一刻变成一个**看不见的**缺陷：一件在亮纸上正确的近黑家具压在
+   深墨上就没有了，而「neatline 在那儿」这句话在 DOM 里仍然为真 —— 只按类名存在与否
+   判断的判据分辨不出这两种情况。两档浓度（.16 框线 / .3 刻线）本身没变，它们是
+   §Color 的耳语档，只是现在跟着纸面换墨。 */
+.neatline {
+  position: absolute;
+  inset: var(--neatline-inset, 0);
+  z-index: 0;
+  pointer-events: none;
+  border: 1px solid rgb(var(--color-ink-rgb) / .16);
+}
+.neatline-tick {
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  border: 0 solid rgb(var(--color-ink-rgb) / .3);
+}
+.neatline-tick-tl { top: -1px; left: -1px; border-top-width: 1px; border-left-width: 1px; }
+.neatline-tick-tr { top: -1px; right: -1px; border-top-width: 1px; border-right-width: 1px; }
+.neatline-tick-bl { bottom: -1px; left: -1px; border-bottom-width: 1px; border-left-width: 1px; }
+.neatline-tick-br { bottom: -1px; right: -1px; border-bottom-width: 1px; border-right-width: 1px; }
+/* 只有首页图纸参与一次性入场绘制；其余三处是常驻边界，不画。 */
+.neatline-enter { animation: hero-fade var(--dur-slow) var(--ease-decelerate) both; }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Report cover — the deliverable's masthead.
+
+   The finished plan used to open on a 12px eyebrow, a 24px H1 and one line of
+   prose, so the empty homepage (chart grid, contours, neatline) carried more of
+   the product's identity than the thing the product exists to produce. The cover borrows **exactly one** piece of chart furniture —
+   the neatline with its registration ticks — which is the allowance
+   §Color grants ("other views may adopt a single element
+   deliberately, never by default"). No grid, no contours: those stay on the
+   homepage sheet, and a report is read, not plotted.
+
+   Whisper opacity per the same rule (lines ≤ .25).
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* 封面自己不再画边界 —— 它挂一枚 `<Neatline />`，与首页图纸、工作台外壳同一份实现。 */
+
+/* Boarding-pass ticket perforation — a horizontal tear line with two notch
+   "punches" biting in from the card edges, so the summary card reads as a real
+   torn-off boarding pass. Notch fill matches the page canvas behind the card. */
+.ticket-perf {
+  position: relative;
+  height: 0;
+  border-top: 1.5px dashed var(--color-stroke);
+}
+.ticket-perf::before,
+.ticket-perf::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--color-bg);
+  transform: translateY(-50%);
+}
+.ticket-perf::before { left: -7px; }
+.ticket-perf::after { right: -7px; }
+
+
+/* `.register-strip` 与它的穿孔 `::before` 已删：零消费方。它属于删掉的那张登记条
+   composer —— 合同 §Inputs 已经就地更正过那一段（「a contract describing a screen
+   with no implementation sends the next reader looking for it」），但这 20 行 CSS
+   当时留下了。 */
+
+/* ─── Entrance choreography — one restrained-axis chart-draw, once per mount ─── */
+
+@keyframes hero-fade { from { opacity: 0; } to { opacity: 1; } }
+/* 入场的位移只有一个值：8px，就是 §Motion 的 `slideUp`。
+   这里此前叫 `hero-rise-10`，10px —— 全站入场位移的唯一一个例外，而它没有理由，
+   只是首屏这一句当时想「再多一点」。名字里带着数字的 keyframe 天生会长出第二个。 */
+@keyframes hero-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes hero-contour-draw { to { stroke-dashoffset: 0; } }
+
+
+/* ─── 首屏入场编排 ─────────────────────────────────────────────────────────────
+   顺序：网格 → 等高线 → 图廓 → **标题** → 两个入口的面 → **要填的信息逐行进场**。
+
+   在这一份之前，最后两级根本不存在：`TripPlanner` 身上**一条入场都没有**，所以它在第 0 帧
+   就已经完整地待在屏幕上，而标题要等到 300ms 才升起来 —— **实际顺序是「表单先到、标题后到」，
+   正好是反的**。用户的原话：「我们应该先出现标题，之后后面需要填入的信息依此进入显示。」
+
+   Motion 口径里有一处自相矛盾：一边写着「the H1 rises → the structured entry's rows
+   stagger」，一边写着「A form's fields do not stagger」—— **同一个文件里两句话，对同一个
+   元素给出相反的指示**，而产品两句都没执行。这里按前半句走，后半句收窄到「非首屏的表单」。
+
+   为什么位移只给行、不给面：§Motion「The shell does not move」。面（描边 + 底色）淡入，
+   行升起来。为什么 560ms 起步：标题 300ms 起、320ms 走完，560 时它已经走了八成，
+   接上去读起来是一条连续的编排，而不是两段各自开始的动画。
+
+   跨度 560→800ms = 240ms，在 `stagger.maxTotal` 的 480ms 硬顶之内。
+   `prefers-reduced-motion: reduce` 那一层会把这里每一条的 duration/delay 一起压掉。 */
+/* ─── `backwards` 而不是 `both` ────────────────────────────────────────────────
+   `both` 会把最后一帧**留在元素上**，也就是入场结束后 `transform: translateY(0)` 永久生效。
+   而**一个非 `none` 的 transform 会创建层叠上下文** —— 于是这一节里每一行都成了一个独立的
+   层叠上下文，`z-index: auto`，按 DOM 顺序叠。结果：日期弹层写着 `z-50`、地点候选写着
+   `z-30`，都被**排在它们后面的兄弟行**（提交行 `.mt-7`）盖住，因为 z-index 只在同一个
+   层叠上下文里比得过。
+
+   实测症状是四条判据同时红，报的是 `<div class="mt-7 …"> intercepts pointer events`
+   —— 日历里的日子点不动了。一个纯装饰的入场动画，把两个浮层的可点击性拿掉了。
+
+   `backwards` 只在延迟期间套第一帧，动画结束后回到基础样式：屏幕上一模一样（最后一帧的
+   `opacity: 1 / translateY(0)` 就是静止态），但**不留 transform**，层叠上下文随之消失。
+   浮层只可能在用户点击后出现，那已经在 900ms 之后。 */
+.hero-h1 { animation: hero-rise var(--dur-slow) var(--ease-decelerate) 300ms backwards; }
+
+.hero-sheet section {
+  animation: hero-fade var(--dur-slow) var(--ease-decelerate) 500ms backwards;
+}
+
+.hero-sheet section > * {
+  animation: hero-rise var(--dur-slow) var(--ease-decelerate) backwards;
+}
+
+/* 逐行 40ms（`--stagger-step`）。第七行及以后共用同一帧 —— 硬顶之外不再累加，
+   这正是 `staggerStep(count)` 在 JS 侧做的同一件事。 */
+.hero-sheet section > *:nth-child(1) { animation-delay: 560ms; }
+.hero-sheet section > *:nth-child(2) { animation-delay: 600ms; }
+.hero-sheet section > *:nth-child(3) { animation-delay: 640ms; }
+.hero-sheet section > *:nth-child(4) { animation-delay: 680ms; }
+.hero-sheet section > *:nth-child(5) { animation-delay: 720ms; }
+.hero-sheet section > *:nth-child(6) { animation-delay: 760ms; }
+.hero-sheet section > *:nth-child(n+7) { animation-delay: 800ms; }
+
+

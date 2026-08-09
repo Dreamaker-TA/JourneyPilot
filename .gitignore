@@ -1,0 +1,401 @@
+# =============================================================================
+# JourneyPilot - Git 忽略配置
+# =============================================================================
+
+# =============================================================================
+# 配置文件 (包含敏感信息)
+# =============================================================================
+# 主配置文件
+config.yaml
+
+# 环境变量文件
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+
+# API密钥配置
+api_keys.json
+api_keys.yaml
+secrets.json
+secrets.yaml
+credentials.json
+credentials.yaml
+
+# MCP服务器配置
+
+# =============================================================================
+# 日志文件
+# =============================================================================
+# 所有日志文件
+*.log
+logs/
+frontend/logs/
+mcp_servers/logs/
+frontend/test-results/
+test-results/
+
+# 日志备份文件
+*.log.*
+*.log.gz
+*.log.bak
+
+# =============================================================================
+# 输出和临时文件
+# =============================================================================
+# 输出目录
+outputs/
+output/
+temp/
+tmp/
+cache/
+
+# 会话数据
+sessions/
+session_data/
+chat_history/
+
+# =============================================================================
+# Python 相关
+# =============================================================================
+# uv / 虚拟环境（由 uv sync 生成）
+.venv/
+
+# 字节码文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 分发/打包
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+/lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# 单元测试/覆盖率报告
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# =============================================================================
+# Node.js / Frontend 相关
+# =============================================================================
+# Local Codex / Claude workspace config
+.claude/settings.local.json
+
+# 依赖
+node_modules/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# 运行时数据
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# Grunt intermediate storage
+.grunt
+
+# Bower dependency directory
+bower_components
+
+# node-waf configuration
+.lock-wscript
+
+# Compiled binary addons
+build/Release
+
+# Dependency directories
+jspm_packages/
+
+# TypeScript v1 declaration files
+typings/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# parcel-bundler cache
+.cache
+.parcel-cache
+
+# Next.js build output
+.next
+
+# Nuxt.js build / generate output
+.nuxt
+dist
+
+# Gatsby files
+.cache/
+/public/
+
+# Storybook build outputs
+.out
+.storybook-out
+
+# Temporary folders
+tmp/
+temp/
+
+# =============================================================================
+# 系统文件
+# =============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# =============================================================================
+# IDE 和编辑器
+# =============================================================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.netrwhist
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# =============================================================================
+# 数据库文件
+# =============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# =============================================================================
+# 备份文件
+# =============================================================================
+*.bak
+*.backup
+*.old
+*.orig
+*.save
+
+# =============================================================================
+# 压缩文件
+# =============================================================================
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# =============================================================================
+# Chromedriver 二进制（按需下载）
+chromedriver/
+
+# 特定于项目的忽略
+# =============================================================================
+# 模型权重文件 (通常很大);仅忽略二进制权重, 不忽略 Python 源码
+*.model
+*.pkl
+*.pickle
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+/models/
+
+# 本地知识库与生成数据（不进入开源仓库）
+data/
+# 测试文件
+test_*.py
+*_test.py
+test_output/
+!tests/
+!tests/test_*.py
+!tests/*_test.py
+
+
+# =============================================================================
+# 保留示例文件但忽略实际配置
+# =============================================================================
+!.env.example
+
+.npm-cache/
+.uv-cache/
+
+# Claude Code worktree 工作目录（运行时生成，不入库）
+.claude/worktrees/
+frontend/.env-exemple
+
+# =============================================================================
+# 内部模块（本地保留 / 不开源）
+# =============================================================================
+# 可观测性
+otel-collector-config.yaml
+
+# 前端构建产物（运行 cd frontend && npm run build 重新生成）
+static/
+
+# IDE / 开发过程目录
+.cursor/
+
+cookies.json
+
+landing_page/resource/

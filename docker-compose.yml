@@ -1,0 +1,100 @@
+services:
+  # ──────────────────────────────────────────────────────────
+  # PostgreSQL + pgvector
+  # ──────────────────────────────────────────────────────────
+  postgres:
+    build: ./docker
+    image: journeypilot-postgres:pg18-zhparser
+    container_name: journeypilot-postgres
+    environment:
+      POSTGRES_DB: travel_agent
+      POSTGRES_USER: travel_agent
+      POSTGRES_PASSWORD: travel_agent_pwd
+    ports:
+      # Host 55433 (not 5433): isolate from other local Postgres. Processes on the
+      # host that use this compose stack must set config.yaml database.port: 55433.
+      # config.example.yaml defaults to 5433 for a separate non-compose instance.
+      - "55433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travel_agent -d travel_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # Redis
+  # ──────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: journeypilot-redis
+    ports:
+      # Host 16379 (not 6379): isolate from other local Redis. Host-side config
+      # using this stack: redis.port: 16379. Example defaults stay 6379 for non-compose.
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # ──────────────────────────────────────────────────────────
+  # JourneyPilot API
+  # ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: journeypilot-api
+    ports:
+      - "8001:8001"
+    environment:
+      # 数据库
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: travel_agent
+      DB_USER: travel_agent
+      DB_PASSWORD: travel_agent_pwd
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # 服务器
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8001"
+      SERVER_RELOAD: "false"
+      APP_ENV: production
+      # 本地 embedding 模型缓存
+      HF_HOME: /root/.cache/huggingface
+    env_file:
+      - path: .env  # 可选：将 API key 等敏感信息放在 .env 文件中
+        required: false
+    volumes:
+      - ./outputs:/app/outputs
+      - ./uploads:/app/uploads
+      - ./config.yaml:/app/config.yaml:ro
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/api/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+# 卷名保持原值（不加 journeypilot- 前缀）：重命名会让 Docker 新建空卷、
+# 丢失本地既有数据。容器/镜像名已改为品牌名，卷名不动 = 零迁移成本。
+volumes:
+  postgres_data:
+  redis_data:
+  huggingface_cache:

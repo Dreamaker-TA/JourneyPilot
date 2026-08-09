@@ -1,0 +1,11 @@
+{
+  "snapshot_file": "station_name.js",
+  "source_url": "https://kyfw.12306.cn/otn/resources/js/framework/station_name.js",
+  "fetched_at": "2026-07-29",
+  "http_status": 200,
+  "byte_size": 167709,
+  "record_count": 3375,
+  "station_version": null,
+  "station_version_note": "12306 publishes this file with no version token; byte_size and record_count are the only fingerprint upstream gives. station_snapshot_freshness() therefore judges by age and says so. If a version ever appears, record it here and the version comparison takes over.",
+  "refresh": "Re-download source_url verbatim, update every field above, and restart the backend: station_table() caches the parse for the life of the process (see README)."
+}
