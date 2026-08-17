@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from ..entities.session_title import TITLE_MAX_LEN, derive_session_title
 from ..infrastructure.database import get_db_session
@@ -23,6 +24,10 @@ STATUS_ACTIVE = "active"
 STATUS_INTERRUPTED = "interrupted"
 
 _PREVIEW_MAX_LEN = 120   # 会话预览截断长度
+# 一页最多几个 turn，以及这一页的事件总量上限。两道边界都要有：一个 turn 里可以塞
+# 几百个思考步，只限 turn 数的响应仍然可以大到没人能解析。
+TURN_PAGE_LIMIT = 30
+TURN_PAGE_MAX_EVENTS = 1500
 # 标题上限只有一个，判据与派生都在 `entities/session_title.py`；
 # 前端重命名输入框的 maxLength 与它对齐（`ConversationList`）。
 _TITLE_MAX_LEN = TITLE_MAX_LEN
@@ -41,6 +46,25 @@ def _to_jsonable(value: Any, default: Any) -> Any:
         except Exception:
             return default
     return value
+
+
+def _order_to_cursor(event_order: int) -> str:
+    """游标 = 这个 turn 第一条事件的 `event_order`。
+
+    不用 offset：新消息插进来会让 offset 分页错位，而 `event_order` 一旦写下就不再变。
+    """
+
+    return f"o{int(event_order)}"
+
+
+def _cursor_to_order(cursor: Optional[str]) -> Optional[int]:
+    if not cursor:
+        return None
+    raw = str(cursor)[1:] if str(cursor).startswith("o") else str(cursor)
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _truncate_preview(text: str, max_len: int = _PREVIEW_MAX_LEN) -> str:
@@ -141,6 +165,111 @@ def _normalize_context_compaction_event(value: Any) -> Optional[Dict[str, Any]]:
             if str(item).strip()
         ],
     }
+
+
+def _project_events_to_messages(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把一段会话事件投影成前端读的消息列表。
+
+    **两遍**：思考步在事件顺序上排在它所属的助手消息**之前**（一轮的写入顺序就是
+    message.user → thinking.step* → message.assistant），一遍扫的话它们到达时还没有
+    可挂靠的消息，整条思维链会在回看时消失。
+    """
+
+    messages: List[Dict[str, Any]] = []
+    message_index: Dict[str, int] = {}
+    context_report_meta: Dict[str, Dict[str, Any]] = {}
+    thinking_rows: List[Dict[str, Any]] = []
+
+    for row in rows:
+        event_type = row["event_type"]
+        payload = _to_jsonable(row.get("payload"), {})
+
+        if event_type == "context_report":
+            mid = payload.get("message_id", "")
+            if mid:
+                report = {k: v for k, v in payload.items() if k != "message_id"}
+                context_report_meta[mid] = report
+            continue
+
+        if event_type == "context_compaction":
+            compaction_event = _normalize_context_compaction_event(payload)
+            if compaction_event:
+                messages.append(
+                    {
+                        "id": compaction_event["event_id"],
+                        "role": "system",
+                        "content": "",
+                        "display_content": "",
+                        "timestamp": compaction_event["occurred_at"],
+                        "type": "context_compaction",
+                        "context_compaction": compaction_event,
+                        "thinking_steps": [],
+                    }
+                )
+            continue
+
+        if event_type in ("message.user", "message.assistant"):
+            message_id = payload.get("message_id") or ""
+            msg = {
+                "id": message_id,
+                "role": payload.get("role") or ("user" if event_type == "message.user" else "assistant"),
+                "content": payload.get("content", ""),
+                "display_content": payload.get("display_content", payload.get("content", "")),
+                "timestamp": payload.get("timestamp") or _utc_now_iso(),
+                "type": payload.get("type", "normal"),
+                "task_type": payload.get("task_type"),
+                "agent_name": payload.get("agent_name"),
+                "step_name": payload.get("step_name"),
+                "mode": payload.get("mode"),
+                "run_id": payload.get("run_id", ""),
+                "citations": payload.get("citations") if isinstance(payload.get("citations"), list) else [],
+                "annotations": payload.get("annotations") if isinstance(payload.get("annotations"), list) else [],
+                "trip_summary_card": payload.get("trip_summary_card") if isinstance(payload.get("trip_summary_card"), dict) else None,
+                "thinking_steps": [],
+            }
+            if event_type == "message.assistant" and message_id in context_report_meta:
+                msg["context_report"] = context_report_meta[message_id]
+            message_index[message_id] = len(messages)
+            messages.append(msg)
+            continue
+
+        if event_type == "thinking.step":
+            thinking_rows.append(payload)
+            continue
+
+        # 历史会话里可能仍有 clarify.requested / clarify.resolved 事件行：产品面
+        # 已删除，没有任何消费者。这里不投影它们——把 type="clarify" 或 choice_data
+        # 塞进 messages（无类型 dict，能穿过响应模型）会让前端收到一个类型联合里
+        # 已经不存在的形状。两条消息本体照常渲染，只是不再带澄清卡的元数据。
+        if event_type in ("clarify.requested", "clarify.resolved"):
+            continue
+
+    for payload in thinking_rows:
+        idx = message_index.get(payload.get("message_id", ""))
+        if idx is None:
+            continue
+        step_record: Dict[str, Any] = {
+            "id": payload.get("step_id", ""),
+            "agent_name": payload.get("agent_name", ""),
+            "content": payload.get("content", ""),
+            "step_name": payload.get("step_name", ""),
+            "timestamp": payload.get("timestamp") or _utc_now_iso(),
+            "end_time": payload.get("end_time"),
+        }
+        # 工具调用字段（仅当存在时才写入，避免历史数据污染）
+        if payload.get("is_tool_call"):
+            step_record["is_tool_call"] = True
+            step_record["tool_name"] = payload.get("tool_name", "")
+            step_record["tool_call_id"] = payload.get("tool_call_id", "")
+            step_record["tool_status"] = payload.get("tool_status", "completed")
+            step_record["tool_args"] = payload.get("tool_args", "")
+            step_record["tool_result"] = payload.get("tool_result", "")
+            step_record["tool_category"] = payload.get("tool_category", "other")
+            step_record["from_cache"] = payload.get("from_cache", False)
+            step_record["duration_ms"] = payload.get("duration_ms")
+        messages[idx].setdefault("thinking_steps", []).append(step_record)
+
+    return messages
 
 
 class ChatSessionMemory:
@@ -364,7 +493,6 @@ class ChatSessionMemory:
         step_name: str = "",
         thinking_steps: Optional[List[Dict[str, Any]]] = None,
         context_report: Optional[Dict[str, Any]] = None,
-        context_compaction_event: Optional[Dict[str, Any]] = None,
         citations: Optional[List[Dict[str, Any]]] = None,
         annotations: Optional[List[Dict[str, Any]]] = None,
         trip_summary_card: Optional[Dict[str, Any]] = None,
@@ -373,8 +501,9 @@ class ChatSessionMemory:
     ) -> Dict[str, Any]:
         """
         保存一轮对话。
-        事件顺序：
-          message.user -> context_compaction? -> thinking.step* -> message.assistant
+        事件顺序：message.user -> thinking.step* -> context_report? -> message.assistant，
+        全部共用一个 turn_id。上下文整理的快照不在这里写 —— 它由 `CompactionService`
+        与摘要、新边界同事务落库，自己成一个 turn。
 
         `controlled_trip_identity` 只为 `ensure_session` 而来：这条路径也会创建会话
         （安全拦截那条路不走 `load_session_history`），少传一层就会让同一列出现两种
@@ -389,6 +518,9 @@ class ChatSessionMemory:
         )
 
         thinking_steps = thinking_steps or []
+        # 一轮对话一个 turn id：用户消息、压缩快照、思考步、助手消息共用它，
+        # 分页因此不可能把一轮切成两半。
+        turn_id = f"turn_{uuid.uuid4().hex[:16]}"
 
         events: List[Dict[str, Any]] = []
 
@@ -406,18 +538,6 @@ class ChatSessionMemory:
                 },
             }
         )
-
-        normalized_compaction_event = _normalize_context_compaction_event(context_compaction_event)
-        if normalized_compaction_event:
-            # The compaction happened while preparing this turn.  Persist it
-            # after the triggering user message and before process/assistant
-            # records so history restores its real causal order.
-            events.append(
-                {
-                    "event_type": "context_compaction",
-                    "payload": normalized_compaction_event,
-                }
-            )
 
         for step in thinking_steps:
             events.append(
@@ -505,13 +625,14 @@ class ChatSessionMemory:
                 await session.execute(
                     text("""
                         INSERT INTO chat_session_events
-                        (session_id, event_order, event_type, payload, created_at)
+                        (session_id, event_order, turn_id, event_type, payload, created_at)
                         VALUES
-                        (:sid, :order, :etype, CAST(:payload AS jsonb), NOW())
+                        (:sid, :order, :turn_id, :etype, CAST(:payload AS jsonb), NOW())
                     """),
                     {
                         "sid": session_id,
                         "order": max_order + idx,
+                        "turn_id": turn_id,
                         "etype": event["event_type"],
                         "payload": json.dumps(event["payload"], ensure_ascii=False),
                     },
@@ -560,117 +681,126 @@ class ChatSessionMemory:
     async def get_session_detail(
         self, user_id: str, session_id: str
     ) -> Optional[Dict[str, Any]]:
+        """会话详情 = **最新一页 turn**，不是全量历史。
+
+        一个用了半年的会话有上万条事件，把它们一次投影出来既慢又没人读得完。
+        更早的历史由 `list_turns` 按游标往回取。
+        """
         summary = await self.get_session_summary(user_id, session_id)
         if not summary:
             return None
+        page = await self.list_turns(user_id, session_id)
+        return {
+            **summary,
+            "messages": [message for turn in page["turns"] for message in turn["messages"]],
+            "next_before": page["next_before"],
+            "has_more": page["has_more"],
+            "latest_event_order": page["latest_event_order"],
+        }
 
+    async def list_turns(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        before_turn: Optional[str] = None,
+        limit: int = TURN_PAGE_LIMIT,
+    ) -> Dict[str, Any]:
+        """按 turn 游标往回翻页，时间正序返回这一页。
+
+        **一个 turn 永远整份返回**。游标是这个 turn 第一条事件的 `event_order`：
+        它不随新消息插入而漂移，offset 会。
+        """
+
+        summary = await self.get_session_summary(user_id, session_id)
+        if not summary:
+            return {"turns": [], "next_before": None, "has_more": False, "latest_event_order": 0}
+
+        page_size = max(1, min(int(limit), TURN_PAGE_LIMIT))
+        cursor = _cursor_to_order(before_turn)
         async with get_db_session() as session:
-            result = await session.execute(
+            turn_rows = await session.execute(
                 text("""
-                    SELECT event_type, payload
+                    SELECT turn_id,
+                           min(event_order) AS first_order,
+                           count(*)         AS event_count
                     FROM chat_session_events
                     WHERE session_id = :sid
-                    ORDER BY event_order ASC
+                    GROUP BY turn_id
+                    HAVING (CAST(:cursor AS INTEGER) IS NULL
+                            OR min(event_order) < CAST(:cursor AS INTEGER))
+                    ORDER BY first_order DESC
+                    LIMIT :limit
                 """),
+                {"sid": session_id, "cursor": cursor, "limit": page_size + 1},
+            )
+            candidates = [dict(row) for row in turn_rows.mappings().all()]
+
+            # 页面还有第二道上限：事件总数。一个 turn 里塞了几百个思考步时，
+            # 「30 个 turn」可以是一份没人能解析的响应。
+            selected: List[Dict[str, Any]] = []
+            events_budget = 0
+            for candidate in candidates[:page_size]:
+                if selected and events_budget + int(candidate["event_count"]) > TURN_PAGE_MAX_EVENTS:
+                    break
+                selected.append(candidate)
+                events_budget += int(candidate["event_count"])
+            has_more = len(candidates) > len(selected)
+
+            if not selected:
+                latest = await session.execute(
+                    text(
+                        "SELECT COALESCE(MAX(event_order), 0) FROM chat_session_events "
+                        "WHERE session_id = :sid"
+                    ),
+                    {"sid": session_id},
+                )
+                return {
+                    "turns": [],
+                    "next_before": None,
+                    "has_more": False,
+                    "latest_event_order": int(latest.scalar() or 0),
+                }
+
+            statement = text("""
+                SELECT turn_id, event_order, event_type, payload
+                FROM chat_session_events
+                WHERE session_id = :sid AND turn_id IN :turn_ids
+                ORDER BY event_order ASC
+            """).bindparams(bindparam("turn_ids", expanding=True))
+            event_rows = await session.execute(
+                statement,
+                {"sid": session_id, "turn_ids": [str(row["turn_id"]) for row in selected]},
+            )
+            rows = [dict(row) for row in event_rows.mappings().all()]
+            latest = await session.execute(
+                text(
+                    "SELECT COALESCE(MAX(event_order), 0) FROM chat_session_events "
+                    "WHERE session_id = :sid"
+                ),
                 {"sid": session_id},
             )
-            rows = result.mappings().all()
+            latest_event_order = int(latest.scalar() or 0)
 
-        messages: List[Dict[str, Any]] = []
-        message_index: Dict[str, int] = {}
-        context_report_meta: Dict[str, Dict[str, Any]] = {}
-
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
-            event_type = row["event_type"]
-            payload = _to_jsonable(row.get("payload"), {})
+            grouped.setdefault(str(row["turn_id"]), []).append(row)
 
-            if event_type == "context_report":
-                mid = payload.get("message_id", "")
-                if mid:
-                    report = {k: v for k, v in payload.items() if k != "message_id"}
-                    context_report_meta[mid] = report
-                continue
-
-            if event_type == "context_compaction":
-                compaction_event = _normalize_context_compaction_event(payload)
-                if compaction_event:
-                    messages.append(
-                        {
-                            "id": compaction_event["event_id"],
-                            "role": "system",
-                            "content": "",
-                            "display_content": "",
-                            "timestamp": compaction_event["occurred_at"],
-                            "type": "context_compaction",
-                            "context_compaction": compaction_event,
-                            "thinking_steps": [],
-                        }
-                    )
-                continue
-
-            if event_type in ("message.user", "message.assistant"):
-                message_id = payload.get("message_id") or ""
-                msg = {
-                    "id": message_id,
-                    "role": payload.get("role") or ("user" if event_type == "message.user" else "assistant"),
-                    "content": payload.get("content", ""),
-                    "display_content": payload.get("display_content", payload.get("content", "")),
-                    "timestamp": payload.get("timestamp") or _utc_now_iso(),
-                    "type": payload.get("type", "normal"),
-                    "task_type": payload.get("task_type"),
-                    "agent_name": payload.get("agent_name"),
-                    "step_name": payload.get("step_name"),
-                    "mode": payload.get("mode"),
-                    "run_id": payload.get("run_id", ""),
-                    "citations": payload.get("citations") if isinstance(payload.get("citations"), list) else [],
-                    "annotations": payload.get("annotations") if isinstance(payload.get("annotations"), list) else [],
-                    "trip_summary_card": payload.get("trip_summary_card") if isinstance(payload.get("trip_summary_card"), dict) else None,
-                    "thinking_steps": [],
-                }
-                if event_type == "message.assistant" and message_id in context_report_meta:
-                    msg["context_report"] = context_report_meta[message_id]
-                message_index[message_id] = len(messages)
-                messages.append(msg)
-                continue
-
-            if event_type == "thinking.step":
-                mid = payload.get("message_id", "")
-                idx = message_index.get(mid)
-                if idx is not None:
-                    step_record: Dict[str, Any] = {
-                        "id": payload.get("step_id", ""),
-                        "agent_name": payload.get("agent_name", ""),
-                        "content": payload.get("content", ""),
-                        "step_name": payload.get("step_name", ""),
-                        "timestamp": payload.get("timestamp") or _utc_now_iso(),
-                        "end_time": payload.get("end_time"),
-                    }
-                    # 工具调用字段（仅当存在时才写入，避免历史数据污染）
-                    if payload.get("is_tool_call"):
-                        step_record["is_tool_call"] = True
-                        step_record["tool_name"] = payload.get("tool_name", "")
-                        step_record["tool_call_id"] = payload.get("tool_call_id", "")
-                        step_record["tool_status"] = payload.get("tool_status", "completed")
-                        step_record["tool_args"] = payload.get("tool_args", "")
-                        step_record["tool_result"] = payload.get("tool_result", "")
-                        step_record["tool_category"] = payload.get("tool_category", "other")
-                        step_record["from_cache"] = payload.get("from_cache", False)
-                        step_record["duration_ms"] = payload.get("duration_ms")
-                    messages[idx].setdefault("thinking_steps", []).append(step_record)
-                continue
-
-            # 历史会话里可能仍有 clarify.requested / clarify.resolved 事件行：产品面
-            # 已删除，没有任何消费者。这里不投影它们——把 type="clarify" 或 choice_data
-            # 塞进 messages（无类型 dict，能穿过响应模型）会让前端收到一个类型联合里
-            # 已经不存在的形状。两条消息本体照常渲染，只是不再带澄清卡的元数据。
-            if event_type in ("clarify.requested", "clarify.resolved"):
-                continue
-
-        detail = {
-            **summary,
-            "messages": messages,
+        turns = []
+        for candidate in sorted(selected, key=lambda item: int(item["first_order"])):
+            turn_id = str(candidate["turn_id"])
+            turns.append({
+                "turn_id": turn_id,
+                "cursor": _order_to_cursor(int(candidate["first_order"])),
+                "messages": _project_events_to_messages(grouped.get(turn_id, [])),
+            })
+        return {
+            "turns": turns,
+            "next_before": turns[0]["cursor"] if turns and has_more else None,
+            "has_more": has_more,
+            "latest_event_order": latest_event_order,
         }
-        return detail
+
 
     # -----------------------------------------------------------------------
     # 上下文压缩 (v3)
@@ -707,8 +837,9 @@ class ChatSessionMemory:
     async def get_compaction_boundary(self, user_id: str, session_id: str) -> int:
         """当前 Anchor 摘要覆盖到的最后一条会话事件的 ``event_order``（没压缩过则 0）。
 
-        **这个数的负责层就是这里，全仓只写这一次。** 它由 :meth:`save_anchor` 与摘要
-        本身在同一个事务里落库，读它的只有 :meth:`get_recent_messages_within_token_budget`。
+        **这个数的负责层就是这里，全仓只写这一次。** 它由 :meth:`commit_compaction` 与
+        摘要在同一个事务里落库，读它的是 :meth:`get_recent_messages_within_token_budget`
+        与 :meth:`read_messages_for_compaction`。
         把它算在调用方（比如让每个节点自己数「摘要压了多少条」）就是这个仓最熟的那个
         形状：同一件事定义在多处，其中一份静默胜出。
         """
@@ -726,69 +857,102 @@ class ChatSessionMemory:
             return 0
         return int(row["compaction_boundary_event_order"] or 0)
 
-    async def save_anchor(
+    async def read_messages_for_compaction(
         self,
         user_id: str,
         session_id: str,
-        anchor_data: dict,
-    ) -> None:
-        """将压缩 Anchor 持久化到会话记录，并**在同一个事务里**记下压缩点。
+        *,
+        token_budget: int,
+        max_messages: int,
+        model: str = "gpt-4o",
+    ) -> tuple[List[Dict[str, Any]], int, int]:
+        """取**压缩点之后**、预算之内的消息，返回 `(消息, 起始边界, 实际读到哪一条)`。
 
-        摘要与「摘要覆盖到哪」必须一起落地：只写摘要就是给 prompt 净加 2,000 token
-        而一条旧消息都不减（压缩因此是净亏的）；只写边界就是把没进摘要的历史丢掉。
-        压缩点取写入这一刻会话事件表里的最后一条 —— 触发压缩的那一轮此时还没
-        ``save_turn``，所以本轮的提问不在边界之内，会照常留在下一轮的历史里。
+        往前读、读到预算为止 —— 压缩不再一次加载全部历史。第三个返回值是**真正进了
+        摘要的最后一条**的 `event_order`：把边界推到全部历史的末尾会永久丢掉没进摘要
+        的那一段。
         """
+
+        from .context_builder import count_tokens
+
+        boundary = await self.get_compaction_boundary(user_id, session_id)
+        collected: List[Dict[str, Any]] = []
+        last_included = boundary
+        accumulated = 0
         async with get_db_session() as session:
-            boundary_row = await session.execute(
+            result = await session.execute(
                 text("""
-                    SELECT COALESCE(MAX(event_order), 0) AS boundary
+                    SELECT event_order, event_type, payload
                     FROM chat_session_events
                     WHERE session_id = :sid
+                      AND event_order > :boundary
+                      AND event_type IN ('message.user', 'message.assistant')
+                    ORDER BY event_order ASC
+                    LIMIT :limit
                 """),
-                {"sid": session_id},
+                {"sid": session_id, "boundary": boundary, "limit": max(1, max_messages)},
             )
-            boundary = int((boundary_row.mappings().first() or {}).get("boundary") or 0)
-            await session.execute(
-                text("""
-                    UPDATE chat_sessions
-                    SET anchor_summary    = CAST(:anchor AS jsonb),
-                        compression_count = compression_count + 1,
-                        compaction_boundary_event_order = :boundary,
-                        updated_at        = NOW()
-                    WHERE session_id = :sid AND user_id = :uid
-                """),
-                {
-                    "sid": session_id,
-                    "uid": user_id,
-                    "anchor": json.dumps(anchor_data, ensure_ascii=False),
-                    "boundary": boundary,
-                },
-            )
+            rows = result.mappings().all()
 
-    async def append_context_compaction_event(
+        for row in rows:
+            payload = _to_jsonable(row.get("payload"), {})
+            content = str(payload.get("content") or "")
+            if not content:
+                continue
+            tokens = count_tokens(content, model)
+            if collected and accumulated + tokens > token_budget:
+                break
+            role = "user" if row["event_type"] == "message.user" else "assistant"
+            collected.append({"role": role, "content": content})
+            accumulated += tokens
+            last_included = int(row["event_order"])
+        return collected, boundary, last_included
+
+    async def commit_compaction(
         self,
-        *,
         user_id: str,
         session_id: str,
+        *,
+        anchor_data: dict,
+        expected_boundary: int,
+        new_boundary: int,
         event: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Append a manual compaction snapshot after the latest session event."""
+    ) -> Optional[Dict[str, Any]]:
+        """**一个事务**写下摘要、新边界和时间线上的压缩快照。
+
+        三者拆开写就会有一个中间态：只写摘要等于给 prompt 净加 2,000 token 而一条旧
+        消息都不减，只写边界等于把没进摘要的历史丢掉。
+
+        `expected_boundary` 是 CAS：边界在读取与提交之间被另一次压缩推走了，这一次就
+        整个作废（返回 None），旧摘要原样保留。
+        """
+
         normalized = _normalize_context_compaction_event(event)
         if not normalized:
             raise ValueError("Invalid context compaction event")
 
         async with get_db_session() as session:
-            result = await session.execute(
-                text("SELECT user_id FROM chat_sessions WHERE session_id = :sid"),
-                {"sid": session_id},
+            updated = await session.execute(
+                text("""
+                    UPDATE chat_sessions
+                    SET anchor_summary    = CAST(:anchor AS jsonb),
+                        compression_count = compression_count + 1,
+                        compaction_boundary_event_order = :new_boundary,
+                        updated_at        = NOW()
+                    WHERE session_id = :sid AND user_id = :uid
+                      AND compaction_boundary_event_order = :expected_boundary
+                    RETURNING session_id
+                """),
+                {
+                    "sid": session_id,
+                    "uid": user_id,
+                    "anchor": json.dumps(anchor_data, ensure_ascii=False),
+                    "expected_boundary": expected_boundary,
+                    "new_boundary": new_boundary,
+                },
             )
-            row = result.mappings().first()
-            if not row:
-                raise LookupError("会话不存在")
-            if row["user_id"] != user_id:
-                raise PermissionError("会话不属于当前用户")
-
+            if updated.mappings().first() is None:
+                return None
             max_order_result = await session.execute(
                 text("""
                     SELECT COALESCE(MAX(event_order), 0) AS max_order
@@ -797,64 +961,23 @@ class ChatSessionMemory:
                 """),
                 {"sid": session_id},
             )
-            event_order = int(max_order_result.scalar_one() or 0) + 1
             await session.execute(
                 text("""
                     INSERT INTO chat_session_events
-                    (session_id, event_order, event_type, payload, created_at)
+                    (session_id, event_order, turn_id, event_type, payload, created_at)
                     VALUES
-                    (:sid, :order, 'context_compaction', CAST(:payload AS jsonb), NOW())
+                    (:sid, :order, :turn_id, 'context_compaction',
+                     CAST(:payload AS jsonb), NOW())
                 """),
                 {
                     "sid": session_id,
-                    "order": event_order,
+                    "order": int(max_order_result.scalar_one() or 0) + 1,
+                    # 整理发生在两轮之间，自己成一个 turn。
+                    "turn_id": f"turn_{uuid.uuid4().hex[:16]}",
                     "payload": json.dumps(normalized, ensure_ascii=False),
                 },
             )
-            await session.execute(
-                text("""
-                    UPDATE chat_sessions
-                    SET updated_at = NOW()
-                    WHERE session_id = :sid
-                """),
-                {"sid": session_id},
-            )
-
         return normalized
-
-    async def get_all_messages_for_compression(
-        self, user_id: str, session_id: str
-    ) -> list:
-        """
-        获取当前会话的全量 user + assistant 消息（用于手动压缩）。
-        不限制条数，获取完整对话历史。
-        """
-        summary = await self.get_session_summary(user_id, session_id)
-        if not summary:
-            return []
-
-        async with get_db_session() as session:
-            result = await session.execute(
-                text("""
-                    SELECT event_type, payload
-                    FROM chat_session_events
-                    WHERE session_id = :sid
-                      AND event_type IN ('message.user', 'message.assistant')
-                    ORDER BY event_order ASC
-                """),
-                {"sid": session_id},
-            )
-            rows = result.mappings().all()
-
-        messages = []
-        for row in rows:
-            event_type = row["event_type"]
-            payload = _to_jsonable(row.get("payload"), {})
-            role = "user" if event_type == "message.user" else "assistant"
-            content = str(payload.get("content") or "")
-            if content:
-                messages.append({"role": role, "content": content})
-        return messages
 
     async def delete_session(self, user_id: str, session_id: str) -> bool:
         """删除会话，并取消引用它的未完成后台任务。

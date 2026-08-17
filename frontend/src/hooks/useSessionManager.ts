@@ -245,6 +245,11 @@ export function useSessionManager() {
         tripRunSource: latestRun ? 'live' : 'none',
         tripRunRefreshKey: currentStateRef.current.tripRunRefreshKey,
         currentMessages: projectMessagesForRunLifecycle(messages, currentTripRunStatus),
+        historyPaging: {
+          nextBefore: detail.next_before,
+          hasMore: detail.has_more,
+          loading: false,
+        },
         thinkingSteps: latestAssistantThinkingSteps(restoredStepMessages),
         deliveryBundle,
         deliveryBundleLoadState,
@@ -357,9 +362,39 @@ export function useSessionManager() {
     [dispatch, state.sessions]
   );
 
+  /**
+   * 向上翻一页更早的 turn，前插到当前消息之上。
+   *
+   * 一次只取一页，正在取的时候不重复发 —— 滚动事件密到每帧一次，不挡住就是每帧一个请求。
+   */
+  const loadEarlierHistory = useCallback(async () => {
+    const { currentSessionId, historyPaging } = currentStateRef.current;
+    if (!currentSessionId || !historyPaging.hasMore || historyPaging.loading) return;
+    const cursor = historyPaging.nextBefore;
+    if (!cursor) return;
+
+    dispatch({ type: 'SET_HISTORY_PAGING_LOADING', payload: true });
+    try {
+      const page = await api.getSessionTurns(currentSessionId, cursor);
+      if (currentStateRef.current.currentSessionId !== currentSessionId) return;
+      dispatch({
+        type: 'PREPEND_HISTORY',
+        payload: {
+          messages: page.turns.flatMap((turn) => turn.messages).map(mapMessage),
+          nextBefore: page.next_before,
+          hasMore: page.has_more,
+        },
+      });
+    } catch {
+      // 取不到更早的历史不影响当前这一屏：停掉加载态，用户可以再试一次。
+      dispatch({ type: 'SET_HISTORY_PAGING_LOADING', payload: false });
+    }
+  }, [currentStateRef, dispatch]);
+
   return {
     refreshSessions,
     openSession,
+    loadEarlierHistory,
     initializeSessions,
     deleteSession,
     renameSession,

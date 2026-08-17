@@ -1,0 +1,2416 @@
+{
+  "_note": "由 `journeypilot db write-fingerprint` 生成。这是 revision 0007_chat_turn_id 的结构合同：adoption 判定与 API 只读校验都拿活库指纹与它比对。只包含进摘要的项 —— 装没装 zhparser、实际向量维度是环境事实，不在这里。手工编辑这个文件等于篡改校验基准。",
+  "extensions": [
+    "pgcrypto",
+    "vector"
+  ],
+  "missing_tables": [],
+  "schema_contract_version": "journeypilot.db.v1",
+  "tables": {
+    "background_jobs": {
+      "columns": [
+        {
+          "default": "0",
+          "generated": null,
+          "name": "attempts",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "available_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "completed_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "dedupe_key",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "job_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "job_type",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "last_error_code",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "last_error_summary",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "lease_expires_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "lease_owner",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "5",
+          "generated": null,
+          "name": "max_attempts",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "payload",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": "100",
+          "generated": null,
+          "name": "priority",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "result",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": "'pending'::text",
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (job_id)",
+          "type": "p"
+        },
+        {
+          "definition": "UNIQUE (job_type, dedupe_key)",
+          "type": "u"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_background_jobs_claimable ON public.background_jobs USING btree (priority, created_at) WHERE (status = ANY (ARRAY['pending'::text, 'retry_wait'::text, 'running'::text]))",
+          "name": "idx_background_jobs_claimable"
+        },
+        {
+          "definition": "CREATE INDEX idx_background_jobs_session ON public.background_jobs USING btree (((payload ->> 'session_id'::text))) WHERE (status = ANY (ARRAY['pending'::text, 'retry_wait'::text, 'running'::text]))",
+          "name": "idx_background_jobs_session"
+        },
+        {
+          "definition": "CREATE INDEX idx_background_jobs_type_status ON public.background_jobs USING btree (job_type, status, updated_at)",
+          "name": "idx_background_jobs_type_status"
+        }
+      ]
+    },
+    "chat_session_events": {
+      "columns": [
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "nextval('chat_session_events_event_id_seq'::regclass)",
+          "generated": null,
+          "name": "event_id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "event_order",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "event_type",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "payload",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "session_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "turn_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (event_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_chat_events_session_turn_order ON public.chat_session_events USING btree (session_id, turn_id, event_order)",
+          "name": "idx_chat_events_session_turn_order"
+        },
+        {
+          "definition": "CREATE UNIQUE INDEX idx_chat_session_events_order ON public.chat_session_events USING btree (session_id, event_order)",
+          "name": "idx_chat_session_events_order"
+        }
+      ]
+    },
+    "chat_sessions": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "anchor_summary",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "compaction_boundary_event_order",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "compression_count",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "last_message_preview",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "message_count",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "'fast'::text",
+          "generated": null,
+          "name": "mode",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "pending_clarify",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "session_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'active'::text",
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "title",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (session_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_chat_sessions_user_updated ON public.chat_sessions USING btree (user_id, updated_at DESC)",
+          "name": "idx_chat_sessions_user_updated"
+        }
+      ]
+    },
+    "delivery_bundle_commits_v2": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "base_bundle_id",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "commit_kind",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "idempotency_key",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "inverse_patch",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "metadata",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "request_digest",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "result_bundle_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (result_bundle_id) REFERENCES delivery_bundles_v2(bundle_id)",
+          "type": "f"
+        },
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (run_id, idempotency_key)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_delivery_bundle_commits_v2_run_created ON public.delivery_bundle_commits_v2 USING btree (run_id, created_at DESC)",
+          "name": "idx_delivery_bundle_commits_v2_run_created"
+        }
+      ]
+    },
+    "delivery_bundle_heads_v2": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "current_bundle_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "fact_data_revision",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "weather_data_revision",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "workspace_revision",
+          "not_null": true,
+          "type": "integer"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (current_bundle_id) REFERENCES delivery_bundles_v2(bundle_id)",
+          "type": "f"
+        },
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (run_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": []
+    },
+    "delivery_bundles_v2": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "bundle",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "bundle_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "fact_data_revision",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "manifest",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "weather_data_revision",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "workspace_revision",
+          "not_null": true,
+          "type": "integer"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "FOREIGN KEY (run_id, fact_data_revision) REFERENCES fact_store_v2_revisions(run_id, fact_data_revision)",
+          "type": "f"
+        },
+        {
+          "definition": "FOREIGN KEY (run_id, weather_data_revision) REFERENCES weather_context_v2_revisions(run_id, weather_data_revision)",
+          "type": "f"
+        },
+        {
+          "definition": "FOREIGN KEY (run_id, workspace_revision) REFERENCES trip_workspace_v2_revisions(run_id, workspace_revision)",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (bundle_id)",
+          "type": "p"
+        },
+        {
+          "definition": "UNIQUE (run_id, workspace_revision, fact_data_revision, weather_data_revision)",
+          "type": "u"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_delivery_bundles_v2_run_created ON public.delivery_bundles_v2 USING btree (run_id, created_at DESC)",
+          "name": "idx_delivery_bundles_v2_run_created"
+        }
+      ]
+    },
+    "fact_store_v2_revisions": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "content_hash",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "fact_data_revision",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "snapshot",
+          "not_null": true,
+          "type": "jsonb"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (run_id, fact_data_revision)",
+          "type": "p"
+        }
+      ],
+      "indexes": []
+    },
+    "knowledge_chunks": {
+      "columns": [
+        {
+          "default": "'default'::text",
+          "generated": null,
+          "name": "collection",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "content",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "embedding",
+          "not_null": false,
+          "type": "vector(<embedding_dimensions>)"
+        },
+        {
+          "default": "nextval('knowledge_chunks_id_seq'::regclass)",
+          "generated": null,
+          "name": "id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "metadata",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "original_content",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "source",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": "to_tsvector('<text_search_config>'::regconfig, COALESCE(content, ''::text))",
+          "name": "tsv",
+          "not_null": false,
+          "type": "tsvector"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_knowledge_collection ON public.knowledge_chunks USING btree (collection)",
+          "name": "idx_knowledge_collection"
+        },
+        {
+          "definition": "CREATE INDEX idx_knowledge_embedding ON public.knowledge_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists='100')",
+          "name": "idx_knowledge_embedding"
+        },
+        {
+          "definition": "CREATE INDEX idx_knowledge_tsv ON public.knowledge_chunks USING gin (tsv)",
+          "name": "idx_knowledge_tsv"
+        }
+      ]
+    },
+    "knowledge_documents": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "collection",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "content",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "nextval('knowledge_documents_id_seq'::regclass)",
+          "generated": null,
+          "name": "id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "metadata",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "source",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (id)",
+          "type": "p"
+        },
+        {
+          "definition": "UNIQUE (collection, source)",
+          "type": "u"
+        }
+      ],
+      "indexes": []
+    },
+    "memory_entities": {
+      "columns": [
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "embedding",
+          "not_null": false,
+          "type": "vector(<embedding_dimensions>)"
+        },
+        {
+          "default": "nextval('memory_entities_entity_id_seq'::regclass)",
+          "generated": null,
+          "name": "entity_id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "entity_type",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "name",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "properties",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (entity_id)",
+          "type": "p"
+        },
+        {
+          "definition": "UNIQUE (user_id, name, entity_type)",
+          "type": "u"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_memory_entities_user_type ON public.memory_entities USING btree (user_id, entity_type)",
+          "name": "idx_memory_entities_user_type"
+        }
+      ]
+    },
+    "memory_facts": {
+      "columns": [
+        {
+          "default": "'preference'::text",
+          "generated": null,
+          "name": "category",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "content",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "embedding",
+          "not_null": false,
+          "type": "vector(<embedding_dimensions>)"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "expires_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "fact_digest",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "nextval('memory_facts_fact_id_seq'::regclass)",
+          "generated": null,
+          "name": "fact_id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": "5",
+          "generated": null,
+          "name": "importance",
+          "not_null": true,
+          "type": "smallint"
+        },
+        {
+          "default": "'standard'::text",
+          "generated": null,
+          "name": "retention_category",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "retention_policy",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "session_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "source_message_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (fact_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE UNIQUE INDEX idx_memory_facts_digest ON public.memory_facts USING btree (user_id, fact_digest) WHERE (fact_digest IS NOT NULL)",
+          "name": "idx_memory_facts_digest"
+        },
+        {
+          "definition": "CREATE INDEX idx_memory_facts_embedding ON public.memory_facts USING ivfflat (embedding vector_cosine_ops) WITH (lists='50')",
+          "name": "idx_memory_facts_embedding"
+        },
+        {
+          "definition": "CREATE INDEX idx_memory_facts_expires_at ON public.memory_facts USING btree (expires_at) WHERE (expires_at IS NOT NULL)",
+          "name": "idx_memory_facts_expires_at"
+        },
+        {
+          "definition": "CREATE INDEX idx_memory_facts_user_category ON public.memory_facts USING btree (user_id, category, created_at DESC)",
+          "name": "idx_memory_facts_user_category"
+        },
+        {
+          "definition": "CREATE INDEX idx_memory_facts_user_created ON public.memory_facts USING btree (user_id, created_at DESC)",
+          "name": "idx_memory_facts_user_created"
+        },
+        {
+          "definition": "CREATE INDEX idx_memory_facts_user_expires_created ON public.memory_facts USING btree (user_id, expires_at, created_at DESC)",
+          "name": "idx_memory_facts_user_expires_created"
+        }
+      ]
+    },
+    "memory_forgetting_audits": {
+      "columns": [
+        {
+          "default": "0",
+          "generated": null,
+          "name": "affected_entities",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "affected_facts",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "affected_profiles",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "affected_relations",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "affected_session_anchors",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "boundary",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "category",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "fact_id",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "metadata",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "request_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "scope",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (request_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_memory_forgetting_audits_user_created ON public.memory_forgetting_audits USING btree (user_id, created_at DESC)",
+          "name": "idx_memory_forgetting_audits_user_created"
+        }
+      ]
+    },
+    "memory_relations": {
+      "columns": [
+        {
+          "default": "1.0",
+          "generated": null,
+          "name": "confidence",
+          "not_null": true,
+          "type": "double precision"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "evidence",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "relation",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "nextval('memory_relations_relation_id_seq'::regclass)",
+          "generated": null,
+          "name": "relation_id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "source_id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "source_session",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "target_id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "valid_from",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (source_id) REFERENCES memory_entities(entity_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "FOREIGN KEY (target_id) REFERENCES memory_entities(entity_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (relation_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_memory_relations_source ON public.memory_relations USING btree (source_id)",
+          "name": "idx_memory_relations_source"
+        },
+        {
+          "definition": "CREATE INDEX idx_memory_relations_target ON public.memory_relations USING btree (target_id)",
+          "name": "idx_memory_relations_target"
+        },
+        {
+          "definition": "CREATE INDEX idx_memory_relations_user ON public.memory_relations USING btree (user_id)",
+          "name": "idx_memory_relations_user"
+        },
+        {
+          "definition": "CREATE UNIQUE INDEX uq_memory_relations_edge ON public.memory_relations USING btree (user_id, source_id, target_id, relation)",
+          "name": "uq_memory_relations_edge"
+        }
+      ]
+    },
+    "product_configurations": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "config",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "config_key",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (config_key)",
+          "type": "p"
+        }
+      ],
+      "indexes": []
+    },
+    "run_llm_calls": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "agent",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "cached_input_tokens",
+          "not_null": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "cost_usd",
+          "not_null": false,
+          "type": "double precision"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "end_ts",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "false",
+          "generated": null,
+          "name": "estimated",
+          "not_null": true,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "input_tokens",
+          "not_null": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "latency_ms",
+          "not_null": false,
+          "type": "double precision"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "model_request",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "model_response",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "node",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "output_tokens",
+          "not_null": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "provider",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "reasoning_output_tokens",
+          "not_null": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "start_ts",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "'ok'::text",
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "false",
+          "generated": null,
+          "name": "stream",
+          "not_null": true,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "tier",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "ttft_ms",
+          "not_null": false,
+          "type": "double precision"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_run_llm_calls_run_start ON public.run_llm_calls USING btree (run_id, start_ts)",
+          "name": "idx_run_llm_calls_run_start"
+        }
+      ]
+    },
+    "tool_execution_audits": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "args_digest",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "audit_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'other'::text",
+          "generated": null,
+          "name": "category",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "degradation_reason",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "error",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "false",
+          "generated": null,
+          "name": "evidence_allowed",
+          "not_null": true,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "fallback_from",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "fallback_to",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "gateway_decision",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "metadata",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": "'low'::text",
+          "generated": null,
+          "name": "operation_sensitivity",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'read_only'::text",
+          "generated": null,
+          "name": "permission_class",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "false",
+          "generated": null,
+          "name": "quarantined",
+          "not_null": true,
+          "type": "boolean"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "result_digest",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "server_name",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "'tool'::text",
+          "generated": null,
+          "name": "source_type",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "tool_name",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "false",
+          "generated": null,
+          "name": "untrusted_content",
+          "not_null": true,
+          "type": "boolean"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE SET NULL",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (audit_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_tool_audits_run_created ON public.tool_execution_audits USING btree (run_id, created_at DESC)",
+          "name": "idx_tool_audits_run_created"
+        },
+        {
+          "definition": "CREATE INDEX idx_tool_audits_run_risky_status ON public.tool_execution_audits USING btree (run_id, status) WHERE (status = ANY (ARRAY['blocked'::text, 'degraded'::text, 'failed'::text]))",
+          "name": "idx_tool_audits_run_risky_status"
+        },
+        {
+          "definition": "CREATE INDEX idx_tool_audits_status_created ON public.tool_execution_audits USING btree (status, created_at DESC)",
+          "name": "idx_tool_audits_status_created"
+        },
+        {
+          "definition": "CREATE INDEX idx_tool_audits_tool_created ON public.tool_execution_audits USING btree (tool_name, created_at DESC)",
+          "name": "idx_tool_audits_tool_created"
+        }
+      ]
+    },
+    "travel_presets": {
+      "columns": [
+        {
+          "default": "'custom'::text",
+          "generated": null,
+          "name": "category",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "constraints",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "description",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'compass'::text",
+          "generated": null,
+          "name": "icon",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "(gen_random_uuid())::text",
+          "generated": null,
+          "name": "id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "instructions",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "false",
+          "generated": null,
+          "name": "is_preset",
+          "not_null": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "name",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "usage_count",
+          "not_null": false,
+          "type": "integer"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_travel_presets_system ON public.travel_presets USING btree (is_preset) WHERE (is_preset = true)",
+          "name": "idx_travel_presets_system"
+        },
+        {
+          "definition": "CREATE INDEX idx_travel_presets_user_id ON public.travel_presets USING btree (user_id)",
+          "name": "idx_travel_presets_user_id"
+        }
+      ]
+    },
+    "trip_run_commands": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "claimed_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "claimed_by",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "command_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "command_type",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "consumed_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "error_code",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "payload",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "request_digest",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "result",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'pending'::text",
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (command_id)",
+          "type": "p"
+        },
+        {
+          "definition": "UNIQUE (run_id, request_digest)",
+          "type": "u"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_trip_run_commands_open ON public.trip_run_commands USING btree (status, command_type) WHERE (status = ANY (ARRAY['pending'::text, 'claimed'::text]))",
+          "name": "idx_trip_run_commands_open"
+        },
+        {
+          "definition": "CREATE INDEX idx_trip_run_commands_pending ON public.trip_run_commands USING btree (run_id, status, created_at) WHERE (status = 'pending'::text)",
+          "name": "idx_trip_run_commands_pending"
+        }
+      ]
+    },
+    "trip_run_events": {
+      "columns": [
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "nextval('trip_run_events_event_id_seq'::regclass)",
+          "generated": null,
+          "name": "event_id",
+          "not_null": true,
+          "type": "bigint"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "event_type",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "payload",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "sequence",
+          "not_null": true,
+          "type": "integer"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (event_id)",
+          "type": "p"
+        },
+        {
+          "definition": "UNIQUE (run_id, sequence)",
+          "type": "u"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_trip_run_events_run_sequence ON public.trip_run_events USING btree (run_id, sequence)",
+          "name": "idx_trip_run_events_run_sequence"
+        },
+        {
+          "definition": "CREATE INDEX idx_trip_run_events_type ON public.trip_run_events USING btree (event_type)",
+          "name": "idx_trip_run_events_type"
+        }
+      ]
+    },
+    "trip_run_executions": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "executor_id",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "heartbeat_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "last_safe_checkpoint_id",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "lease_acquired_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "lease_expires_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "lease_token",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "process_started_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "recovery_reason",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "'idle'::text",
+          "generated": null,
+          "name": "recovery_status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (run_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_trip_run_executions_lease_expires ON public.trip_run_executions USING btree (lease_expires_at)",
+          "name": "idx_trip_run_executions_lease_expires"
+        },
+        {
+          "definition": "CREATE INDEX idx_trip_run_executions_recovery_status ON public.trip_run_executions USING btree (recovery_status)",
+          "name": "idx_trip_run_executions_recovery_status"
+        }
+      ]
+    },
+    "trip_run_states": {
+      "columns": [
+        {
+          "default": "'[]'::jsonb",
+          "generated": null,
+          "name": "completed_nodes",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "completion_audit",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "current_node",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "last_error",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "latest_state_summary",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "pending_monitor_trigger_count",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "pending_user_choice",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'created'::text",
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "trace_event_count",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (run_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_trip_run_states_status ON public.trip_run_states USING btree (status)",
+          "name": "idx_trip_run_states_status"
+        }
+      ]
+    },
+    "trip_runs": {
+      "columns": [
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "assistant_message_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "1",
+          "generated": null,
+          "name": "attempt",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "cancelled_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "checkpoint_ns",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "completed_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "controlled_trip_identity",
+          "not_null": false,
+          "type": "jsonb"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "current_node",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "last_checkpoint_id",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "last_error_code",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "last_error_message",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "'deep'::text",
+          "generated": null,
+          "name": "mode",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "parent_run_id",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "request_message_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'clarify_only'::text",
+          "generated": null,
+          "name": "resume_policy",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "resume_token_hash",
+          "not_null": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "session_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "started_at",
+          "not_null": false,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "'created'::text",
+          "generated": null,
+          "name": "status",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (run_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": [
+        {
+          "definition": "CREATE INDEX idx_trip_runs_session_updated ON public.trip_runs USING btree (session_id, updated_at DESC)",
+          "name": "idx_trip_runs_session_updated"
+        },
+        {
+          "definition": "CREATE INDEX idx_trip_runs_status_updated ON public.trip_runs USING btree (status, updated_at DESC)",
+          "name": "idx_trip_runs_status_updated"
+        },
+        {
+          "definition": "CREATE INDEX idx_trip_runs_user_updated ON public.trip_runs USING btree (user_id, updated_at DESC)",
+          "name": "idx_trip_runs_user_updated"
+        }
+      ]
+    },
+    "trip_workspace_v2_revisions": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "content_hash",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "snapshot",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "workspace_revision",
+          "not_null": true,
+          "type": "integer"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (run_id, workspace_revision)",
+          "type": "p"
+        }
+      ],
+      "indexes": []
+    },
+    "user_profiles": {
+      "columns": [
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "auto_portrait",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "''::text",
+          "generated": null,
+          "name": "display_name",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "'{}'::jsonb",
+          "generated": null,
+          "name": "preferences",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": "0",
+          "generated": null,
+          "name": "revision",
+          "not_null": true,
+          "type": "integer"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "updated_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": "'local'::text",
+          "generated": null,
+          "name": "user_id",
+          "not_null": true,
+          "type": "text"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "PRIMARY KEY (user_id)",
+          "type": "p"
+        }
+      ],
+      "indexes": []
+    },
+    "weather_context_v2_revisions": {
+      "columns": [
+        {
+          "default": null,
+          "generated": null,
+          "name": "content_hash",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": "now()",
+          "generated": null,
+          "name": "created_at",
+          "not_null": true,
+          "type": "timestamp with time zone"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "run_id",
+          "not_null": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "snapshot",
+          "not_null": true,
+          "type": "jsonb"
+        },
+        {
+          "default": null,
+          "generated": null,
+          "name": "weather_data_revision",
+          "not_null": true,
+          "type": "integer"
+        }
+      ],
+      "constraints": [
+        {
+          "definition": "FOREIGN KEY (run_id) REFERENCES trip_runs(run_id) ON DELETE CASCADE",
+          "type": "f"
+        },
+        {
+          "definition": "PRIMARY KEY (run_id, weather_data_revision)",
+          "type": "p"
+        }
+      ],
+      "indexes": []
+    }
+  }
+}

@@ -16,6 +16,7 @@ import type {
   MemoryRetentionCleanupRequest,
   ModelConfigRequest,
   SessionDetail,
+  SessionTurnPage,
   SessionSummary,
   SystemConfig,
   ToolInfo,
@@ -412,6 +413,14 @@ export const api = {
 
   async getSessionDetail(sessionId: string): Promise<SessionDetail> {
     return fetchJson<SessionDetail>(`/user/sessions/${encodeURIComponent(sessionId)}`);
+  },
+
+  /** 往回取一页更早的 turn。不带游标 = 最新一页。 */
+  async getSessionTurns(sessionId: string, beforeTurn?: string | null): Promise<SessionTurnPage> {
+    const query = beforeTurn ? `?before_turn=${encodeURIComponent(beforeTurn)}` : '';
+    return fetchJson<SessionTurnPage>(
+      `/sessions/${encodeURIComponent(sessionId)}/turns${query}`
+    );
   },
 
   async deleteSession(sessionId: string): Promise<void> {

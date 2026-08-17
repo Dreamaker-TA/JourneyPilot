@@ -157,18 +157,6 @@ async def _check_and_handle_compaction_deep(
     ``constraint_normalizer`` 之前，此刻还没有 pack，也就无从知道本轮到底有哪几条
     信息会进 prompt。它现在由 ``constraint_normalizer_node`` 发（见那里）。
     """
-    from ...memory.compressor import AnchorSummary, ContextCompressor, build_context_compaction_event
-
-    # 不设条数上限：裁剪与压缩判断都归预算层。
-    raw_history = session_history_for_context_builder(state)
-
-    session_anchor_obj = None
-    if state.session_anchor:
-        try:
-            session_anchor_obj = AnchorSummary.from_dict(state.session_anchor)
-        except Exception as e:
-            logger.debug("AnchorSummary 解析失败（压缩检测）: %s", e)
-
     # 压缩判断只看会话轴（历史消息 + anchor + 基础 system prompt），偏好与画像的
     # 开销落在 worker 的 prompt 上，不在这条轴上累积 —— 把它们算进阈值会让压缩在
     # 错误的时刻触发。这条轴是唯一的压缩判据。
@@ -178,37 +166,30 @@ async def _check_and_handle_compaction_deep(
 
     compaction_updates: dict = {}
     if built_ctx.needs_compaction and stream_queue is not None:
-        compressor = ContextCompressor()
+        from ...memory.compaction import get_compaction_service
+
         try:
-            from ...memory.chat_session import ChatSessionMemory
-            anchor = await compressor.compress(
-                messages=raw_history,
-                existing_anchor=session_anchor_obj,
-            )
-            chat_session_mem = ChatSessionMemory()
-            await chat_session_mem.save_anchor(
+            result = await get_compaction_service().compact(
                 user_id=state.user_id or "",
                 session_id=state.session_id or "",
-                anchor_data=anchor.to_dict(),
+                source="automatic",
             )
-            await stream_queue.put((
-                "context_compaction",
-                _CLARIFIER_NODE,
-                build_context_compaction_event(anchor, source="automatic"),
-            ))
+        except Exception as e:  # 压缩涉及 DB + LLM 多步异步操作，需 catch-all 保证主流程不中断
+            # 失败就照原上下文继续。这条路径上没有「压缩进度」这一类事件了
+            # （见 ``api/routes/chat_stream_handlers.py`` 里那段说明）：本轮压缩没成，
+            # ``session_compacted_this_turn`` 也就不会被写，透镜自然不印那句话。
+            logger.error(f"Scope: Deep 模式自动压缩失败: {e}")
+            result = None
+        if result is not None:
+            await stream_queue.put(("context_compaction", _CLARIFIER_NODE, result.event))
             compaction_updates = {
-                "session_anchor": anchor.to_dict(),
+                "session_anchor": result.anchor.to_dict(),
                 "session_compressed": True,
                 # 上下文透镜要印「较早的对话已整理」，而发那份报告的是下游的
                 # constraint_normalizer（只有它手里才有 pack）。这个布尔是那句话
                 # 唯一的传递方式：一个写入点（这里）、一个读取点（那里）。
                 "session_compacted_this_turn": True,
             }
-        except Exception as e:  # 压缩涉及 DB + LLM 多步异步操作，需 catch-all 保证主流程不中断
-            # 失败就照原上下文继续。这条路径上没有「压缩进度」这一类事件了
-            # （见 ``api/routes/chat_stream_handlers.py`` 里那段说明）：本轮压缩没成，
-            # ``session_compacted_this_turn`` 也就不会被写，透镜自然不印那句话。
-            logger.error(f"Scope: Deep 模式自动压缩失败: {e}")
 
     return compaction_updates
 

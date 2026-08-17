@@ -620,29 +620,27 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
     )
 
     # ── 压缩信号处理 ──────────────────────────────────────────────────────
+    # 一次请求最多压一轮（``ContextBudget.max_compaction_rounds_per_request``）：
+    # 压完立刻用新 Anchor 重装一次上下文，不再回头看还需不需要压。
     context_compaction: Dict[str, Any] = {"triggered": False}
     if built_ctx.needs_compaction and stream_queue is not None:
-        # 执行压缩
-        from ...memory.compressor import ContextCompressor, build_context_compaction_event
-        from ...memory.chat_session import ChatSessionMemory
-        compressor = ContextCompressor()
+        from ...memory.compaction import get_compaction_service
+
         try:
-            anchor = await compressor.compress(
-                messages=raw_history,
-                existing_anchor=session_anchor_obj,
-            )
-            # 持久化 Anchor 到 DB
-            chat_session_mem = ChatSessionMemory()
-            await chat_session_mem.save_anchor(
+            result = await get_compaction_service().compact(
                 user_id=state.user_id or "",
                 session_id=state.session_id or "",
-                anchor_data=anchor.to_dict(),
+                source="automatic",
             )
-            # 更新本地 anchor 对象，用于下面重新构建上下文
+        except Exception as e:
+            # 压缩失败就照原上下文继续，不额外发事件：这条路径上没有「压缩进度」这
+            # 一类事件了（见 ``chat_stream_handlers`` 里那段说明），而本轮压缩没成，
+            # 下面的 ``context_report`` 自然报 triggered=False。
+            logger.error(f"FastAnswer: 自动压缩失败，继续使用原始上下文: {e}")
+            result = None
+        if result is not None:
+            anchor = result.anchor
             session_anchor_obj = anchor
-            logger.info(
-                f"FastAnswer: 自动压缩完成 tokens {anchor.tokens_before} → {anchor.tokens_after}"
-            )
             context_compaction = {
                 "triggered": True,
                 "tokens_before": anchor.tokens_before,
@@ -651,12 +649,7 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
                 "summary_preview": anchor.summary[:200]
                 + ("..." if len(anchor.summary) > 200 else ""),
             }
-            await stream_queue.put((
-                "context_compaction",
-                _NODE_NAME,
-                build_context_compaction_event(anchor, source="automatic"),
-            ))
-            # 用新 Anchor 重新构建上下文
+            await stream_queue.put(("context_compaction", _NODE_NAME, result.event))
             built_ctx = await ctx_builder.build_context(
                 session_id=state.session_id or "",
                 system_prompt=base_system,
@@ -664,11 +657,6 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
                 session_anchor=session_anchor_obj,
                 session_compressed=True,
             )
-        except Exception as e:
-            # 压缩失败就照原上下文继续，不额外发事件：这条路径上没有「压缩进度」这
-            # 一类事件了（见 ``chat_stream_handlers`` 里那段说明），而本轮压缩没成，
-            # 下面的 ``context_report`` 自然报 triggered=False。
-            logger.error(f"FastAnswer: 自动压缩失败，继续使用原始上下文: {e}")
 
     # context_report：压缩结论出来之后随流下发一次。
     # 列的是 ``referenced_context_sections(pack)`` —— 与 ``format_constraint_pack_for_prompt``
@@ -697,7 +685,7 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
     # ``session_compressed=True`` 重新装配过，``needs_compaction`` 必然是 False，
     # 于是「成功不写、失败反而可能写」。压缩这件事在这条路径上的出口只有一个 ——
     # 下面已经发过的 ``context_report``（连同持久化用的 ``context_compaction`` 事件），
-    # 新 Anchor 本身由 ``save_anchor`` 落库，下一轮由载入器读回来。
+    # 新 Anchor 本身由 ``CompactionService`` 落库，下一轮由载入器读回来。
 
     # 轻量 RAG（Hybrid Search + Query Rewriting，单路改写保持低延迟）
     # 设计取舍：fast_answer 关闭 HyDE / 多路改写 / 精排，但**不**关闭分级器。

@@ -1,111 +1,70 @@
-"""
-会话压缩 API：将当前会话历史原地压缩为 Anchor Summary。
-压缩惠及当前对话——生成的 Anchor 写回同一会话，后续构建上下文时以
-「anchor + 压缩点之后的近期消息」组装，不再派生新会话。
+"""会话相关 API：按 turn 分页回看历史，以及手动整理上下文。
 
-「压缩点之后」这句话由一个真实的值执行：``chat_sessions.compaction_boundary_event_order``，
-由 ``ChatSessionMemory.save_anchor`` 与摘要在同一个事务里写下，
-由 ``get_recent_messages_within_token_budget`` 读。
+分页按 **turn** 走，不按原始事件：一个 turn 里有用户消息、思考步、上下文报告与助手
+消息，按事件游标切页会把它们切到两页，前端拼不回来。
+
+手动整理与自动压缩共用 `CompactionService` —— 摘要、新边界与时间线快照由它在同一个
+事务里写下。
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ...builders import get_components
 from ...local_profile import LOCAL_USER_ID
-from ...memory.compressor import AnchorSummary, ContextCompressor, build_context_compaction_event
+from ...memory.chat_session import TURN_PAGE_LIMIT
+from ...memory.compaction import get_compaction_service
+from ..schemas import SessionTurnPage
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["sessions"])
 
 
+@router.get("/sessions/{session_id}/turns", response_model=SessionTurnPage)
+async def list_session_turns(
+    session_id: str,
+    before_turn: str | None = Query(default=None),
+    limit: int = Query(default=TURN_PAGE_LIMIT, ge=1, le=TURN_PAGE_LIMIT),
+):
+    """按 turn 游标往回取一页历史。不带游标就是最新一页。"""
+
+    components = get_components()
+    try:
+        return await components.chat_session_memory.list_turns(
+            LOCAL_USER_ID,
+            session_id,
+            before_turn=before_turn,
+            limit=limit,
+        )
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    except Exception as e:
+        logger.error(f"读取会话分页失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="读取会话历史失败")
+
+
 @router.post("/sessions/{session_id}/compact")
 async def compact_session(session_id: str):
+    """手动整理：把压缩点之后、预算之内的历史折叠进 Anchor Summary。
+
+    返回时间线上那一枚不可变的 `context_compaction` 快照。
     """
-    手动压缩 API：将当前会话所有历史原地压缩为 Anchor Summary，写回当前会话。
 
-    压缩后的 Anchor 存在同一会话的 anchor_summary 列上（与自动压缩共用同一次
-    ``save_anchor``，所以压缩点由同一个事务一起写下），后续任何一轮对话构建上下文时
-    都会读取该 Anchor 注入 system prompt，并叠加**压缩点之后**的近期消息——已折叠进
-    摘要的早期历史不再逐字重复注入。原会话的消息记录本身不删除，历史在界面上仍可回看。
-
-    Response: one immutable context_compaction event containing the full
-    summary and every explicit planning constraint.
-    """
-    components = get_components()
-
-    # 获取全量消息 + 当前会话已有 Anchor（用于增量合并）
     try:
-        all_messages = await components.chat_session_memory.get_all_messages_for_compression(
+        result = await get_compaction_service().compact(
             user_id=LOCAL_USER_ID,
             session_id=session_id,
-        )
-        existing_anchor_raw, _ = await components.chat_session_memory.get_anchor(
-            user_id=LOCAL_USER_ID,
-            session_id=session_id,
+            source="manual",
         )
     except PermissionError:
         raise HTTPException(status_code=403, detail="无权访问该会话")
     except Exception as e:
-        logger.error(f"手动压缩：加载会话历史失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="加载会话历史失败")
+        logger.error(f"手动压缩失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="上下文整理失败，请稍后重试")
 
-    if not all_messages:
-        raise HTTPException(status_code=400, detail="会话中无可压缩的消息")
-
-    # 解析已有 Anchor（有则将新信息合并进去，保持完整性）
-    existing_anchor = None
-    if existing_anchor_raw:
-        try:
-            existing_anchor = AnchorSummary.from_dict(existing_anchor_raw)
-        except Exception:
-            existing_anchor = None
-
-    # 执行压缩
-    try:
-        compressor = ContextCompressor()
-        anchor = await compressor.compress(
-            messages=all_messages,
-            existing_anchor=existing_anchor,
-        )
-    except Exception as e:
-        logger.error(f"手动压缩：压缩失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="上下文压缩失败，请稍后重试")
-
-    # 原地写回当前会话——与 fast_answer / scope 节点的自动压缩共用 save_anchor：
-    # 更新 anchor_summary 列并递增 compression_count，后续构建上下文即读到它。
-    try:
-        await components.chat_session_memory.save_anchor(
-            user_id=LOCAL_USER_ID,
-            session_id=session_id,
-            anchor_data=anchor.to_dict(),
-        )
-    except Exception as e:
-        logger.error(f"手动压缩：写回 Anchor 失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="上下文整理保存失败，请稍后重试")
-
-    event = build_context_compaction_event(anchor, source="manual")
-    try:
-        event = await components.chat_session_memory.append_context_compaction_event(
-            user_id=LOCAL_USER_ID,
-            session_id=session_id,
-            event=event,
-        )
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="无权访问该会话")
-    except LookupError:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    except Exception as e:
-        logger.error(f"手动压缩：写入会话事件失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="上下文整理已完成，但记录会话事件失败，请稍后刷新")
-
-    logger.info(
-        f"手动压缩完成（原地）: session={session_id}, "
-        f"messages={len(all_messages)}, "
-        f"tokens {anchor.tokens_before} → {anchor.tokens_after}"
-    )
-
-    return event
+    if result is None:
+        raise HTTPException(status_code=400, detail="会话中无可整理的消息")
+    return result.event

@@ -107,7 +107,6 @@ class SSEContext:
     trace_events: List[Dict[str, Any]] = field(default_factory=list)
     approval_gate: Optional[Dict[str, Any]] = None
     context_report: Optional[Dict[str, Any]] = None
-    context_compaction_event: Optional[Dict[str, Any]] = None
     final_grounding: Dict[str, Any] = field(default_factory=dict)
     trip_summary_card: Optional[Dict[str, Any]] = None
     delivery_bundle_id: Optional[str] = None
@@ -383,7 +382,8 @@ async def _handle_context_report(item: tuple, ctx: SSEContext) -> AsyncIterator[
 async def _handle_context_compaction(item: tuple, ctx: SSEContext) -> AsyncIterator[Dict[str, Any]]:
     """Persist and emit the full, user-visible compaction snapshot for this turn."""
     _, _node, event = item
-    ctx.context_compaction_event = event
+    # 这枚快照由 `CompactionService` 与摘要、新边界同事务写进会话事件表，这里只负责
+    # 让它当场出现在屏幕上 —— 落库不是这条路径的事。
     yield {
         "type": "context_compaction",
         "message_id": ctx.message_id,

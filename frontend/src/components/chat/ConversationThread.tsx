@@ -2,6 +2,7 @@ import React from 'react';
 import { AnimatePresence, m } from 'motion/react';
 import { useApp } from '../../context/AppContext';
 import { useSendMessage } from '../../hooks/useSendMessage';
+import { useSessionManager } from '../../hooks/useSessionManager';
 import { cn } from '../../lib/utils';
 import { duration, easing } from '../../lib/motion';
 import { projectVisibleMessages } from '../../lib/conversationFlow';
@@ -87,6 +88,7 @@ export const HeroEmptyState: React.FC = () => {
 export const ConversationThread: React.FC = () => {
   const { state, dispatch } = useApp();
   const { sendMessage } = useSendMessage();
+  const { loadEarlierHistory } = useSessionManager();
   const messages = state.currentMessages;
   // 计划门在等决定时，它自己就是对话投影的边界——同一条 pending 判据也决定
   // 底部 composer 是否渲染（见下方），两处读的是同一件事。
@@ -119,19 +121,38 @@ export const ConversationThread: React.FC = () => {
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const stickRef = React.useRef(true);
+  // 前插更早历史时，把「视口相对内容底部的距离」保持住 —— 只写 scrollTop 的话，
+  // 新插进来的那几屏会把用户正在读的段落顶出屏幕。
+  const restoreAnchorRef = React.useRef<number | null>(null);
   const lastMessage = visibleMessages[visibleMessages.length - 1];
   const lastLen = lastMessage?.displayContent?.length ?? 0;
   const lastSteps = lastMessage?.thinkingSteps?.length ?? 0;
+  const { hasMore: hasEarlierHistory, loading: loadingEarlierHistory } = state.historyPaging;
+
+  const requestEarlierHistory = React.useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || !hasEarlierHistory || loadingEarlierHistory) return;
+    restoreAnchorRef.current = el.scrollHeight - el.scrollTop;
+    void loadEarlierHistory();
+  }, [hasEarlierHistory, loadEarlierHistory, loadingEarlierHistory]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (el.scrollTop < 200) requestEarlierHistory();
   };
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el || !stickRef.current) return;
+    if (!el) return;
+    const anchor = restoreAnchorRef.current;
+    if (anchor !== null) {
+      restoreAnchorRef.current = null;
+      el.scrollTop = el.scrollHeight - anchor;
+      return;
+    }
+    if (!stickRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [visibleMessages.length, lastLen, lastSteps, state.isStreaming, state.planApprovalGate]);
 
@@ -150,6 +171,18 @@ export const ConversationThread: React.FC = () => {
         {/* 研究阶段：正文线程与顶部「行程登机牌」共用同一 max-w-5xl 通道且同一水平内边距，
             左缘对齐、宽度一致。无登机牌的快问快答仍用 max-w-3xl 保证阅读行宽。 */}
         <div className={cn('mx-auto flex flex-col gap-6', showResearchBoard ? 'max-w-5xl' : 'max-w-3xl')}>
+          {hasEarlierHistory && (
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={requestEarlierHistory}
+                disabled={loadingEarlierHistory}
+                className="min-h-9 rounded-card border border-stroke px-3 text-xs text-ink-secondary hover:border-accent hover:text-accent disabled:opacity-60"
+              >
+                {loadingEarlierHistory ? '正在载入更早的对话…' : '载入更早的对话'}
+              </button>
+            </div>
+          )}
           {visibleMessages.map((message, index) => {
             if (message.type === 'context_compaction' && message.contextCompaction) {
               return (

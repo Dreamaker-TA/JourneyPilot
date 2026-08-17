@@ -96,6 +96,8 @@ class ChatSessionSummary(BaseModel):
 
 
 class ChatSessionDetail(BaseModel):
+    """会话详情 = **最新一页 turn**。更早的历史由 `/api/sessions/{id}/turns` 往回取。"""
+
     session_id: str
     title: str
     status: SessionStatus
@@ -104,6 +106,23 @@ class ChatSessionDetail(BaseModel):
     created_at: str
     updated_at: str
     messages: List[Dict[str, Any]]
+    #: 再往回翻的游标；`None` 表示这一页已经到底。
+    next_before: Optional[str] = None
+    has_more: bool = False
+    latest_event_order: int = 0
+
+
+class SessionTurn(BaseModel):
+    turn_id: str
+    cursor: str
+    messages: List[Dict[str, Any]]
+
+
+class SessionTurnPage(BaseModel):
+    turns: List[SessionTurn]
+    next_before: Optional[str] = None
+    has_more: bool = False
+    latest_event_order: int = 0
 
 
 class UpdateSessionRequest(BaseModel):

@@ -80,6 +80,13 @@ class ContextBudget:
     # 曾经有三份、其中两份静默胜出的老路。
     manual_memory_facts_limit: int = 20
     compaction_threshold: float = 0.50      # 总预估超过 50% 时触发压缩
+    # 一次压缩最多读多少 token / 多少条消息。**压缩是增量的**：读到预算为止，边界只推到
+    # 真正进了摘要的那一条。这两个数与触发阈值分开 —— 触发说的是「该压了」，
+    # 这两个说的是「这一次压多少」。
+    compaction_input_tokens: int = 50_000
+    max_messages_per_compaction: int = 500
+    # 一次请求最多做几轮自动压缩。为了压缩而连续调好几次模型不划算。
+    max_compaction_rounds_per_request: int = 1
 
     @property
     def messages_budget(self) -> int:

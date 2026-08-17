@@ -332,6 +332,24 @@ export interface SessionDetail extends SessionSummary {
     }>;
     trip_summary_card?: Record<string, unknown>;
   }>;
+  /** 再往回翻的游标；null = 这个会话已经全在手里了。 */
+  next_before: string | null;
+  has_more: boolean;
+  latest_event_order: number;
+}
+
+/** 一轮对话的全部消息。分页按 turn 走，一个 turn 永远整份到达。 */
+export interface SessionTurn {
+  turn_id: string;
+  cursor: string;
+  messages: SessionDetail['messages'];
+}
+
+export interface SessionTurnPage {
+  turns: SessionTurn[];
+  next_before: string | null;
+  has_more: boolean;
+  latest_event_order: number;
 }
 
 export interface ContextCompactionPayload {

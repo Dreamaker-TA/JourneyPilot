@@ -75,6 +75,11 @@ export interface AppState {
   tripRunRefreshKey: number;
   sessions: ChatSession[];
   currentMessages: Message[];
+  /**
+   * 会话历史的向上分页游标。屏幕上先只有最新一页 turn，更早的按需取 ——
+   * 一个用了半年的会话一次投影出来既慢又没人读得完。
+   */
+  historyPaging: { nextBefore: string | null; hasMore: boolean; loading: boolean };
   thinkingSteps: ThinkingStep[];
   /*
    * 这里此前还有 `traceEvents`（末 80 条）与 `traceSummary`。两个都删了：
@@ -160,6 +165,7 @@ export type SessionRuntimeSnapshot = Pick<
   | 'tripRunSource'
   | 'tripRunRefreshKey'
   | 'currentMessages'
+  | 'historyPaging'
   | 'thinkingSteps'
   | 'deliveryBundle'
   | 'deliveryBundleLoadState'
@@ -200,6 +206,7 @@ export function createSessionRuntimeSnapshot(state: AppState): SessionRuntimeSna
     tripRunSource: state.tripRunSource,
     tripRunRefreshKey: state.tripRunRefreshKey,
     currentMessages: state.currentMessages,
+    historyPaging: state.historyPaging,
     thinkingSteps: state.thinkingSteps,
     deliveryBundle: state.deliveryBundle,
     deliveryBundleLoadState: state.deliveryBundleLoadState,
@@ -241,6 +248,8 @@ export type AppAction =
   | { type: 'RENAME_SESSION'; payload: { id: string; title: string } }
   | { type: 'SET_MESSAGES'; payload: Message[] }
   | { type: 'RESTORE_SESSION_RUNTIME'; payload: SessionRuntimeSnapshot }
+  | { type: 'SET_HISTORY_PAGING_LOADING'; payload: boolean }
+  | { type: 'PREPEND_HISTORY'; payload: { messages: Message[]; nextBefore: string | null; hasMore: boolean } }
   | { type: 'ADD_MESSAGE'; payload: Message }
   | { type: 'INSERT_MESSAGE_BEFORE_ID'; payload: { message: Message; beforeId: string } }
   | { type: 'UPDATE_LAST_MESSAGE'; payload: Partial<Message> }
@@ -292,6 +301,7 @@ export type AppAction =
 const initialState: AppState = {
   activeView: getInitialActiveView(),
   sidebarCollapsed: typeof window !== 'undefined' && window.innerWidth < 1024,
+  historyPaging: { nextBefore: null, hasMore: false, loading: false },
   currentSessionId: null,
   conversationEpoch: 0,
   currentTripRunId: null,
@@ -432,6 +442,18 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       // 列表刷新重挂载清空。
       if (state.currentMessages.length === 0 && action.payload.length === 0) return state;
       return { ...state, currentMessages: action.payload, tripSummaryCard: null, conversationEpoch: state.conversationEpoch + 1 };
+    case 'SET_HISTORY_PAGING_LOADING':
+      return { ...state, historyPaging: { ...state.historyPaging, loading: action.payload } };
+    case 'PREPEND_HISTORY':
+      return {
+        ...state,
+        currentMessages: [...action.payload.messages, ...state.currentMessages],
+        historyPaging: {
+          nextBefore: action.payload.nextBefore,
+          hasMore: action.payload.hasMore,
+          loading: false,
+        },
+      };
     case 'RESTORE_SESSION_RUNTIME':
       return {
         ...state,
@@ -733,6 +755,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         // 新建会话：同样递增纪元，走一次进入空态的 crossfade。
         conversationEpoch: state.conversationEpoch + 1,
         currentMessages: [],
+        historyPaging: { nextBefore: null, hasMore: false, loading: false },
         thinkingSteps: [],
         deliveryBundle: null,
         deliveryBundleLoadState: { status: 'idle', message: null },
