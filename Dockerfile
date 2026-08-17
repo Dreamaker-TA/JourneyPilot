@@ -79,6 +79,11 @@ COPY main.py journeypilot.py alembic.ini ./
 # doctor/backup/restore 也是容器里唯一能敲的维护入口。
 COPY migrations/ ./migrations/
 COPY package.json package-lock.json ./
+# 前端构建产物。**普通用户那一路只暴露 API 端口**，所以网页端必须由这个进程服务
+# （app.py 在 /app/static 找到 index.html 就把它挂在 `/`）。目录里只有 .gitkeep 时
+# 那个分支不成立，API 端口给出的是 API 说明页并告诉用户去构建前端 —— 而不是一个
+# 空白页面。构建产物本身不进版本控制，所以镜像要在 `npm run build` 之后构建。
+COPY static/ ./static/
 # **不复制 config.example.yaml 当 config.yaml**：一份示例伪装成真实配置，
 # 会让「我的配置没生效」变成「我改的那份文件根本没被读」。Compose 把宿主机的
 # config.yaml 挂进来；没挂也能跑（全部走 Pydantic 默认 + JOURNEYPILOT_* 环境变量）。

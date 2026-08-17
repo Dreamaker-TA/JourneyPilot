@@ -392,8 +392,12 @@ frontend/.env-exemple
 # 可观测性
 otel-collector-config.yaml
 
-# 前端构建产物（运行 cd frontend && npm run build 重新生成）
-static/
+# 前端构建产物（运行 cd frontend && npm run build 重新生成）。
+# 忽略的是**目录内容**而不是目录：`static/` 那种写法会让 git 根本不进这个目录，
+# 于是后面的 `!static/.gitkeep` 永远不生效。目录本身必须被跟踪 —— Dockerfile
+# 无条件 `COPY static/`，而 COPY 一个不存在的源会让一次干净克隆的镜像构建失败。
+static/*
+!static/.gitkeep
 
 # IDE / 开发过程目录
 .cursor/

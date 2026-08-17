@@ -1,0 +1,163 @@
+# 重型矩阵：跑得慢、但不该拦住一个 PR 的那些。
+#
+# 判据是「这一条的信号值是否配得上它在每个 PR 上花的时间」。10k 事件的分页、
+# kill-point 全矩阵、依赖组合矩阵都属于「值得每天跑一次，不值得每次改动跑一次」。
+name: Nightly
+
+on:
+  schedule:
+    # 每天 UTC 18:00（北京时间次日 02:00）。
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+env:
+  UV_VERSION: "0.9.7"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  dependency-matrix:
+    name: install · ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            groups: ""
+          - name: core + local embedding
+            groups: "--group local-embedding"
+          - name: core + local embedding + cross encoder
+            groups: "--group local-embedding --group cross-encoder"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group dev ${{ matrix.groups }}
+      # 每种组合都要能读配置、能跑不依赖增强能力的测试。承诺的是这三种组合，
+      # 其余组合标记 advanced，不承诺每次都测（ADR-0007）。
+      - run: uv run python journeypilot.py config validate
+      - run: uv run pytest tests/ --ignore=tests/db -q
+
+  flake-hunt:
+    name: reliability · repeat the suite to surface nondeterminism
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: travel_agent
+          POSTGRES_USER: travel_agent
+          POSTGRES_PASSWORD: travel_agent_pwd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U travel_agent -d travel_agent"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      JOURNEYPILOT_DATABASE__HOST: 127.0.0.1
+      JOURNEYPILOT_DATABASE__PORT: "5432"
+      JOURNEYPILOT_DATABASE__USER: travel_agent
+      JOURNEYPILOT_DATABASE__PASSWORD: travel_agent_pwd
+      JOURNEYPILOT_REDIS__HOST: 127.0.0.1
+      JOURNEYPILOT_REDIS__PORT: "6379"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group local-embedding --group dev
+      # 这里跑的是**同一套**测试（大历史分页、慢客户端、租约竞争都已经在 PR 门禁里），
+      # nightly 加的是**重复**：竞争与超时相关的用例偶发失败，只跑一次看不出来，
+      # 而一个偶发红灯会训练所有人忽略红灯。跑三遍，任意一遍失败即失败。
+      - name: Repeat the full suite three times
+        run: |
+          for round in 1 2 3; do
+            echo "::group::round ${round}"
+            uv run pytest tests/ -q || exit 1
+            echo "::endgroup::"
+          done
+
+  migration-matrix:
+    name: migration · empty / baseline / previous release → head
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: travel_agent
+          POSTGRES_USER: travel_agent
+          POSTGRES_PASSWORD: travel_agent_pwd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U travel_agent -d travel_agent"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      JOURNEYPILOT_DATABASE__HOST: 127.0.0.1
+      JOURNEYPILOT_DATABASE__PORT: "5432"
+      JOURNEYPILOT_DATABASE__USER: travel_agent
+      JOURNEYPILOT_DATABASE__PASSWORD: travel_agent_pwd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group local-embedding --group dev
+      - name: Install PostgreSQL 18 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+      # 三条路径共用同一套断言：迁到 head 之后指纹必须匹配存档。
+      - name: 迁移矩阵 + 备份恢复
+        run: uv run pytest tests/db/test_migration_baseline.py tests/db/test_migration_gates.py
+             tests/db/test_backup.py tests/db/test_restore.py -q
+
+  multi-arch-image:
+    name: image · amd64 + arm64 builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      # 只构建不推送：这一条要回答的是「受支持平台上还能构出来吗」。
+      # 一个只在 amd64 上验证过的镜像，会在用户的 arm64 机器上第一次构建时才失败。
+      - name: Build API image for both architectures
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # zhparser 那一档要单独验：它会编译 SCWS，是构建面最大的一块。
+      # 它失败不影响默认档 —— 那正是把它拆成 profile 的理由，所以这一步允许失败。
+      - name: Build the optional zhparser database image
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          platforms: linux/amd64,linux/arm64
+          push: false

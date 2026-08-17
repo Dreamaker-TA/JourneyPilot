@@ -37,7 +37,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "type-check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit"
+    "type-check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "check": "npm run type-check && npm run test && npm run build"
   },
   "browserslist": {
     "production": [
@@ -50,5 +54,8 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "engines": {
+    "node": ">=20.19"
   }
 }

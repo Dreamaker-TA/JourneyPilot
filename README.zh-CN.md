@@ -284,18 +284,34 @@ npm install
 npm run dev
 ```
 
-提交 Pull Request 前，请运行与改动相关的检查：
+提交 Pull Request 前，请跑一遍 CI 跑的那些：
 
 ```bash
 # 后端
-uv run ruff check src
-JOURNEYPILOT_DATABASE__PORT=55433 uv run pytest   # 迁移/备份测试建临时库；没有 PostgreSQL 时自动跳过
+uv sync --frozen --group local-embedding --group dev
+uv run ruff check src/ tests/ scripts/
+uv run python journeypilot.py config validate
+uv run python journeypilot.py config docs --check    # 生成的字段表与 schema 一致
+JOURNEYPILOT_DATABASE__PORT=55433 uv run pytest      # db 测试建临时库；没有 PostgreSQL 时自动跳过
 
 # 前端
 cd frontend
-npm run type-check
-npm run build
+npm ci
+npm run check                                        # 类型检查 + 单元测试 + 构建
+npm run test:e2e                                     # 需要一套跑着的服务，见 playwright.config.ts
 ```
+
+同一批作业在 [`.github/workflows/pr.yml`](.github/workflows/pr.yml) 里跑。nightly 承担
+更重的矩阵（依赖组合、重复跑找偶发、多架构镜像），release 验证交付物本身。
+
+### 设计文档
+
+- [`docs/adr/`](docs/adr/) —— 做过的决定，以及被否掉的替代方案
+- [`docs/invariants.md`](docs/invariants.md) —— 什么必须永远成立、谁保证、哪个测试钉住它。
+  这里点名的测试必须存在，由 `tests/test_invariants_doc.py` 强制：引用一个被删掉的测试
+  读起来像有人在守着，而没有人在守着。
+- [`docs/architecture/overview.md`](docs/architecture/overview.md) —— 一次请求怎么走完全程
+- [`docs/release-checklist.md`](docs/release-checklist.md) —— 一份 release note 必须回答什么
 
 欢迎提交 Issue 和 Pull Request。请尽量让每次改动保持聚焦；修复缺陷时补上回归测试；如果改动影响用户可见的行为，也请同步更新中英文 README。
 

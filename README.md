@@ -290,18 +290,37 @@ npm install
 npm run dev
 ```
 
-Before opening a pull request, run the relevant checks:
+Before opening a pull request, run what CI runs:
 
 ```bash
 # Backend
-uv run ruff check src
-JOURNEYPILOT_DATABASE__PORT=55433 uv run pytest   # migration/backup tests use temporary databases; skipped without PostgreSQL
+uv sync --frozen --group local-embedding --group dev
+uv run ruff check src/ tests/ scripts/
+uv run python journeypilot.py config validate
+uv run python journeypilot.py config docs --check    # generated field table matches the schema
+JOURNEYPILOT_DATABASE__PORT=55433 uv run pytest      # db tests use temporary databases; skipped without PostgreSQL
 
 # Frontend
 cd frontend
-npm run type-check
-npm run build
+npm ci
+npm run check                                        # type-check + unit tests + build
+npm run test:e2e                                     # needs a running stack; see playwright.config.ts
 ```
+
+The same jobs run in [`.github/workflows/pr.yml`](.github/workflows/pr.yml). Nightly picks
+up the heavier matrix (dependency combinations, repeated runs, multi-arch images) and the
+release workflow verifies the delivered artifacts.
+
+### Design documents
+
+- [`docs/adr/`](docs/adr/) — the decisions, and what was rejected instead
+- [`docs/invariants.md`](docs/invariants.md) — what must always hold, who guarantees it,
+  which test pins it. A test named there must exist; `tests/test_invariants_doc.py`
+  enforces that, because a reference to a deleted test reads like someone is watching
+  when nobody is.
+- [`docs/architecture/overview.md`](docs/architecture/overview.md) — how one request
+  travels through the system
+- [`docs/release-checklist.md`](docs/release-checklist.md) — what a release note has to answer
 
 Issues and pull requests are welcome. Keep changes focused, add a regression test for bug fixes, and update both README languages when behavior visible to users changes.
 

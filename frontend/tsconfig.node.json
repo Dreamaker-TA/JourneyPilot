@@ -26,10 +26,20 @@
      */
     "outDir": "./node_modules/.tmp/tsconfig-node"
   },
-  // Third type-check program: the node-side tooling configs. `references` from
+  // Third type-check program: everything that runs on node rather than in the
+  // browser — the tooling configs and the Playwright specs. `references` from
   // tsconfig.json does not check these outside `tsc -b`, so until this program
   // was wired into `npm run type-check` every file here had zero coverage.
-  // Both belong in one program — checking only vite.config.ts would leave
-  // the same blind spot this program exists to close.
-  "include": ["vite.config.ts", "tailwind.config.ts"]
+  //
+  // They belong in **one** program: checking only vite.config.ts would leave
+  // exactly the blind spot this program exists to close, and an e2e spec that
+  // nothing type-checks is a spec that can reference a removed selector helper
+  // and still look fine until CI runs a browser.
+  "include": [
+    "vite.config.ts",
+    "vitest.config.ts",
+    "playwright.config.ts",
+    "tailwind.config.ts",
+    "e2e/**/*.ts"
+  ]
 } 

@@ -1,0 +1,169 @@
+# Release candidate：把「升级、数据、配置、reindex、回滚」逐条验一遍。
+#
+# 与 PR 门禁的区别不是更严，而是**验的是交付物本身**：一个镜像、一次空库安装、
+# 一次从上一个 release 的备份升级。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      live_smoke:
+        description: "跑真实 Provider 冒烟（消耗额度，需要 LIVE_* secrets）"
+        type: boolean
+        default: false
+
+env:
+  UV_VERSION: "0.9.7"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  candidate:
+    name: candidate · frozen deps, empty install, restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: travel_agent
+          POSTGRES_USER: travel_agent
+          POSTGRES_PASSWORD: travel_agent_pwd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U travel_agent -d travel_agent"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      JOURNEYPILOT_DATABASE__HOST: 127.0.0.1
+      JOURNEYPILOT_DATABASE__PORT: "5432"
+      JOURNEYPILOT_DATABASE__USER: travel_agent
+      JOURNEYPILOT_DATABASE__PASSWORD: travel_agent_pwd
+      JOURNEYPILOT_REDIS__HOST: 127.0.0.1
+      JOURNEYPILOT_REDIS__PORT: "6379"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Freeze dependencies
+        run: |
+          uv lock --check
+          uv sync --frozen --group local-embedding --group dev
+      - name: Install PostgreSQL 18 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+      - name: 空库安装 → head
+        run: uv run python journeypilot.py migrate --json
+      - name: 结构合同 + 可选能力
+        run: uv run python journeypilot.py doctor --json
+      - name: 全量测试
+        run: uv run pytest tests/ -q
+      - name: 配置生成物与 schema 一致
+        run: uv run python journeypilot.py config docs --check
+      # 升级、备份、恢复、恢复留档：release 之前这四条必须一起过。
+      - name: 备份恢复矩阵
+        run: uv run pytest tests/db/test_backup.py tests/db/test_restore.py
+             tests/db/test_migration_baseline.py -q
+
+  image:
+    name: image · amd64 + arm64 + SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (both architectures, load amd64 for scanning)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=oci,dest=/tmp/journeypilot-oci.tar
+          # provenance/SBOM 由 buildx 生成并附在产物上。
+          provenance: true
+          sbom: true
+      - name: 运行层必须是非 root
+        run: |
+          docker build --load -t journeypilot:candidate .
+          uid=$(docker run --rm --entrypoint id journeypilot:candidate -u)
+          test "$uid" != "0" || { echo "运行层以 root 跑"; exit 1; }
+      - name: PDF 导出在镜像里可用
+        run: |
+          docker run --rm --entrypoint python journeypilot:candidate -c "
+          import sys; sys.path.insert(0, 'src')
+          from travel_agent.services.pdf_export import probe_pdf_renderer
+          print('pdf font:', probe_pdf_renderer())
+          "
+      - name: Container scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: journeypilot:candidate
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-oci
+          path: /tmp/journeypilot-oci.tar
+          retention-days: 14
+
+  live-smoke:
+    name: live · real provider smoke (opt-in)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # **只在显式勾选时跑，且不在任何 PR 上跑**（ADR-0009）。
+    # 用专用低额度 Key；跑不动的时候它是一条信息，不是一次门禁失败。
+    if: github.event_name == 'workflow_dispatch' && inputs.live_smoke
+    environment: live-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv python install ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen --group local-embedding --group dev
+      - name: Preflight one real model call
+        env:
+          JOURNEYPILOT_PRIMARY_MODEL__API_KEY: ${{ secrets.LIVE_PRIMARY_API_KEY }}
+          JOURNEYPILOT_PRIMARY_MODEL__BASE_URL: ${{ vars.LIVE_PRIMARY_BASE_URL }}
+          JOURNEYPILOT_PRIMARY_MODEL__MODEL_NAME: ${{ vars.LIVE_PRIMARY_MODEL_NAME }}
+        run: |
+          uv run python - <<'PY'
+          import asyncio, sys
+          sys.path.insert(0, "src")
+          from travel_agent.config import capabilities_for, get_settings
+          from travel_agent.models.router import get_model_router
+
+          settings = get_settings()
+          print("base_url:", settings.primary_model.base_url)
+          print("capabilities:", capabilities_for(settings.primary_model.base_url))
+          text = asyncio.run(
+              get_model_router().get_primary().ainvoke(
+                  [{"role": "user", "content": "回答一个字：好"}]
+              )
+          )
+          assert text.strip(), "真实 Provider 返回空正文"
+          print("live reply:", text[:80])
+          PY

@@ -233,15 +233,27 @@ def create_app() -> FastAPI:
     app.include_router(product.router)
     app.include_router(trip_runs.router)
 
-    # 挂载静态文件（前端构建产物）
-    static_path = Path(__file__).parents[4] / "static"
-    if static_path.exists():
+    # 前端构建产物。``parents[3]`` 是仓库根：app.py 在 src/travel_agent/api/ 下，
+    # 往上依次是 api → travel_agent → src → 仓库根。原来写的 ``parents[4]`` 指向仓库
+    # **外面**一层，于是这个挂载从来没有命中过 —— 一个 `if exists()` 包着的死分支
+    # 不会报错，只是让「内置静态前端」这句话一直不成立。
+    static_path = Path(__file__).parents[3] / "static"
+    index_html = static_path / "index.html"
+    if static_path.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+        # Vite 把带指纹的资源放在 assets/ 下，而 index.html 用绝对路径 /assets/... 引它们。
+        assets_path = static_path / "assets"
+        if assets_path.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
 
-    # 根路径返回 API 说明页面；前端应用由 Vite/static 构建承载。
+    # 根路径：**有前端产物就给前端**（Compose 那一路只暴露 API 端口，用户打开的就是
+    # 这里），没有产物才给 API 说明页。开发那一路走 Vite，不经过这个分支。
     @app.get("/")
     async def root():
-        from fastapi.responses import HTMLResponse
+        from fastapi.responses import FileResponse, HTMLResponse
+
+        if index_html.is_file():
+            return FileResponse(str(index_html))
         return HTMLResponse("""
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -258,9 +270,13 @@ def create_app() -> FastAPI:
 <body>
     <h1>JourneyPilot TripOps API</h1>
     <p>可信 TripOps 后端正在运行：TripRun、Living Itinerary、Evidence、Risk、Memory 与 Tools 均通过显式 API 边界暴露。</p>
+    <p><strong>没有找到前端构建产物</strong>，所以这里显示的是 API 说明页。
+    要在这个端口上打开网页端，先构建前端：<code>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</code>。
+    开发时也可以直接用 <code>./run.sh</code>，它会另起 Vite。</p>
     <ul>
         <li><a href="/docs">API 文档 (Swagger)</a></li>
         <li><a href="/api/status">系统状态</a></li>
+        <li><a href="/api/health/ready">就绪探针</a></li>
         <li>聊天接口：<code>POST /api/chat-stream</code></li>
         <li>Trip Run：<code>GET /api/trip-runs</code></li>
         <li>知识库：<code>POST /api/knowledge/index</code></li>
