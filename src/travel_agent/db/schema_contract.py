@@ -49,6 +49,7 @@ MANAGED_TABLES: tuple[str, ...] = (
     "trip_run_states",
     "trip_run_events",
     "trip_run_executions",
+    "trip_run_commands",
     # Delivery v2
     "trip_workspace_v2_revisions",
     "fact_store_v2_revisions",

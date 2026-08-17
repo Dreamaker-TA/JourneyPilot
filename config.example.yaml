@@ -130,6 +130,8 @@ run_control:
   lease_heartbeat_seconds: 10
   lease_heartbeat_failure_threshold: 3
   recovery_sweep_seconds: 60
+  # 取消 / 追加要求先落 trip_run_commands，执行器按这个间隔轮询（同进程会被立即唤醒）。
+  command_poll_seconds: 2.0
 
 # Hybrid RAG second-stage rerank (Settings.rerank). llm needs no extra install.
 rerank:

@@ -378,6 +378,25 @@ class RunExecutionStore:
                 )
             return candidates
 
+    async def has_live_lease(self, run_id: str) -> bool:
+        """这个 run 现在有没有活着的执行器。
+
+        判据是数据库的 `NOW()` 与租约到期时间，不是「本进程内存里有没有 handle」——
+        后者只说明不是这个进程在跑，把它当成「没人在跑」会让另一个进程的执行被当作不存在。
+        """
+
+        async with get_db_session() as session:
+            result = await session.execute(
+                text(
+                    "SELECT 1 FROM trip_run_executions "
+                    "WHERE run_id = :run_id "
+                    "  AND lease_expires_at IS NOT NULL "
+                    "  AND lease_expires_at >= NOW()"
+                ),
+                {"run_id": run_id},
+            )
+            return result.mappings().first() is not None
+
     async def count_active_leases(self) -> int:
         async with get_db_session() as session:
             result = await session.execute(

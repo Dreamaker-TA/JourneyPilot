@@ -11,11 +11,14 @@ import pytest
 from sqlalchemy import text
 
 from travel_agent.entities.trip_run import (
+    RunCommandStatus,
+    RunCommandType,
     RunRecoveryStatus,
     TripRunStatus,
     available_run_actions,
 )
 from travel_agent.infrastructure.database import get_db_session
+from travel_agent.infrastructure.run_command_store import RunCommandStore
 from travel_agent.infrastructure.run_execution_store import RunExecutionStore
 from travel_agent.infrastructure.trip_run_store import TripRunStore
 from travel_agent.services.run_recovery import RunRecoveryService
@@ -80,6 +83,7 @@ def _service(*, checkpoint_available: bool | None = True) -> RunRecoveryService:
     return RunRecoveryService(
         trip_run_store=TripRunStore(),
         execution_store=RunExecutionStore(),
+        command_store=RunCommandStore(),
         checkpoint_probe=probe if checkpoint_available is not None else None,
     )
 
@@ -166,6 +170,48 @@ async def test_cancel_requested_converges_to_cancelled(migrated_async_database):
     assert run is not None and run.status is TripRunStatus.CANCELLED
 
 
+async def test_cancel_requested_recovery_consumes_its_cancel_command(
+    migrated_async_database,
+):
+    """取消请求在这次恢复里完成了 —— 它的命令是 consumed，不是「没人管过」。"""
+
+    run_id = await _orphan_run(status=TripRunStatus.CANCEL_REQUESTED)
+    commands = RunCommandStore()
+    cancel, _ = await commands.enqueue(run_id, RunCommandType.CANCEL, {})
+
+    await _service().sweep()
+
+    settled = await commands.get(run_id, cancel.command_id)
+    assert settled is not None and settled.status is RunCommandStatus.CONSUMED
+    assert settled.result == {
+        "run_status": TripRunStatus.CANCELLED.value,
+        "reason": "cancel_requested_completed_during_recovery",
+    }
+
+
+async def test_interrupted_recovery_leaves_no_command_pending(migrated_async_database):
+    """中断不是「命令被执行了」：留下的取消与追加要求都要被明确拒绝。
+
+    否则用户点了继续，一条几小时前的取消会在下一个边界把这次运行再停一次。
+    """
+
+    run_id = await _orphan_run(status=TripRunStatus.RUNNING)
+    commands = RunCommandStore()
+    cancel, _ = await commands.enqueue(run_id, RunCommandType.CANCEL, {})
+    supplement, _ = await commands.enqueue(
+        run_id, RunCommandType.SUPPLEMENT, {"category": "food", "content": "清淡一点"}
+    )
+
+    await _service().sweep()
+
+    assert await commands.list_open(run_id) == []
+    for command_id in (cancel.command_id, supplement.command_id):
+        settled = await commands.get(run_id, command_id)
+        assert settled is not None
+        assert settled.status is RunCommandStatus.REJECTED
+        assert settled.error_code == "run_interrupted_before_consumption"
+
+
 async def test_awaiting_input_keeps_its_status_and_loses_its_lease(
     migrated_async_database,
 ):
@@ -181,6 +227,22 @@ async def test_awaiting_input_keeps_its_status_and_loses_its_lease(
     execution = await RunExecutionStore().get(run_id)
     assert run is not None and run.status is TripRunStatus.AWAITING_INPUT
     assert execution is not None and execution.lease_token is None
+
+
+async def test_awaiting_input_keeps_a_queued_supplement(migrated_async_database):
+    """等用户的 Run 没有结束，只是没人在跑：那条追加要求要留到它被继续时生效。"""
+
+    run_id = await _orphan_run(status=TripRunStatus.AWAITING_INPUT)
+    commands = RunCommandStore()
+    supplement, _ = await commands.enqueue(
+        run_id, RunCommandType.SUPPLEMENT, {"category": "must_do", "content": "看日落"}
+    )
+
+    await _service().sweep()
+
+    open_commands = await commands.list_open(run_id)
+    assert [command.command_id for command in open_commands] == [supplement.command_id]
+    assert open_commands[0].status is RunCommandStatus.PENDING
 
 
 async def test_completed_run_is_never_downgraded(migrated_async_database):

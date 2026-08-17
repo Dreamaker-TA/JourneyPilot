@@ -21,6 +21,10 @@ from .infrastructure.provider_snapshot_cache import (
     ProviderSnapshotCache,
     get_provider_snapshot_cache,
 )
+from .infrastructure.run_command_store import (
+    RunCommandStore,
+    get_run_command_store,
+)
 from .infrastructure.run_execution_store import (
     RunExecutionStore,
     get_run_execution_store,
@@ -105,6 +109,8 @@ class AppComponents:
 
     # 执行归属：谁在跑这个 run，以及重启后的恢复判定。
     run_execution_store: RunExecutionStore = field(default_factory=get_run_execution_store)
+    # 运行控制命令（cancel / supplement）的最终事实。
+    run_command_store: RunCommandStore = field(default_factory=get_run_command_store)
     run_recovery_service: Optional[RunRecoveryService] = None
 
     # JourneyPilot v2 immutable delivery snapshots + current-bundle CAS.
@@ -202,9 +208,11 @@ class AppBuilder:
             trip_run_store=trip_run_store,
         )
         run_execution_store = get_run_execution_store()
+        run_command_store = get_run_command_store()
         run_recovery_service = RunRecoveryService(
             trip_run_store=trip_run_store,
             execution_store=run_execution_store,
+            command_store=run_command_store,
             # 没有 checkpointer 时不传探针：那不是「探测失败」，而是「这个部署没有可恢复的
             # 断点」，恢复判定要按 non_resumable 说出来。
             checkpoint_probe=travel_workflow.has_checkpoint if checkpointer_available else None,
@@ -233,6 +241,7 @@ class AppBuilder:
             product_configuration_store=ProductConfigurationStore(),
             trip_run_store=trip_run_store,
             run_execution_store=run_execution_store,
+            run_command_store=run_command_store,
             run_recovery_service=run_recovery_service,
             delivery_bundle_store=delivery_bundle_store,
             weather_context_builder=weather_context_builder,

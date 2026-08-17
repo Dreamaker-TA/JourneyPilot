@@ -151,12 +151,18 @@ class TripRunControlRequest(BaseModel):
 
 
 class TripRunControlResponse(BaseModel):
+    """取消回执。`status` 是命令的状态，`run_status` 是运行的状态 —— 两件事。
+
+    命令已经落库，所以断线之后可以拿 `command_id` 去查结果，不必猜。
+    """
+
     run_id: str
     action: str
+    command_id: str
     accepted: bool
     status: str
+    run_status: str
     message: str
-    in_process_handle: bool = False
 
 
 class TripRunSupplementRequest(BaseModel):
@@ -167,10 +173,27 @@ class TripRunSupplementRequest(BaseModel):
 
 class TripRunSupplementResponse(BaseModel):
     run_id: str
+    command_id: str
     accepted: bool
+    status: str
     category: str
     message: str
     impact_scope: List[str] = Field(default_factory=list)
+
+
+class TripRunCommandResponse(BaseModel):
+    """一条控制命令此刻的结论。断线重连后查这里，而不是重发命令。"""
+
+    command_id: str
+    run_id: str
+    command_type: str
+    status: str
+    run_status: str
+    error_code: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+    created_at: str
+    updated_at: str
+    consumed_at: Optional[str] = None
 
 
 class TripRunResponse(BaseModel):

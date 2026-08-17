@@ -1,10 +1,9 @@
 """In-process run control primitives for JourneyPilot workflows.
 
-This module is intentionally process-local. Durable truth remains
-in ``trip_runs``; the registry is only a low-latency wake-up channel for the
-currently executing asyncio graph. A future multi-instance version can keep the
-same public surface while adding Postgres control rows plus Redis Pub/Sub
-notifications.
+这个模块**只是进程内的低延迟通道**。最终事实在 `trip_runs`（业务状态）与
+`trip_run_commands`（控制命令）：cancel 与 supplement 先落库，`RunCommandCoordinator`
+再把它们搬进这里的 handle 供协作边界同步读取。registry 因此不回答「有没有这条命令」，
+只回答「这个进程现在跑着这个 run，可以马上去读表」。通知丢了最多多等一个轮询间隔。
 """
 
 from __future__ import annotations
@@ -125,9 +124,9 @@ def run_ts_ms() -> Optional[float]:
     return round((time.perf_counter() - anchor) * 1000.0, 3)
 
 
-#: 为什么停。终态归属不同：用户取消收敛 CANCELLED，失去租约收敛 INTERRUPTED ——
-#: 后者不是用户的决定，把它记成「已取消」就是给记录里写一件没发生的事。
-RunStopReason = Literal["user_cancel", "lease_lost"]
+#: 为什么停。终态归属不同：用户取消收敛 CANCELLED，失去租约与响应流退出收敛 INTERRUPTED ——
+#: 后两者不是用户的决定，把它们记成「已取消」就是给记录里写一件没发生的事。
+RunStopReason = Literal["user_cancel", "lease_lost", "stream_exit"]
 
 
 class RunCancelled(Exception):
@@ -147,20 +146,25 @@ class RunCancelled(Exception):
         super().__init__(f"TripRun {run_id} stopped ({reason}){label}")
 
 
+#: 一批 supplement 落进 state 之后调用：把对应的 durable command 标成 consumed。
+SupplementAppliedSink = Callable[[List[str], str], Awaitable[None]]
+
+
 @dataclass
 class RunControlHandle:
     run_id: str
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     delivery_ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    #: 已 claim 但还没落进 state 的追加要求，每条带着自己的 `command_id`。
     supplements: List[Dict[str, str]] = field(default_factory=list)
     stop_reason: RunStopReason = "user_cancel"
+    #: 有新的 durable command 时被 set，让协调器立刻去读表而不必等下一个轮询周期。
+    wake_event: asyncio.Event = field(default_factory=asyncio.Event)
+    supplement_applied_sink: Optional[SupplementAppliedSink] = None
 
     def request_stop(self, reason: RunStopReason = "user_cancel") -> None:
         self.stop_reason = reason
         self.cancel_event.set()
-
-    def request_cancel(self) -> None:
-        self.request_stop("user_cancel")
 
     def mark_delivery_ready(self) -> None:
         """Seal this in-process run against late research writes.
@@ -171,17 +175,33 @@ class RunControlHandle:
         """
         self.delivery_ready_event.set()
 
-    def add_supplement(self, category: str, content: str) -> None:
-        self.supplements.append({"category": category, "content": content})
+    def add_supplement(self, category: str, content: str, *, command_id: str) -> None:
+        self.supplements.append(
+            {"command_id": command_id, "category": category, "content": content}
+        )
 
-    def consume_supplements(self) -> List[Dict[str, str]]:
-        queued = list(self.supplements)
-        self.supplements.clear()
-        return queued
+    def pending_supplements(self) -> List[Dict[str, str]]:
+        """还没落进 state 的追加要求。
+
+        **取走不等于清空**：节点抛异常时它返回的 state update 会被丢掉，那条要求也就没有
+        生效。留在这里，下一个节点边界再试一次。
+        """
+
+        return list(self.supplements)
+
+    async def mark_supplements_applied(self, command_ids: List[str], *, node: str) -> None:
+        applied = {str(value) for value in command_ids if str(value).strip()}
+        if not applied:
+            return
+        self.supplements = [
+            item for item in self.supplements if item.get("command_id") not in applied
+        ]
+        if self.supplement_applied_sink is not None:
+            await self.supplement_applied_sink(sorted(applied), node)
 
 
 class RunControlRegistry:
-    """Small in-memory registry keyed by TripRun id."""
+    """按 run id 索引的进程内 handle。**唤醒通道，不是命令的存放处。**"""
 
     def __init__(self) -> None:
         self._handles: Dict[str, RunControlHandle] = {}
@@ -201,27 +221,25 @@ class RunControlRegistry:
             self._handles.pop(run_id, None)
 
     def request_stop(self, run_id: str, reason: RunStopReason = "user_cancel") -> bool:
+        """进程内的停止信号。用于失去租约这类**不来自用户**、没有 durable command 的停止。"""
+
         handle = self.get(run_id)
         if handle is None:
             return False
         handle.request_stop(reason)
         return True
 
-    def request_cancel(self, run_id: str) -> bool:
-        return self.request_stop(run_id, "user_cancel")
+    def notify(self, run_id: str) -> bool:
+        """告诉执行器「表里有新命令」。返回本进程是否正在跑这个 run。
 
-    def request_supplement(self, run_id: str, category: str, content: str) -> bool:
+        返回 False **不是**拒绝：命令已经落库，执行器下一次轮询照样看得见。这个布尔值只
+        用于日志与回执里的观察，不参与任何正确性判断。
+        """
+
         handle = self.get(run_id)
         if handle is None:
             return False
-        handle.add_supplement(category, content)
-        return True
-
-    def mark_delivery_ready(self, run_id: str) -> bool:
-        handle = self.get(run_id)
-        if handle is None:
-            return False
-        handle.mark_delivery_ready()
+        handle.wake_event.set()
         return True
 
     def clear(self) -> None:
@@ -574,14 +592,32 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                     "run_deadline": getattr(state, "run_deadline", None),
                     "agent_status": {node_name: "ignored_after_delivery"},
                 }
-            queued = handle.consume_supplements() if handle is not None else []
-            if queued and hasattr(state, "model_copy"):
+            claimed_supplements = handle.pending_supplements() if handle is not None else []
+            fresh_supplements: List[Dict[str, str]] = []
+            supplements_merged = bool(claimed_supplements) and hasattr(state, "model_copy")
+            if supplements_merged:
                 existing = list(getattr(state, "supplemental_requirements", None) or [])
-                state = state.model_copy(update={"supplemental_requirements": [*existing, *queued]})
+                # 命令至少消费一次，所以去重的判据要在 state 里：同一条要求被重复 claim 时
+                # （标记 consumed 之后崩溃）不该在调研提示里出现第二遍。
+                merged_ids = {
+                    str(item.get("command_id"))
+                    for item in existing
+                    if item.get("command_id")
+                }
+                fresh_supplements = [
+                    item
+                    for item in claimed_supplements
+                    if str(item.get("command_id")) not in merged_ids
+                ]
+                if fresh_supplements:
+                    state = state.model_copy(
+                        update={"supplemental_requirements": [*existing, *fresh_supplements]}
+                    )
             await emit_node_lifecycle("started", node=node_name)
             result = fn(state, *args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
+            supplements_landed = supplements_merged
             if (
                 handle is not None
                 and handle.delivery_ready_event.is_set()
@@ -594,6 +630,19 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                     "run_deadline": getattr(state, "run_deadline", None),
                     "agent_status": {node_name: "ignored_after_delivery"},
                 }
+                # 这个更新被丢掉了，追加要求也就没有生效。留在 handle 里等下一个边界，
+                # 或者由运行终结时的收口判成 rejected —— 不许标成已消费。
+                supplements_landed = False
+            elif fresh_supplements and isinstance(result, dict):
+                # 只并进节点入参不算「纳入 state」：LangGraph 落盘的是节点**返回**的更新。
+                # 追加要求要随这次更新进 checkpoint，后续节点才看得见（append-only reducer）。
+                result = dict(result)
+                result["supplemental_requirements"] = [
+                    *(result.get("supplemental_requirements") or []),
+                    *fresh_supplements,
+                ]
+            elif fresh_supplements:
+                supplements_landed = False
             if (
                 handle is not None
                 and node_name == "delivery_finalizer"
@@ -613,6 +662,15 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                 result["run_deadline"] = observe_run_deadline(
                     getattr(state, "run_deadline")
                 )[0]
+            if handle is not None and supplements_landed:
+                await handle.mark_supplements_applied(
+                    [
+                        str(item.get("command_id"))
+                        for item in claimed_supplements
+                        if item.get("command_id")
+                    ],
+                    node=node_name,
+                )
             await emit_node_lifecycle(
                 "completed",
                 node=node_name,

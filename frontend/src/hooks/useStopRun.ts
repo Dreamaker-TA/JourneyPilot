@@ -27,8 +27,10 @@ export function useStopRun() {
         });
         cancelAccepted = result.accepted;
         cancelMessage = result.message || '';
-        if (result.accepted && isTripRunStatus(result.status)) {
-          dispatch({ type: 'SET_TRIP_RUN_STATUS', payload: result.status });
+        // `status` 是那条控制命令的状态，运行状态在 `run_status` —— 取消已被持久化接受
+        // （pending）而运行还在协作退出，是完全正常的一步。
+        if (result.accepted && isTripRunStatus(result.run_status)) {
+          dispatch({ type: 'SET_TRIP_RUN_STATUS', payload: result.run_status });
         }
       } catch (err) {
         // 「来晚了」不是「没停下来」：运行已经结束时服务端会答 409 并带上当前状态。

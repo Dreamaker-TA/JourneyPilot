@@ -217,6 +217,23 @@ async def test_claim_preserves_a_previously_recorded_safe_checkpoint(
     assert reclaimed is not None and reclaimed.last_safe_checkpoint_id == "ckpt-1"
 
 
+async def test_live_lease_is_answered_by_the_database_clock(migrated_async_database):
+    """「现在有没有执行器在跑」只有数据库能回答。
+
+    取消路径拿它决定要不要就地收敛。用「本进程内存里有没有 handle」来回答这个问题，
+    等于把另一个进程的执行当作不存在。
+    """
+
+    store = RunExecutionStore()
+    run_id = await _create_run()
+
+    assert await store.has_live_lease(run_id) is False
+    await store.claim(run_id, lease_seconds=45)
+    assert await store.has_live_lease(run_id) is True
+    await _expire_lease(run_id)
+    assert await store.has_live_lease(run_id) is False
+
+
 async def test_execution_row_disappears_with_its_run(migrated_async_database):
     """外键级联：run 被删掉时执行行不该留成孤儿。"""
 

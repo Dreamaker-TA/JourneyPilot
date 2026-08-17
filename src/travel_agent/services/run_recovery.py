@@ -17,14 +17,22 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from ..entities.trip_run import (
+    RunCommandStatus,
+    RunCommandType,
     RunRecoveryStatus,
     TripRunMode,
     TripRunResumePolicy,
     TripRunStatus,
+    is_terminal_status,
 )
+from ..infrastructure.run_command_store import RunCommandStore
 from ..infrastructure.run_execution_store import (
     RunExecutionStore,
     RunRecoveryCandidate,
+)
+from .run_commands import (
+    RUN_ENDED_BEFORE_CONSUMPTION,
+    RUN_INTERRUPTED_BEFORE_CONSUMPTION,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,11 +124,13 @@ class RunRecoveryService:
         *,
         trip_run_store: Any,
         execution_store: RunExecutionStore,
+        command_store: Optional[RunCommandStore] = None,
         checkpoint_probe: Optional[CheckpointProbe] = None,
         sweep_seconds: int = 60,
     ) -> None:
         self._trip_run_store = trip_run_store
         self._execution_store = execution_store
+        self._command_store = command_store
         self._checkpoint_probe = checkpoint_probe
         self._sweep_seconds = max(5, sweep_seconds)
         self._task: Optional[asyncio.Task] = None
@@ -201,6 +211,13 @@ class RunRecoveryService:
             )
         except ValueError:
             # 状态在这两次写之间又动了（例如 Bundle 原子完成先提交）。durable 记录赢。
+            await self._settle_commands(
+                candidate.run_id,
+                run_status="unchanged",
+                cancel_consumed=False,
+                error_code=RUN_ENDED_BEFORE_CONSUMPTION,
+                reason=reason,
+            )
             return RunRecoveryOutcome(
                 run_id=candidate.run_id,
                 previous_status=candidate.status.value,
@@ -208,6 +225,14 @@ class RunRecoveryService:
                 recovery_status=RunRecoveryStatus.RELEASED.value,
                 reason="durable_status_moved_during_recovery",
             )
+        # 取消请求在这次恢复里完成了 —— 它的命令因此是 consumed，而不是「没人管过」。
+        await self._settle_commands(
+            candidate.run_id,
+            run_status=TripRunStatus.CANCELLED.value,
+            cancel_consumed=True,
+            error_code=RUN_ENDED_BEFORE_CONSUMPTION,
+            reason=reason,
+        )
         return RunRecoveryOutcome(
             run_id=candidate.run_id,
             previous_status=candidate.status.value,
@@ -244,6 +269,15 @@ class RunRecoveryService:
                 recovery_status=recovery_status.value,
                 reason="durable_status_moved_during_recovery",
             )
+        # 中断不是「命令被执行了」：留在表里的取消与追加要求都没有生效。说出来 ——
+        # 否则用户点了继续，一条几小时前的取消会在下一个边界把它再停一次。
+        await self._settle_commands(
+            candidate.run_id,
+            run_status=TripRunStatus.INTERRUPTED.value,
+            cancel_consumed=False,
+            error_code=RUN_INTERRUPTED_BEFORE_CONSUMPTION,
+            reason=reason,
+        )
         return RunRecoveryOutcome(
             run_id=candidate.run_id,
             previous_status=candidate.status.value,
@@ -251,6 +285,41 @@ class RunRecoveryService:
             recovery_status=recovery_status.value,
             reason=reason,
         )
+
+    async def _settle_commands(
+        self,
+        run_id: str,
+        *,
+        run_status: str,
+        cancel_consumed: bool,
+        error_code: str,
+        reason: str,
+    ) -> None:
+        """给这个 Run 留下的控制命令一个结论。
+
+        没有执行器的 Run 上，pending 命令永远等不到消费者。**不许留成永远 pending**：
+        回执接口会一直答「还在等」，而实际上没有任何人会来。
+        """
+
+        if self._command_store is None:
+            return
+        try:
+            if cancel_consumed:
+                await self._command_store.settle_open_for_run(
+                    run_id,
+                    status=RunCommandStatus.CONSUMED,
+                    command_types=[RunCommandType.CANCEL],
+                    result={"run_status": run_status, "reason": reason},
+                )
+            await self._command_store.settle_open_for_run(
+                run_id,
+                status=RunCommandStatus.REJECTED,
+                error_code=error_code,
+                result={"run_status": run_status, "reason": reason},
+            )
+        except Exception as exc:
+            # 恢复判定本身已经写完了。命令收口失败只是回执的措辞，下一轮扫描会再来一次。
+            logger.warning("恢复时的命令收口失败 run_id=%s error=%s", run_id, exc)
 
     async def _resume_verdict(self, candidate: RunRecoveryCandidate) -> tuple[bool, str]:
         if candidate.resume_policy != TripRunResumePolicy.CHECKPOINT.value:
@@ -292,6 +361,16 @@ class RunRecoveryService:
                 recovery_status=RunRecoveryStatus.RECOVERY_CONTRACT_FAILURE.value,
                 reason=reason,
             )
+        if is_terminal_status(candidate.status):
+            await self._settle_commands(
+                candidate.run_id,
+                run_status=candidate.status.value,
+                cancel_consumed=candidate.status == TripRunStatus.CANCELLED,
+                error_code=RUN_ENDED_BEFORE_CONSUMPTION,
+                reason="executor_gone_on_inactive_run",
+            )
+        # 等用户的 Run（awaiting_input / created）不收口命令：它没有结束，只是没人在跑。
+        # 那条追加要求会在用户点继续、执行器重新 claim 时生效。
         released = await self._execution_store.release(
             candidate.run_id,
             recovery_status=RunRecoveryStatus.RELEASED,

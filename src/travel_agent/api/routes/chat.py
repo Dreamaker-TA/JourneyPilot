@@ -50,6 +50,7 @@ from ...workflows.run_control import (
     run_ts_ms,
     set_run_ts_anchor,
 )
+from ...services.run_commands import RunCommandCoordinator
 from ...services.run_lease import RunLeaseKeeper
 from .chat_stream_handlers import (
     SSEContext,
@@ -761,6 +762,7 @@ async def chat_stream(
 
         workflow_task: Optional[asyncio.Task] = None
         control_registered = False
+        command_coordinator: Optional[RunCommandCoordinator] = None
         process_cleanup_done = False
         stream_exit_reason = "stream_closed_before_terminal"
 
@@ -881,6 +883,32 @@ async def chat_stream(
             if checkpoint_id:
                 await lease_keeper.mark_safe_checkpoint(checkpoint_id)
 
+        async def settle_run_commands() -> None:
+            """给这个 Run 留下的控制命令一个结论。
+
+            **不许留成永远 pending**：一条没人再消费的追加要求，回执接口会一直答「还在等」。
+            结论按 durable 状态给，不按这次响应经历了什么。
+            """
+
+            if command_coordinator is None:
+                return
+            try:
+                current_run = await trip_run_store.get_run(trip_run.run_id)
+                if current_run is None or current_run.status in {
+                    TripRunStatus.RUNNING,
+                    TripRunStatus.AWAITING_INPUT,
+                }:
+                    # 运行还没结束（等待审批门 / 收敛失败）：命令留着，下一段执行或恢复扫描
+                    # 会看到它们。
+                    return
+                await command_coordinator.settle_terminal(current_run.status)
+            except Exception as settle_err:
+                logger.warning(
+                    "运行控制命令收口失败 run_id=%s error=%s",
+                    trip_run.run_id,
+                    settle_err,
+                )
+
         async def cleanup_stream_exit(reason: str) -> None:
             """Persist exit truth before bounded best-effort workflow shutdown."""
             if workflow_task is not None and not workflow_task.done() and control_registered:
@@ -889,7 +917,7 @@ async def chat_stream(
                     # This is only an execution-stop signal. Durable status below
                     # remains INTERRUPTED for disconnects and CANCELLED only for
                     # an explicit user cancellation.
-                    handle.request_cancel()
+                    handle.request_stop("stream_exit")
 
             try:
                 await converge_stream_exit(reason)
@@ -902,6 +930,10 @@ async def chat_stream(
                     convergence_err,
                     exc_info=True,
                 )
+
+            await settle_run_commands()
+            if command_coordinator is not None:
+                await command_coordinator.stop()
 
             # 状态已经收敛，租约再没有工作可做。交还它 —— 否则「继续」按钮要等一个
             # 已经没人在用的租约自然过期才点得动。
@@ -938,9 +970,21 @@ async def chat_stream(
             clear_process_run_state()
 
         try:
-            if use_deep_research:
-                run_control_registry.register(trip_run.run_id)
-                control_registered = True
+            # 快慢两条路径都注册：控制命令的消费者不该取决于这次是深度规划还是快问快答。
+            # 两条路径的节点都走 `with_run_control`，所以协作边界的语义也是同一份。
+            control_handle = run_control_registry.register(trip_run.run_id)
+            control_registered = True
+            command_coordinator = RunCommandCoordinator(
+                components.run_command_store,
+                trip_run_store,
+                trip_run.run_id,
+                control_handle,
+                poll_seconds=get_settings().run_control.command_poll_seconds,
+            )
+            # 先消费一次再开始：上一个进程死掉前落库的命令必须在这次执行的第一个边界就生效，
+            # 而不是等一个轮询周期。
+            await command_coordinator.poll_once()
+            command_coordinator.start()
             # 心跳与 SSE 客户端是否在线无关：它只说明执行器这个进程还活着。
             lease_keeper.start()
             if not checkpoint_resume:

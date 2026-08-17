@@ -240,6 +240,9 @@ class RunControlConfig(BaseModel):
     #: 孤儿扫描间隔。启动时先扫一次，之后按这个周期复扫 —— 上一个进程死时租约可能还剩
     #: 几十秒，只在启动扫一次会把那些 run 永久留在 running。
     recovery_sweep_seconds: int = Field(default=60, gt=0)
+    #: durable command 的轮询间隔。同进程的 API 会立刻唤醒执行器，所以这个值是通知丢失
+    #: 或跨进程时的上界延迟，不是正常路径的取消延迟。
+    command_poll_seconds: float = Field(default=2.0, gt=0)
 
     @model_validator(mode="after")
     def _heartbeat_fits_lease(self) -> "RunControlConfig":

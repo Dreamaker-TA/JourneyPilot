@@ -448,21 +448,41 @@ export interface TripRunControlRequest {
   session_id?: string | null;
 }
 
+/** 控制命令自身的状态。运行状态是另一件事，见 `run_status`。 */
+export type TripRunCommandStatus = 'pending' | 'claimed' | 'consumed' | 'rejected';
+
 export interface TripRunControlResponse {
   run_id: string;
   action: string;
+  /** 命令已落库，断线后可用它查结果，不必重发取消。 */
+  command_id: string;
   accepted: boolean;
-  status: TripRunStatus;
+  status: TripRunCommandStatus;
+  run_status: TripRunStatus;
   message: string;
-  in_process_handle: boolean;
 }
 
 export interface TripRunSupplementResponse {
   run_id: string;
+  command_id: string;
   accepted: boolean;
+  status: TripRunCommandStatus;
   category: TripSupplementCategory;
   message: string;
   impact_scope: string[];
+}
+
+export interface TripRunCommandResponse {
+  command_id: string;
+  run_id: string;
+  command_type: 'cancel' | 'supplement';
+  status: TripRunCommandStatus;
+  run_status: TripRunStatus;
+  error_code: string | null;
+  result: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  consumed_at: string | null;
 }
 
 export interface TripRunResponse {

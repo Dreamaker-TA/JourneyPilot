@@ -18,7 +18,13 @@ from typing import Any, Dict, Literal, Mapping, Optional
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from ...builders import get_components
-from ...entities.trip_run import TripRunStatus, available_run_actions
+from ...entities.trip_run import (
+    RunCommand,
+    RunCommandStatus,
+    RunCommandType,
+    TripRunStatus,
+    available_run_actions,
+)
 from ...local_profile import LOCAL_USER_ID
 from ...entities.workspace_v2_mutations import WorkspaceV2MutationError
 from ...entities.trip_input import classify_locked_identity_intent
@@ -51,6 +57,7 @@ from ..schemas import (
     RunCostSummaryResponse,
     ToolAuditListResponse,
     ToolAuditRecordResponse,
+    TripRunCommandResponse,
     TripRunControlRequest,
     TripRunControlResponse,
     TripRunCompletionDiagnosticsResponse,
@@ -81,6 +88,7 @@ from ...services.public_delivery import (
     public_delivery_bundle,
     public_event_manifest,
 )
+from ...services.run_commands import RUN_ENDED_BEFORE_CONSUMPTION
 from ...workflows.run_control import run_control_registry
 
 logger = logging.getLogger(__name__)
@@ -899,6 +907,9 @@ async def undo_workspace_v2_mutation(
 async def add_trip_run_supplement(run_id: str, request: TripRunSupplementRequest) -> TripRunSupplementResponse:
     """Queue an auxiliary requirement at the next cooperative node boundary.
 
+    要求先落 `trip_run_commands` 再通知执行器：接受它不取决于这次请求恰好命中哪个进程的
+    内存。通知丢了或换了进程，执行器下一次轮询照样看得见。
+
     This surface intentionally cannot mutate controlled trip identity. Identity
     changes must start a new TripRun so the brief, itinerary and map never drift.
     """
@@ -913,21 +924,48 @@ async def add_trip_run_supplement(run_id: str, request: TripRunSupplementRequest
         raise HTTPException(status_code=409, detail="基础旅行身份已锁定。请结束当前草稿或运行，再新建旅行。")
     if detail.run.status != TripRunStatus.RUNNING:
         raise HTTPException(status_code=409, detail="当前不在运行中；请在旅行简报的调研计划区域追加要求。")
-    if not run_control_registry.request_supplement(run_id, request.category, content):
-        raise HTTPException(status_code=409, detail="当前运行节点不可接收追加要求，请稍后重试。")
     impact_scope = _SUPPLEMENT_IMPACT[request.category]
-    await components.trip_run_store.append_event(
+    command, created = await components.run_command_store.enqueue(
         run_id,
-        "run.supplement_queued",
-        {"category": request.category, "content": content, "impact_scope": impact_scope},
+        RunCommandType.SUPPLEMENT,
+        {
+            "category": request.category,
+            "content": content,
+            "impact_scope": impact_scope,
+            "source": "supplement_api",
+        },
     )
+    if created:
+        await components.trip_run_store.append_event(
+            run_id,
+            "run.supplement_queued",
+            {
+                "command_id": command.command_id,
+                "category": request.category,
+                "content": content,
+                "impact_scope": impact_scope,
+            },
+        )
+    run_control_registry.notify(run_id)
     return TripRunSupplementResponse(
         run_id=run_id,
+        command_id=command.command_id,
         accepted=True,
+        status=command.status.value,
         category=request.category,
-        message=f"已加入当前运行，将在下一个执行边界分析对 { '、'.join(impact_scope) } 的影响。",
+        message=_supplement_message(command, impact_scope),
         impact_scope=impact_scope,
     )
+
+
+def _supplement_message(command: RunCommand, impact_scope: list[str]) -> str:
+    """回执上那句话。命令已经有结论时，说结论，不说「即将分析」。"""
+
+    if command.status is RunCommandStatus.CONSUMED:
+        return "这条追加要求已经生效。"
+    if command.status is RunCommandStatus.REJECTED:
+        return "这次运行已经越过可以追加要求的阶段，这条要求不会生效。"
+    return f"已加入当前运行，将在下一个执行边界分析对 { '、'.join(impact_scope) } 的影响。"
 
 
 def _raise_bundle_contract_superseded(exc: BundleContractSuperseded) -> None:
@@ -973,46 +1011,25 @@ async def _raise_run_not_cancellable(run_id: str, exc: Exception | None = None) 
 
 @router.post("/{run_id}/control", response_model=TripRunControlResponse)
 async def control_trip_run(run_id: str, request: TripRunControlRequest) -> TripRunControlResponse:
+    """取消一次运行：先落 durable command，再动状态，最后通知执行器。
+
+    顺序是承重的。命令先落库，所以「已接受」这句话在进程重启后依然成立；状态转换紧随其后，
+    所以 `cancel_requested` 一旦写进 `trip_runs`，交付边界的 `FOR UPDATE` 就再也提交不了
+    completion（cancel/complete race 的权威规则）。进程内通知是最后一步，纯粹为了少等一个
+    轮询周期 —— 它没命中不改变任何结论。
+    """
+
     components = get_components()
     detail = await components.trip_run_store.get_detail(run_id, event_limit=0)
     if detail is None:
         raise HTTPException(status_code=404, detail="TripRun 不存在")
     if request.session_id and detail.run.session_id != request.session_id:
         raise HTTPException(status_code=403, detail="无权控制该 TripRun")
-
-    if detail.run.status == TripRunStatus.CANCEL_REQUESTED:
-        handle_found = run_control_registry.request_cancel(run_id)
-        if not handle_found:
-            try:
-                run = await components.trip_run_store.transition_status(
-                    run_id,
-                    TripRunStatus.CANCELLED,
-                    current_node=detail.run.current_node,
-                    event_type="run.cancelled",
-                    payload={"reason": "no_active_workflow_handle"},
-                )
-            except ValueError as exc:
-                await _raise_run_not_cancellable(run_id, exc)
-                raise AssertionError("unreachable")
-            return TripRunControlResponse(
-                run_id=run_id,
-                action=request.action,
-                accepted=True,
-                status=run.status.value,
-                message="运行已停止。",
-                in_process_handle=False,
-            )
-        return TripRunControlResponse(
-            run_id=run_id,
-            action=request.action,
-            accepted=True,
-            status=TripRunStatus.CANCEL_REQUESTED.value,
-            message="取消请求已记录，正在等待工作流协作退出。",
-            in_process_handle=handle_found,
-        )
     if detail.run.status not in {
+        TripRunStatus.CREATED,
         TripRunStatus.RUNNING,
         TripRunStatus.AWAITING_INPUT,
+        TripRunStatus.CANCEL_REQUESTED,
     }:
         # Same answer as the race below, because it is the same question — the
         # precheck and the write only differ in when they noticed.  This used to
@@ -1020,12 +1037,37 @@ async def control_trip_run(run_id: str, request: TripRunControlRequest) -> TripR
         # machine-readable nor a sentence anyone should be shown .
         await _raise_run_not_cancellable(run_id)
 
+    # 有没有执行器在跑，只有数据库里的租约能回答。这个判断决定要不要就地收敛，所以它必须
+    # 早于状态写：写完之后读到的租约可能是这次请求自己引发的收口。
+    live_executor = await components.run_execution_store.has_live_lease(run_id)
+    command, _created = await components.run_command_store.enqueue(
+        run_id,
+        RunCommandType.CANCEL,
+        {"action": "cancel", "source": "control_api"},
+    )
+    if detail.run.status == TripRunStatus.CANCEL_REQUESTED and live_executor:
+        # 重发的停止请求，而执行器正在协作退出。不要越过它把状态改写成 cancelled ——
+        # 那会在一个还在跑的运行上写下终态，然后由它继续往一个已经封存的记录上写。
+        run_control_registry.notify(run_id)
+        return TripRunControlResponse(
+            run_id=run_id,
+            action=request.action,
+            command_id=command.command_id,
+            accepted=True,
+            status=command.status.value,
+            run_status=detail.run.status.value,
+            message="取消请求已记录，正在等待工作流协作退出。",
+        )
     try:
         run = await components.trip_run_store.request_cancel(
             run_id,
             current_node=detail.run.current_node,
             event_type="run.control_requested",
-            payload={"action": "cancel", "source": "control_api"},
+            payload={
+                "action": "cancel",
+                "source": "control_api",
+                "command_id": command.command_id,
+            },
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="TripRun 不存在") from exc
@@ -1034,41 +1076,85 @@ async def control_trip_run(run_id: str, request: TripRunControlRequest) -> TripR
         # a 409 about a state that keeps moving, not a server fault.
         await _raise_run_not_cancellable(run_id, exc)
         raise AssertionError("unreachable")
-    handle_found = run_control_registry.request_cancel(run_id)
-    if run.status == TripRunStatus.CANCELLED:
-        return TripRunControlResponse(
-            run_id=run_id,
-            action=request.action,
-            accepted=True,
-            status=run.status.value,
-            message="运行已停止。",
-            in_process_handle=handle_found,
+    run_control_registry.notify(run_id)
+
+    if run.status not in {TripRunStatus.CANCEL_REQUESTED, TripRunStatus.CANCELLED}:
+        # 运行在 precheck 与这次写之间自己结束了（交付原子提交先赢）。这条命令没有、也不会
+        # 被执行 —— 先给它一个结论，再答「已完成，无法取消」。留着它就是让回执永远说「还在等」。
+        await components.run_command_store.settle(
+            [command.command_id],
+            status=RunCommandStatus.REJECTED,
+            error_code=RUN_ENDED_BEFORE_CONSUMPTION,
+            result={"run_status": run.status.value},
         )
-    if not handle_found:
+        await _raise_run_not_cancellable(run_id)
+
+    if run.status == TripRunStatus.CANCEL_REQUESTED and not live_executor:
+        # 没有活着的执行器：这就是恢复扫描对 `cancel_requested` 的那条判定，只是不必让
+        # 用户等到下一轮扫描才看到运行停下来。判据是数据库里的租约，不是本进程的内存 ——
+        # 「registry 里没有 handle」曾经被当作「没人在跑」，而它只说明不是这个进程在跑。
         try:
             run = await components.trip_run_store.transition_status(
                 run_id,
                 TripRunStatus.CANCELLED,
                 current_node=detail.run.current_node,
                 event_type="run.cancelled",
-                payload={"reason": "no_active_workflow_handle"},
+                payload={"reason": "no_live_executor", "command_id": command.command_id},
             )
         except ValueError as exc:
             await _raise_run_not_cancellable(run_id, exc)
             raise AssertionError("unreachable")
+
+    if run.status == TripRunStatus.CANCELLED:
+        # 取消已经拿到它要的效果，命令就此收口。
+        await components.run_command_store.settle(
+            [command.command_id],
+            status=RunCommandStatus.CONSUMED,
+            result={"run_status": run.status.value, "settled_by": "control_api"},
+        )
+        settled = await components.run_command_store.get(run_id, command.command_id)
         return TripRunControlResponse(
             run_id=run_id,
             action=request.action,
+            command_id=command.command_id,
             accepted=True,
-            status=run.status.value,
+            status=(settled or command).status.value,
+            run_status=run.status.value,
             message="运行已停止。",
-            in_process_handle=False,
         )
     return TripRunControlResponse(
         run_id=run_id,
         action=request.action,
+        command_id=command.command_id,
         accepted=True,
-        status=run.status.value,
+        status=command.status.value,
+        run_status=run.status.value,
         message="取消请求已记录，正在等待工作流协作退出。",
-        in_process_handle=handle_found,
+    )
+
+
+@router.get("/{run_id}/commands/{command_id}", response_model=TripRunCommandResponse)
+async def read_trip_run_command(
+    run_id: str,
+    command_id: str,
+    session_id: Optional[str] = Query(default=None),
+) -> TripRunCommandResponse:
+    """一条控制命令的结论。断线之后查它，而不是重发一次取消。"""
+
+    components = get_components()
+    run = await _get_authorized_run(run_id, session_id=session_id)
+    command = await components.run_command_store.get(run_id, command_id)
+    if command is None:
+        raise HTTPException(status_code=404, detail="控制命令不存在")
+    return TripRunCommandResponse(
+        command_id=command.command_id,
+        run_id=command.run_id,
+        command_type=command.command_type.value,
+        status=command.status.value,
+        run_status=run.status.value,
+        error_code=command.error_code,
+        result=command.result,
+        created_at=command.created_at,
+        updated_at=command.updated_at,
+        consumed_at=command.consumed_at,
     )

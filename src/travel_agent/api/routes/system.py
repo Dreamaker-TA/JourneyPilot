@@ -123,10 +123,10 @@ _NON_BLOCKING_COMPONENTS = frozenset(
 
 
 async def _probe_run_execution(components: Any) -> Dict[str, Any]:
-    """活跃租约与上一次恢复扫描的结论。**报出来，不拦门禁**。
+    """活跃租约、未收口的控制命令与上一次恢复扫描的结论。**报出来，不拦门禁**。
 
     一个 Run 被判成不可恢复不代表这台服务不能接活；运营者需要看见的是有几个 Run
-    在等他点「继续」，以及扫描本身有没有出错。
+    在等他点「继续」、有多少条取消/追加要求还没有结论，以及扫描本身有没有出错。
     """
 
     recovery = components.run_recovery_service
@@ -144,6 +144,11 @@ async def _probe_run_execution(components: Any) -> Dict[str, Any]:
     except Exception as exc:
         payload["active_leases"] = None
         payload["message"] = f"执行租约计数失败: {exc}"
+    try:
+        payload["pending_commands"] = await components.run_command_store.count_open_by_type()
+    except Exception as exc:
+        payload["pending_commands"] = None
+        payload["command_message"] = f"控制命令计数失败: {exc}"
     return payload
 
 
