@@ -31,7 +31,8 @@ def test_empty_database_upgrades_to_head(temp_database, settings):
         census = take_census(conn)
 
     line = migrate.revision_line()
-    assert census.alembic_revision == line[-1], "迁移后版本号必须是 head"
+    head = line[-1]
+    assert census.alembic_revision == head, "迁移后版本号必须是 head"
     assert not census.missing_managed_tables, (
         f"upgrade head 之后仍缺表：{census.missing_managed_tables}"
     )
@@ -40,13 +41,13 @@ def test_empty_database_upgrades_to_head(temp_database, settings):
     )
 
     actual = _fingerprint(temp_database, settings.embedding.dimensions)
-    archived = migrate.load_baseline_fingerprint()
+    archived = migrate.expected_fingerprint_for(head, line=line)
     assert archived is not None, (
-        f"缺 baseline 指纹存档（{migrate.BASELINE_FINGERPRINT_PATH}）。"
-        "用 `journeypilot db write-fingerprint --revision 0001_baseline` 生成。"
+        f"缺 head（{head}）的指纹存档。"
+        f"用 `journeypilot db write-fingerprint --revision {head}` 生成。"
     )
     problems = diff_fingerprints(archived, actual)
-    assert not problems, "迁移建出来的结构与存档的 baseline 指纹不一致：\n" + "\n".join(problems)
+    assert not problems, "迁移建出来的结构与存档的 head 指纹不一致：\n" + "\n".join(problems)
 
 
 def test_unmanaged_database_is_adopted_not_rebuilt(unmanaged_database, settings):

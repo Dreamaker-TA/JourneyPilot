@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from ...builders import get_components
 from ...entities.trip_run import TripRunResumePolicy, TripRunStatus
 from ...entities.trip_input import RouteName, classify_locked_identity_intent
+from ...local_profile import LOCAL_USER_ID
 from ...services.route_intent import RouteIntentUnavailable, classify_route
 from ...utils.json_helpers import strip_think_blocks
 from ..schemas import ChatRequest
@@ -202,7 +203,7 @@ async def chat_stream(
         logger.warning(f"InputGuard 拦截请求: {_guard_result.reason} | session={session_id}")
         trip_run = await components.trip_run_store.create_run(
             session_id=session_id,
-            user_id=request.user_id,
+            user_id=LOCAL_USER_ID,
             mode=mode,
             request_message_id=user_message_id,
             assistant_message_id=message_id,
@@ -220,7 +221,7 @@ async def chat_stream(
         try:
             await components.chat_session_memory.save_turn(
                 session_id=session_id,
-                user_id=request.user_id,
+                user_id=LOCAL_USER_ID,
                 mode=mode,
                 user_message=user_message,
                 user_message_id=user_message_id,
@@ -278,7 +279,7 @@ async def chat_stream(
 
     # Validate preset before TripRun side effects so missing style is 404 without orphan runs.
     preset_context, preset_pack_constraints = await load_preset_context(
-        request.preset_id, request.user_id
+        request.preset_id, LOCAL_USER_ID
     )
     trip_run_store = components.trip_run_store
     authoritative_controlled_trip_identity: Dict[str, Any] = {}
@@ -295,8 +296,6 @@ async def chat_stream(
         detail = await trip_run_store.get_detail(request.run_id, event_limit=1)
         if detail is None:
             raise HTTPException(status_code=404, detail="TripRun 不存在")
-        if detail.run.user_id != request.user_id:
-            raise HTTPException(status_code=403, detail="无权访问该 TripRun")
         authoritative_controlled_trip_identity = dict(
             detail.run.controlled_trip_identity or {}
         )
@@ -404,7 +403,7 @@ async def chat_stream(
         )
         trip_run = await trip_run_store.create_run(
             session_id=session_id,
-            user_id=request.user_id,
+            user_id=LOCAL_USER_ID,
             mode=mode,
             request_message_id=user_message_id,
             assistant_message_id=message_id,
@@ -420,7 +419,7 @@ async def chat_stream(
         history, session_anchor_data, session_compressed = [], None, False
     else:
         history, session_anchor_data, session_compressed = await load_session_history(
-            components.chat_session_memory, request.user_id, session_id, mode, user_message,
+            components.chat_session_memory, LOCAL_USER_ID, session_id, mode, user_message,
             request_trip_identity,
             load_anchor=True,
         )
@@ -436,7 +435,7 @@ async def chat_stream(
         event_queue: asyncio.Queue = asyncio.Queue()
 
         _stream_profile = await load_user_profile(
-            components.user_profile_memory, request.user_id,
+            components.user_profile_memory, LOCAL_USER_ID,
         )
 
         workflow = components.travel_workflow if use_deep_research else components.fast_workflow
@@ -463,7 +462,7 @@ async def chat_stream(
             if not persisted:
                 await components.chat_session_memory.save_turn(
                     session_id=session_id,
-                    user_id=request.user_id,
+                    user_id=LOCAL_USER_ID,
                     mode=mode,
                     user_message=user_message,
                     user_message_id=user_message_id,
@@ -668,7 +667,7 @@ async def chat_stream(
                 workflow_kwargs = {
                     "user_message": user_message,
                     "session_id": session_id,
-                    "user_id": request.user_id,
+                    "user_id": LOCAL_USER_ID,
                     "selected_mcp_servers": request.selected_mcp_servers,
                     "conversation_history": history,
                     "stream_queue": event_queue,
@@ -1028,7 +1027,7 @@ async def chat_stream(
 
             await components.chat_session_memory.save_turn(
                 session_id=session_id,
-                user_id=request.user_id,
+                user_id=LOCAL_USER_ID,
                 mode=mode,
                 user_message=user_message,
                 user_message_id=user_message_id,
@@ -1051,7 +1050,7 @@ async def chat_stream(
             persisted = True
 
             trigger_memory_extraction(
-                components.memory_extractor, request.user_id, session_id,
+                components.memory_extractor, LOCAL_USER_ID, session_id,
                 user_message,
                 _stream_profile.auto_portrait if _stream_profile else "",
             )

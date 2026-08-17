@@ -83,17 +83,17 @@ function PdfDownloadButton({ bundle }: { bundle: PublicDeliveryBundle }) {
   const [message, setMessage] = React.useState<string | null>(null);
 
   const loadCurrent = React.useCallback(async () => {
-    const current = await api.getCurrentDeliveryBundle(bundle.manifest.run_id, state.userId, state.currentSessionId);
+    const current = await api.getCurrentDeliveryBundle(bundle.manifest.run_id, state.currentSessionId);
     dispatch({ type: 'CONFIRM_DELIVERY_BUNDLE', payload: current });
     dispatch({ type: 'SET_DELIVERABLE_VIEW', payload: 'full_report' });
     return current;
-  }, [bundle.manifest.run_id, dispatch, state.currentSessionId, state.userId]);
+  }, [bundle.manifest.run_id, dispatch, state.currentSessionId]);
 
   const download = async () => {
     setStatus('loading');
     setMessage(null);
     try {
-      const result = await api.exportCurrentTripReportPdf(bundle, state.userId, state.currentSessionId);
+      const result = await api.exportCurrentTripReportPdf(bundle, state.currentSessionId);
       if (result.bundleId && result.bundleId !== bundle.manifest.bundle_id) await loadCurrent();
       const url = URL.createObjectURL(result.blob);
       const anchor = document.createElement('a');

@@ -5,7 +5,6 @@ import { cn } from '../../lib/utils';
 import { ChartMark, type ChartMarkName } from './ChartMark';
 import { Neatline } from './Neatline';
 import { Input } from './Input';
-import { IdentityUnresolvedNotice } from './IdentityUnresolvedNotice';
 import { RequestFailureNotice } from './RequestFailureNotice';
 import { Skeleton } from './Skeleton';
 import { staggerContainer, staggerItem } from '../../lib/motion';
@@ -56,7 +55,6 @@ import type { RequestFailure } from '../../lib/requestFailureMessage';
  */
 
 export type SurfaceState =
-  | { kind: 'identity-unresolved' }
   | { kind: 'loading' }
   | { kind: 'error'; title: string; failure: RequestFailure; onRetry: () => void }
   /** 列表被查询筛成零，但内容是有的。不是空态，所以不挂标记。 */
@@ -89,8 +87,6 @@ interface PageShellProps {
   };
   /** 搜索下面的筛选行。 */
   tabs?: React.ReactNode;
-  /** 身份未解析那句话里的那个名词（「你的行程」/「资料库状态」）。 */
-  identitySurface: string;
   state: SurfaceState;
   children?: React.ReactNode;
 }
@@ -113,7 +109,6 @@ export const PageShell: React.FC<PageShellProps> = ({
   actions,
   search,
   tabs,
-  identitySurface,
   state,
   children,
 }) => {
@@ -195,9 +190,7 @@ export const PageShell: React.FC<PageShellProps> = ({
             <Neatline />
             {/* 内容排在 neatline（`z-0`）之上；`flex-1` 让空态那一格能在面里居中。 */}
             <div className="relative z-[1] flex flex-1 flex-col">
-              <SurfaceBody state={state} identitySurface={identitySurface}>
-                {children}
-              </SurfaceBody>
+              <SurfaceBody state={state}>{children}</SurfaceBody>
             </div>
           </div>
         </m.div>
@@ -208,13 +201,9 @@ export const PageShell: React.FC<PageShellProps> = ({
 
 const SurfaceBody: React.FC<{
   state: SurfaceState;
-  identitySurface: string;
   children?: React.ReactNode;
-}> = ({ state, identitySurface, children }) => {
+}> = ({ state, children }) => {
   switch (state.kind) {
-    case 'identity-unresolved':
-      return <IdentityUnresolvedNotice surface={identitySurface} />;
-
     case 'loading':
       // 一种加载态：刻线行的骨架。**不是转圈** —— 一枚无字转圈说不出在等什么，
       // 而骨架占的是「将要出现的那个东西」的位（`ui/Skeleton` 的存在理由）。

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from langchain_core.runnables import RunnableConfig
 
 from ...entities.state import TravelAgentState
+from ...local_profile import LOCAL_USER_ID
 from ...memory.context_builder import ContextBudget, build_context_report
 from ...memory.memory_store import MemoryStore
 from ...memory.user_profile import UserProfileMemory
@@ -104,7 +105,7 @@ async def build_run_constraint_pack(state: TravelAgentState) -> Dict[str, Any]:
     missing_layers: List[str] = []
     partial_reasons: List[str] = []
 
-    user_id = state.user_id or "anonymous"
+    user_id = state.user_id or LOCAL_USER_ID
     try:
         user_profile = await UserProfileMemory().get_user_profile(user_id)
         if user_profile is None:

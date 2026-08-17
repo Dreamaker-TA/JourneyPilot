@@ -23,7 +23,6 @@ export function useDeliveryBundleUndo(bundle: PublicDeliveryBundle) {
     try {
       const next = await api.getWorkspaceV2UndoHead(
         bundle.manifest.run_id,
-        current.userId,
         current.currentSessionId
       );
       setHead(next);
@@ -44,7 +43,6 @@ export function useDeliveryBundleUndo(bundle: PublicDeliveryBundle) {
     const current = currentStateRef.current;
     void api.getWorkspaceV2UndoHead(
       bundle.manifest.run_id,
-      current.userId,
       current.currentSessionId
     ).then((next) => {
       if (!active) return;
@@ -63,7 +61,6 @@ export function useDeliveryBundleUndo(bundle: PublicDeliveryBundle) {
     if (!current || current.manifest.run_id !== bundle.manifest.run_id || !head?.mutation_id) return;
     const manifest = current.manifest;
     const request = pending.current ?? {
-      user_id: currentStateRef.current.userId,
       session_id: currentStateRef.current.currentSessionId,
       undo_id: `undo_${crypto.randomUUID()}`,
       undo_of_mutation_id: head.mutation_id,
@@ -94,7 +91,6 @@ export function useDeliveryBundleUndo(bundle: PublicDeliveryBundle) {
               type: 'CONFIRM_DELIVERY_BUNDLE',
               payload: await readCurrentBundleAfterConflict(
                 manifest.run_id,
-                currentStateRef.current.userId,
                 currentStateRef.current.currentSessionId
               ),
             });

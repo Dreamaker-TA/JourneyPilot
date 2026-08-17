@@ -14,6 +14,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, Field
 
+from ..local_profile import LOCAL_USER_ID
+
 from .provider_evidence import (
     ProviderEvidenceOutcome,
     build_required_long_distance_legs,
@@ -131,7 +133,7 @@ def is_terminal_status(value: str | TripRunStatus) -> bool:
 class TripRun(BaseModel):
     run_id: str
     session_id: str = ""
-    user_id: str = "anonymous"
+    user_id: str = LOCAL_USER_ID
     mode: TripRunMode = TripRunMode.DEEP
     status: TripRunStatus = TripRunStatus.CREATED
     request_message_id: str = ""

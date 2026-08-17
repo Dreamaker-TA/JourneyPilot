@@ -44,7 +44,7 @@ async def load_user_profile(user_profile_memory, user_id: str):
 
 
 async def load_preset_context(
-    preset_id: Optional[str], user_id: str = ""
+    preset_id: Optional[str], user_id: str
 ) -> tuple[str, Dict[str, str]]:
     """加载预设，返回 (进 prompt 的那段文本, 交给 Constraint Pack 的那几项)。
 
@@ -174,7 +174,7 @@ def trigger_memory_extraction(
     existing_portrait: str,
 ) -> None:
     """触发异步记忆提取（fire-and-forget）。"""
-    if not user_msg or user_id == "anonymous":
+    if not user_msg:
         return
     try:
         task = asyncio.ensure_future(memory_extractor.extract_from_turn(

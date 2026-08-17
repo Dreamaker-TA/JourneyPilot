@@ -6,7 +6,6 @@ import { TextArea } from '../ui/Input';
 import { Modal } from '../ui/Modal';
 import { PageShell, type SurfaceState } from '../ui/PageShell';
 import { RuledList, RuledReadout, RuledRow } from '../ui/RuledList';
-import { useApp } from '../../context/AppContext';
 import { api } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { describeRequestFailure, type RequestFailure } from '../../lib/requestFailureMessage';
@@ -24,8 +23,6 @@ import type {
 const DEFAULT_COLLECTION = 'travel_knowledge';
 
 export const KnowledgeBasePage: React.FC = () => {
-  const { state } = useApp();
-  const { userId, userIdentityReady } = state;
   const [stats, setStats] = useState<KnowledgeCollectionStats | null>(null);
   const [loadingStats, setLoadingStats] = useState(true);
   const [loadError, setLoadError] = useState<RequestFailure | null>(null);
@@ -51,21 +48,11 @@ export const KnowledgeBasePage: React.FC = () => {
   const documentRequestIdRef = useRef(0);
 
   const loadStats = useCallback(async () => {
-    if (!userIdentityReady || !userId) {
-      // 不读，也**不假装在读**：这一支**不许**打开 loading（那等于让「我决定不读」借用
-      // 「我正在读」那个外观），而且**必须显式把 loading 关掉**。不关掉，「删除资料库」那枚钮
-      // 的 disabled 条件里 `loadingStats` 就永远是 true —— 一个身份守卫由一个没清掉的加载
-      // 标志代劳，两件事挤在同一个布尔上。身份守卫写在下面的 disabled 条件里。
-      setStats(null);
-      setLoadError(null);
-      setLoadingStats(false);
-      return;
-    }
     const requestId = ++statsRequestIdRef.current;
     setLoadingStats(true);
     setLoadError(null);
     try {
-      const nextStats = await api.getKnowledgeCollectionStats(userId, DEFAULT_COLLECTION);
+      const nextStats = await api.getKnowledgeCollectionStats(DEFAULT_COLLECTION);
       if (requestId !== statsRequestIdRef.current) return;
       setStats(nextStats);
     } catch (error) {
@@ -75,7 +62,7 @@ export const KnowledgeBasePage: React.FC = () => {
     } finally {
       if (requestId === statsRequestIdRef.current) setLoadingStats(false);
     }
-  }, [userId, userIdentityReady]);
+  }, []);
 
   useEffect(() => {
     void loadStats();
@@ -91,14 +78,14 @@ export const KnowledgeBasePage: React.FC = () => {
    * 最容易做出的动作，而两次读的返回顺序不由点击顺序决定。
    */
   useEffect(() => {
-    if (openSource === null || !userIdentityReady || !userId) return;
+    if (openSource === null) return;
     const requestId = ++documentRequestIdRef.current;
     setLoadingDocument(true);
     setDocumentError(null);
     setSourceDocument(null);
     void (async () => {
       try {
-        const next = await api.getKnowledgeSource(userId, DEFAULT_COLLECTION, openSource);
+        const next = await api.getKnowledgeSource(DEFAULT_COLLECTION, openSource);
         if (requestId !== documentRequestIdRef.current) return;
         setSourceDocument(next);
         setDraft(next.content);
@@ -109,7 +96,7 @@ export const KnowledgeBasePage: React.FC = () => {
         if (requestId === documentRequestIdRef.current) setLoadingDocument(false);
       }
     })();
-  }, [openSource, userId, userIdentityReady]);
+  }, [openSource]);
 
   const setStatus = (message: string, tone: 'ok' | 'error') => {
     setStatusTone(tone);
@@ -127,15 +114,10 @@ export const KnowledgeBasePage: React.FC = () => {
   };
 
   const handleSaveSource = async () => {
-    if (!openSource || !userIdentityReady || !userId || isSaving) return;
+    if (!openSource || isSaving) return;
     setIsSaving(true);
     try {
-      const result = await api.updateKnowledgeSource(
-        userId,
-        DEFAULT_COLLECTION,
-        openSource,
-        draft
-      );
+      const result = await api.updateKnowledgeSource(DEFAULT_COLLECTION, openSource, draft);
       setStatus(
         `已保存「${openSource}」，重新整理成 ${result.chunks_indexed} 段资料。`,
         'ok'
@@ -150,10 +132,10 @@ export const KnowledgeBasePage: React.FC = () => {
   };
 
   const handleDeleteSource = async () => {
-    if (!openSource || !userIdentityReady || !userId || isDeletingSource) return;
+    if (!openSource || isDeletingSource) return;
     setIsDeletingSource(true);
     try {
-      const result = await api.deleteKnowledgeSource(userId, DEFAULT_COLLECTION, openSource);
+      const result = await api.deleteKnowledgeSource(DEFAULT_COLLECTION, openSource);
       setStatus(
         `已删除「${openSource}」，原有 ${result.deleted_chunks} 段资料。`,
         'ok'
@@ -169,10 +151,10 @@ export const KnowledgeBasePage: React.FC = () => {
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !userIdentityReady || !userId || isUploading) return;
+    if (!file || isUploading) return;
     setIsUploading(true);
     try {
-      const result = await api.knowledgeUploadFile(userId, file, DEFAULT_COLLECTION);
+      const result = await api.knowledgeUploadFile(file, DEFAULT_COLLECTION);
       setStatus(`已把「${file.name}」加入资料库，整理成 ${result.chunks_indexed} 段资料。`, 'ok');
       await loadStats();
     } catch (error) {
@@ -186,10 +168,10 @@ export const KnowledgeBasePage: React.FC = () => {
   };
 
   const handleManualIndex = async () => {
-    if (!manualContent.trim() || !userIdentityReady || !userId || isIndexing) return;
+    if (!manualContent.trim() || isIndexing) return;
     setIsIndexing(true);
     try {
-      const result = await api.knowledgeIndex(userId, manualContent, DEFAULT_COLLECTION);
+      const result = await api.knowledgeIndex(manualContent, DEFAULT_COLLECTION);
       setManualContent('');
       setShowAddModal(false);
       setStatus(`已添加到资料库，整理成 ${result.chunks_indexed} 段资料。`, 'ok');
@@ -202,10 +184,10 @@ export const KnowledgeBasePage: React.FC = () => {
   };
 
   const handleDeleteCollection = async () => {
-    if (!userIdentityReady || !userId || isDeleting) return;
+    if (isDeleting) return;
     setIsDeleting(true);
     try {
-      await api.knowledgeDeleteCollection(userId, DEFAULT_COLLECTION);
+      await api.knowledgeDeleteCollection(DEFAULT_COLLECTION);
       setStats(null);
       setShowDeleteModal(false);
       setStatus('已清空资料库。', 'ok');
@@ -220,12 +202,9 @@ export const KnowledgeBasePage: React.FC = () => {
   const chunkCount = stats?.total ?? 0;
   const sourceDetails: KnowledgeSourceDetail[] = stats?.source_details ?? [];
   const sourceCount = stats?.sources ?? 0;
-  const identityPending = !userIdentityReady || !userId;
   const busy = isIndexing || isUploading || isDeleting;
 
-  const surfaceState: SurfaceState = identityPending
-    ? { kind: 'identity-unresolved' }
-    : loadingStats
+  const surfaceState: SurfaceState = loadingStats
       ? { kind: 'loading' }
       : loadError
         ? {
@@ -251,18 +230,17 @@ export const KnowledgeBasePage: React.FC = () => {
         /* 读数走标题右侧那一档，不是正文顶上一句游离的 12px 小字。
            `N 段资料 · M 个来源` 是纯数字 + 中文量词的读数，不是句子。 */
         readout={
-          !identityPending && !loadingStats && !loadError && chunkCount > 0
+          !loadingStats && !loadError && chunkCount > 0
             ? `${chunkCount} 段 · ${sourceCount} 源`
             : undefined
         }
-        identitySurface="资料库状态"
         actions={
           <>
             <Button
               variant="secondary"
               size="sm"
               onClick={() => setShowAddModal(true)}
-              disabled={identityPending || busy}
+              disabled={busy}
             >
               <Plus size={14} />
               添加文本
@@ -273,13 +251,13 @@ export const KnowledgeBasePage: React.FC = () => {
               accept=".txt,.md,.pdf,.docx"
               className="sr-only"
               onChange={handleFileUpload}
-              disabled={identityPending || isUploading || isDeleting}
+              disabled={isUploading || isDeleting}
             />
             <Button
               variant="primary"
               size="sm"
               loading={isUploading}
-              disabled={identityPending || isIndexing || isDeleting}
+              disabled={isIndexing || isDeleting}
               type="button"
               onClick={() => fileInputRef.current?.click()}
             >
@@ -315,7 +293,7 @@ export const KnowledgeBasePage: React.FC = () => {
             variant="ghost"
             size="sm"
             onClick={() => setShowDeleteModal(true)}
-            disabled={identityPending || busy || (chunkCount === 0 && sourceCount === 0)}
+            disabled={busy || (chunkCount === 0 && sourceCount === 0)}
           >
             <Trash2 size={14} />
             删除资料库
@@ -352,7 +330,7 @@ export const KnowledgeBasePage: React.FC = () => {
             size="sm"
             onClick={handleManualIndex}
             loading={isIndexing}
-            disabled={!manualContent.trim() || identityPending || isUploading || isDeleting}
+            disabled={!manualContent.trim() || isUploading || isDeleting}
           >
             添加到资料库
           </Button>
@@ -453,7 +431,7 @@ export const KnowledgeBasePage: React.FC = () => {
               size="sm"
               onClick={handleDeleteCollection}
               loading={isDeleting}
-              disabled={identityPending || isUploading || isIndexing}
+              disabled={isUploading || isIndexing}
             >
               确认删除
             </Button>

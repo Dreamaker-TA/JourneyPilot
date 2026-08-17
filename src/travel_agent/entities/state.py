@@ -12,6 +12,8 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field, model_validator
 
+from ..local_profile import LOCAL_USER_ID
+
 from .delivery_bundle import (
     FactAssertion,
     FactStoreSnapshot,
@@ -221,7 +223,7 @@ class TravelAgentState(BaseModel):
 
     # 基础会话
     session_id: str = ""
-    user_id: str = "anonymous"
+    user_id: str = LOCAL_USER_ID
     user_query: str = ""
     run_id: str = ""
     # P1-A 当前唯一基础旅行身份。Scope/Brief/Planner 不再从 raw user_query

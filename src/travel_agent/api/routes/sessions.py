@@ -13,21 +13,17 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
 from ...builders import get_components
+from ...local_profile import LOCAL_USER_ID
 from ...memory.compressor import AnchorSummary, ContextCompressor, build_context_compaction_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["sessions"])
 
 
-class CompactSessionRequest(BaseModel):
-    user_id: str
-
-
 @router.post("/sessions/{session_id}/compact")
-async def compact_session(session_id: str, request_body: CompactSessionRequest):
+async def compact_session(session_id: str):
     """
     手动压缩 API：将当前会话所有历史原地压缩为 Anchor Summary，写回当前会话。
 
@@ -36,26 +32,19 @@ async def compact_session(session_id: str, request_body: CompactSessionRequest):
     都会读取该 Anchor 注入 system prompt，并叠加**压缩点之后**的近期消息——已折叠进
     摘要的早期历史不再逐字重复注入。原会话的消息记录本身不删除，历史在界面上仍可回看。
 
-    Request body:
-        user_id: str
-
     Response: one immutable context_compaction event containing the full
     summary and every explicit planning constraint.
     """
     components = get_components()
-    user_id = request_body.user_id
-
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id 不能为空")
 
     # 获取全量消息 + 当前会话已有 Anchor（用于增量合并）
     try:
         all_messages = await components.chat_session_memory.get_all_messages_for_compression(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             session_id=session_id,
         )
         existing_anchor_raw, _ = await components.chat_session_memory.get_anchor(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             session_id=session_id,
         )
     except PermissionError:
@@ -90,7 +79,7 @@ async def compact_session(session_id: str, request_body: CompactSessionRequest):
     # 更新 anchor_summary 列并递增 compression_count，后续构建上下文即读到它。
     try:
         await components.chat_session_memory.save_anchor(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             session_id=session_id,
             anchor_data=anchor.to_dict(),
         )
@@ -101,7 +90,7 @@ async def compact_session(session_id: str, request_body: CompactSessionRequest):
     event = build_context_compaction_event(anchor, source="manual")
     try:
         event = await components.chat_session_memory.append_context_compaction_event(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             session_id=session_id,
             event=event,
         )

@@ -8,8 +8,9 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 
+from ...local_profile import LOCAL_USER_ID
 from ...preset.store import PresetStore
 from ..schemas import (
     GenerateInstructionsRequest,
@@ -27,7 +28,6 @@ _store = PresetStore()
 def _preset_to_response(preset) -> PresetResponse:
     return PresetResponse(
         id=preset.id,
-        user_id=preset.user_id,
         name=preset.name,
         description=preset.description,
         icon=preset.icon,
@@ -42,10 +42,10 @@ def _preset_to_response(preset) -> PresetResponse:
 
 
 @router.get("", response_model=List[PresetResponse])
-async def list_presets(user_id: str = Query(...)):
+async def list_presets():
     """获取用户所有预设（含系统内置）"""
     try:
-        presets = await _store.list_presets(user_id)
+        presets = await _store.list_presets(LOCAL_USER_ID)
         return [_preset_to_response(p) for p in presets]
     except Exception as e:
         logger.error(f"获取预设列表失败: {e}", exc_info=True)
@@ -53,9 +53,9 @@ async def list_presets(user_id: str = Query(...)):
 
 
 @router.get("/{preset_id}", response_model=PresetResponse)
-async def get_preset(preset_id: str, user_id: str = Query(...)):
+async def get_preset(preset_id: str):
     """获取单个预设"""
-    preset = await _store.get_preset(preset_id, user_id=user_id)
+    preset = await _store.get_preset(preset_id, user_id=LOCAL_USER_ID)
     if not preset:
         raise HTTPException(status_code=404, detail="预设不存在")
     return _preset_to_response(preset)
@@ -66,8 +66,8 @@ async def create_preset(request: PresetCreateRequest):
     """创建新预设"""
     try:
         preset = await _store.create_preset(
-            user_id=request.user_id,
-            data=request.model_dump(exclude={"user_id"}),
+            user_id=LOCAL_USER_ID,
+            data=request.model_dump(),
         )
         return _preset_to_response(preset)
     except Exception as e:
@@ -79,8 +79,8 @@ async def create_preset(request: PresetCreateRequest):
 async def update_preset(preset_id: str, request: PresetUpdateRequest):
     """更新预设"""
     try:
-        data = {k: v for k, v in request.model_dump(exclude={"user_id"}).items() if v is not None}
-        preset = await _store.update_preset(preset_id, request.user_id, data)
+        data = {k: v for k, v in request.model_dump().items() if v is not None}
+        preset = await _store.update_preset(preset_id, LOCAL_USER_ID, data)
         if not preset:
             raise HTTPException(status_code=404, detail="预设不存在")
         return _preset_to_response(preset)
@@ -96,10 +96,10 @@ async def update_preset(preset_id: str, request: PresetUpdateRequest):
 
 
 @router.delete("/{preset_id}")
-async def delete_preset(preset_id: str, user_id: str = Query(...)):
+async def delete_preset(preset_id: str):
     """删除预设"""
     try:
-        deleted = await _store.delete_preset(preset_id, user_id)
+        deleted = await _store.delete_preset(preset_id, LOCAL_USER_ID)
         if not deleted:
             raise HTTPException(status_code=404, detail="预设不存在")
         return {"status": "ok", "message": "预设已删除"}

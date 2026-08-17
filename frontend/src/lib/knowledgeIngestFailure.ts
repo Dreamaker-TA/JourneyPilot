@@ -15,7 +15,6 @@ import { describeRequestFailure, type RequestAction, type RequestFailure } from 
  */
 export const KNOWLEDGE_FAILURE_CODES = [
   'collection_address_invalid',
-  'user_scope_unresolved',
   'unsupported_file_type',
   'file_too_large',
   'document_unreadable',
@@ -44,10 +43,6 @@ export type KnowledgeFailureCode = (typeof KNOWLEDGE_FAILURE_CODES)[number];
 const FAILURE_BY_CODE: Record<Exclude<KnowledgeFailureCode, 'no_indexable_text'>, RequestFailure> = {
   collection_address_invalid: {
     message: '这一屏指向的资料库地址不对，刷新页面后重来。',
-    recovery: 'reload',
-  },
-  user_scope_unresolved: {
-    message: '没能确认是谁在操作资料库，刷新页面后重来。',
     recovery: 'reload',
   },
   unsupported_file_type: {

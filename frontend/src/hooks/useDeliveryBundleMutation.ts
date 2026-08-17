@@ -75,13 +75,11 @@ function intentMessage(
 
 function requestFor(
   bundle: PublicDeliveryBundle,
-  userId: string,
   sessionId: string | null,
   operation: WorkspaceV2MutationOperation,
   mutationId: string
 ): WorkspaceV2MutationRequest {
   return {
-    user_id: userId,
     session_id: sessionId,
     mutation_id: mutationId,
     base_bundle_id: bundle.manifest.bundle_id,
@@ -123,7 +121,6 @@ export function useDeliveryBundleMutation(bundle: PublicDeliveryBundle) {
     try {
       const latest = await readCurrentBundleAfterConflict(
         bundle.manifest.run_id,
-        current.userId,
         current.currentSessionId
       );
       dispatch({ type: 'CONFIRM_DELIVERY_BUNDLE', payload: latest });
@@ -170,7 +167,6 @@ export function useDeliveryBundleMutation(bundle: PublicDeliveryBundle) {
             await api.getWorkspaceV2Mutation(
               runId,
               pending.request.mutation_id,
-              pending.request.user_id,
               pending.request.session_id
             ),
             pending
@@ -201,7 +197,6 @@ export function useDeliveryBundleMutation(bundle: PublicDeliveryBundle) {
       intent,
       request: requestFor(
         current,
-        currentStateRef.current.userId,
         currentStateRef.current.currentSessionId,
         operation,
         mutationId

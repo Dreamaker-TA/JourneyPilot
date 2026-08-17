@@ -23,7 +23,6 @@ export function useStopRun() {
       try {
         const result = await api.controlTripRun(runId, {
           action: 'cancel',
-          user_id: state.userId,
           session_id: state.currentSessionId,
         });
         cancelAccepted = result.accepted;
@@ -75,7 +74,6 @@ export function useStopRun() {
     state.currentMessages,
     state.currentTripRunId,
     state.currentTripRunStatus,
-    state.userId,
     state.currentSessionId,
     state.planApprovalGate,
     dispatch,

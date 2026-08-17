@@ -10,7 +10,7 @@ import { ApiError } from './api';
  * 一个读结构、一个读字符串，不是同一件事的两份实现。
  *
  * 为什么需要它：`api.ts` 的 `ApiError.message` 兜底是 `` `${status} ${statusText}` ``，
- * 422 时是 `formatApiErrorDetail` 拼出来的 `body.user_id: field required` 这种 loc: msg 串。
+ * 422 时是 `formatApiErrorDetail` 拼出来的 `body.session_id: field required` 这种 loc: msg 串。
  * 这些串**一个字都不许印给旅行者** —— 「Normal client mode never
  * prints raw HTTP status text, exception classes, stack traces, or backend messages」，而
  * 合同给的唯一出口（developerMode 折叠区）本产品不做，所以这些技术文本没有归宿。

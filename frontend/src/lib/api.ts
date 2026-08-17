@@ -59,14 +59,6 @@ function withQuery(path: string, params: Record<string, string | number | null |
   return qs ? `${path}?${qs}` : path;
 }
 
-function requireResolvedUserId(userId: string): string {
-  const resolved = userId.trim();
-  if (!resolved || resolved === 'anonymous') {
-    throw new Error('用户身份尚未就绪');
-  }
-  return resolved;
-}
-
 function formatApiErrorDetail(detail: unknown): string | null {
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) {
@@ -235,13 +227,13 @@ export const api = {
     return fetchJson(withQuery('/places/search', { q: query, role }), { signal: options?.signal }, SLOW_TIMEOUT_MS);
   },
 
-  async getDefaultOrigin(userId: string): Promise<PlaceIdentity | null> {
-    const result = await fetchJson<{ user_id: string; place: PlaceIdentity | null }>(`/users/${encodeURIComponent(userId)}/default-origin`);
+  async getDefaultOrigin(): Promise<PlaceIdentity | null> {
+    const result = await fetchJson<{ place: PlaceIdentity | null }>('/user/default-origin');
     return result.place;
   },
 
-  async setDefaultOrigin(userId: string, place: PlaceIdentity): Promise<PlaceIdentity> {
-    const result = await fetchJson<{ user_id: string; place: PlaceIdentity }>(`/users/${encodeURIComponent(userId)}/default-origin`, {
+  async setDefaultOrigin(place: PlaceIdentity): Promise<PlaceIdentity> {
+    const result = await fetchJson<{ place: PlaceIdentity }>('/user/default-origin', {
       method: 'PUT', body: JSON.stringify({ place }),
     });
     return result.place;
@@ -256,17 +248,16 @@ export const api = {
     );
   },
 
-  async addTripRunSupplement(runId: string, request: { category: import('../types/api').TripSupplementCategory; content: string; user_id: string; session_id?: string | null }): Promise<import('../types/api').TripRunSupplementResponse> {
+  async addTripRunSupplement(runId: string, request: { category: import('../types/api').TripSupplementCategory; content: string; session_id?: string | null }): Promise<import('../types/api').TripRunSupplementResponse> {
     return fetchJson(`/trip-runs/${encodeURIComponent(runId)}/supplements`, {
       method: 'POST',
       body: JSON.stringify(request),
     });
   },
 
-  async listTripRuns(userId: string, options?: { sessionId?: string; mode?: 'deep' | 'fast'; limit?: number }): Promise<TripRunListResponse> {
+  async listTripRuns(options?: { sessionId?: string; mode?: 'deep' | 'fast'; limit?: number }): Promise<TripRunListResponse> {
     return fetchJson<TripRunListResponse>(
       withQuery('/trip-runs', {
-        user_id: userId,
         session_id: options?.sessionId,
         mode: options?.mode,
         limit: options?.limit ?? 80,
@@ -276,13 +267,11 @@ export const api = {
 
   async getTripRunDetail(
     runId: string,
-    userId: string,
     options?: { sessionId?: string | null }
   ): Promise<TripRunDetailResponse> {
     return fetchJson<TripRunDetailResponse>(
       withQuery(`/trip-runs/${encodeURIComponent(runId)}`, {
         event_limit: 80,
-        user_id: userId,
         session_id: options?.sessionId,
       })
     );
@@ -290,7 +279,6 @@ export const api = {
 
   async getTripRunEventWindow(
     runId: string,
-    userId: string,
     options: {
       sessionId?: string | null;
       afterSequence: number;
@@ -299,7 +287,6 @@ export const api = {
   ): Promise<TripRunEventWindowResponse> {
     return fetchJson<TripRunEventWindowResponse>(
       withQuery(`/trip-runs/${encodeURIComponent(runId)}/events`, {
-        user_id: userId,
         session_id: options.sessionId,
         after_sequence: options.afterSequence,
         limit: options.limit ?? 200,
@@ -307,10 +294,9 @@ export const api = {
     );
   },
 
-  async getCurrentDeliveryBundle(runId: string, userId: string, sessionId?: string | null): Promise<PublicDeliveryBundle> {
+  async getCurrentDeliveryBundle(runId: string, sessionId?: string | null): Promise<PublicDeliveryBundle> {
     return fetchJson<PublicDeliveryBundle>(
       withQuery(`/trip-runs/${encodeURIComponent(runId)}/bundle/current`, {
-        user_id: userId,
         session_id: sessionId,
       })
     );
@@ -319,7 +305,6 @@ export const api = {
 
   async exportCurrentTripReportPdf(
     bundle: PublicDeliveryBundle,
-    userId: string,
     sessionId?: string | null
   ): Promise<{ blob: Blob; filename: string; bundleId: string }> {
     const manifest = bundle.manifest;
@@ -328,7 +313,6 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({
-          user_id: userId,
           session_id: sessionId,
           bundle_id: manifest.bundle_id,
           workspace_revision: manifest.workspace_revision,
@@ -376,25 +360,22 @@ export const api = {
   async getWorkspaceV2Mutation(
     runId: string,
     mutationId: string,
-    userId: string,
     sessionId?: string | null
   ): Promise<WorkspaceV2MutationResponse> {
     return fetchJson<WorkspaceV2MutationResponse>(
       withQuery(
         `/trip-runs/${encodeURIComponent(runId)}/workspace/mutations/${encodeURIComponent(mutationId)}`,
-        { user_id: userId, session_id: sessionId }
+        { session_id: sessionId }
       )
     );
   },
 
   async getWorkspaceV2UndoHead(
     runId: string,
-    userId: string,
     sessionId?: string | null
   ): Promise<WorkspaceV2UndoHead> {
     return fetchJson<WorkspaceV2UndoHead>(
       withQuery(`/trip-runs/${encodeURIComponent(runId)}/workspace/undo-head`, {
-        user_id: userId,
         session_id: sessionId,
       })
     );
@@ -411,34 +392,31 @@ export const api = {
     );
   },
 
-  async listSessions(userId: string): Promise<SessionSummary[]> {
-    return fetchJson<SessionSummary[]>(`/users/${encodeURIComponent(userId)}/sessions`);
+  async listSessions(): Promise<SessionSummary[]> {
+    return fetchJson<SessionSummary[]>('/user/sessions');
   },
 
-  async getSessionDetail(userId: string, sessionId: string): Promise<SessionDetail> {
-    return fetchJson<SessionDetail>(
-      `/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`
-    );
+  async getSessionDetail(sessionId: string): Promise<SessionDetail> {
+    return fetchJson<SessionDetail>(`/user/sessions/${encodeURIComponent(sessionId)}`);
   },
 
-  async deleteSession(userId: string, sessionId: string): Promise<void> {
+  async deleteSession(sessionId: string): Promise<void> {
     await fetchJson<{ status?: string }>(
-      `/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`,
+      `/user/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'DELETE' }
     );
   },
 
-  async renameSession(userId: string, sessionId: string, title: string): Promise<SessionSummary> {
+  async renameSession(sessionId: string, title: string): Promise<SessionSummary> {
     return fetchJson<SessionSummary>(
-      `/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`,
+      `/user/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'PATCH', body: JSON.stringify({ title }) }
     );
   },
 
-  async compactSession(sessionId: string, userId: string) {
+  async compactSession(sessionId: string) {
     return fetchJson<import('../types/api').ContextCompactionPayload>(`/sessions/${encodeURIComponent(sessionId)}/compact`, {
       method: 'POST',
-      body: JSON.stringify({ user_id: userId }),
     }, LLM_TIMEOUT_MS);
   },
 
@@ -469,10 +447,9 @@ export const api = {
     return fetchJson<{ tools: ToolInfo[]; total: number }>('/tools');
   },
 
-  async getUserProfile(userId: string): Promise<UserProfile> {
-    const profile = await fetchJson<Partial<UserProfile>>(`/users/${encodeURIComponent(userId)}/profile`);
+  async getUserProfile(): Promise<UserProfile> {
+    const profile = await fetchJson<Partial<UserProfile>>('/user/profile');
     return {
-      user_id: profile.user_id || userId,
       display_name: profile.display_name || '',
       preferences: profile.preferences || {},
       trip_history_count: profile.trip_history_count || profile.trip_history?.length || 0,
@@ -483,23 +460,21 @@ export const api = {
   /**
    * 六组偏好的选项表。**这一屏画 chip 用的唯一来源** —— 不许在前端另写一份
    * （后端 `entities/user.py::TRAVEL_PREFERENCE_GROUPS` 是定义处）。
-   *
-   * 路径上没有 user_id：这张表与人无关。
    */
   async getPreferenceOptions(): Promise<PreferenceOptionGroup[]> {
-    return fetchJson<PreferenceOptionGroup[]>('/users/preference-options');
+    return fetchJson<PreferenceOptionGroup[]>('/user/preference-options');
   },
 
-  async updatePreferences(userId: string, preferences: Record<string, unknown>): Promise<void> {
-    await fetchJson<{ status?: string }>(`/users/${encodeURIComponent(userId)}/preferences`, {
+  async updatePreferences(preferences: Record<string, unknown>): Promise<void> {
+    await fetchJson<{ status?: string }>('/user/preferences', {
       method: 'PATCH',
       body: JSON.stringify({ preferences }),
     });
   },
 
-  async deleteMemoryFact(userId: string, factId: string, options: MemoryDeleteOptions = {}): Promise<MemoryDeletionResponse> {
+  async deleteMemoryFact(factId: string, options: MemoryDeleteOptions = {}): Promise<MemoryDeletionResponse> {
     return fetchJson<MemoryDeletionResponse>(
-      `/users/${encodeURIComponent(userId)}/memory/facts/${encodeURIComponent(factId)}`,
+      `/user/memory/facts/${encodeURIComponent(factId)}`,
       {
         method: 'DELETE',
         body: JSON.stringify(options),
@@ -507,22 +482,22 @@ export const api = {
     );
   },
 
-  async deleteAllMemory(userId: string, options: MemoryDeleteAllOptions = {}): Promise<MemoryDeletionResponse> {
-    return fetchJson<MemoryDeletionResponse>(`/users/${encodeURIComponent(userId)}/memory`, {
+  async deleteAllMemory(options: MemoryDeleteAllOptions = {}): Promise<MemoryDeletionResponse> {
+    return fetchJson<MemoryDeletionResponse>('/user/memory', {
       method: 'DELETE',
       body: JSON.stringify(options),
     });
   },
 
-  async cleanupExpiredMemory(userId: string, request: MemoryRetentionCleanupRequest = {}): Promise<MemoryDeletionResponse> {
-    return fetchJson<MemoryDeletionResponse>(`/users/${encodeURIComponent(userId)}/memory/retention/cleanup`, {
+  async cleanupExpiredMemory(request: MemoryRetentionCleanupRequest = {}): Promise<MemoryDeletionResponse> {
+    return fetchJson<MemoryDeletionResponse>('/user/memory/retention/cleanup', {
       method: 'POST',
       body: JSON.stringify(request),
     });
   },
 
-  async listMemoryFacts(userId: string): Promise<MemoryFactListResponse> {
-    return fetchJson<MemoryFactListResponse>(`/users/${encodeURIComponent(userId)}/memory/facts`);
+  async listMemoryFacts(): Promise<MemoryFactListResponse> {
+    return fetchJson<MemoryFactListResponse>('/user/memory/facts');
   },
 
   /**
@@ -536,39 +511,33 @@ export const api = {
    * 后端那个字段本身是活的：按 constraint /
    * preference 两档真的在发，界面按它印分类标签。没有生产方的只有前端这一侧。
    */
-  async addMemoryFact(userId: string, content: string): Promise<AddMemoryFactResponse> {
-    return fetchJson<AddMemoryFactResponse>(`/users/${encodeURIComponent(userId)}/memory/facts`, {
+  async addMemoryFact(content: string): Promise<AddMemoryFactResponse> {
+    return fetchJson<AddMemoryFactResponse>('/user/memory/facts', {
       method: 'POST',
       body: JSON.stringify({ content }),
     });
   },
 
-  async knowledgeUploadFile(userId: string, file: File, collection: string): Promise<KnowledgeUploadResponse> {
-    const resolvedUserId = requireResolvedUserId(userId);
+  async knowledgeUploadFile(file: File, collection: string): Promise<KnowledgeUploadResponse> {
     const form = new FormData();
     form.append('file', file);
     form.append('collection', collection);
     form.append('source', file.name);
-    form.append('user_id', resolvedUserId);
     return fetchJson<KnowledgeUploadResponse>('/knowledge/upload-file', {
       method: 'POST',
       body: form,
     }, DOCUMENT_TIMEOUT_MS);
   },
 
-  async knowledgeIndex(userId: string, content: string, collection: string, source = `manual-input-${new Date().toISOString()}`): Promise<KnowledgeUploadResponse> {
-    return fetchJson<KnowledgeUploadResponse>(withQuery('/knowledge/index', {
-      user_id: requireResolvedUserId(userId),
-    }), {
+  async knowledgeIndex(content: string, collection: string, source = `manual-input-${new Date().toISOString()}`): Promise<KnowledgeUploadResponse> {
+    return fetchJson<KnowledgeUploadResponse>('/knowledge/index', {
       method: 'POST',
       body: JSON.stringify({ content, collection, source }),
     }, DOCUMENT_TIMEOUT_MS);
   },
 
-  async knowledgeDeleteCollection(userId: string, collection: string): Promise<KnowledgeDeleteResponse> {
-    return fetchJson<KnowledgeDeleteResponse>(withQuery(`/knowledge/collection/${encodeURIComponent(collection)}`, {
-      user_id: requireResolvedUserId(userId),
-    }), {
+  async knowledgeDeleteCollection(collection: string): Promise<KnowledgeDeleteResponse> {
+    return fetchJson<KnowledgeDeleteResponse>(`/knowledge/collection/${encodeURIComponent(collection)}`, {
       method: 'DELETE',
     });
   },
@@ -577,9 +546,8 @@ export const api = {
    * 一篇资料的正文。来源名走查询参数（后端同理）——文件名里可以有斜杠和点，
    * 塞进路径段会被路由切开。
    */
-  async getKnowledgeSource(userId: string, collection: string, source: string): Promise<KnowledgeSourceDocument> {
+  async getKnowledgeSource(collection: string, source: string): Promise<KnowledgeSourceDocument> {
     return fetchJson<KnowledgeSourceDocument>(withQuery(`/knowledge/collections/${encodeURIComponent(collection)}/source`, {
-      user_id: requireResolvedUserId(userId),
       source,
     }));
   },
@@ -589,9 +557,8 @@ export const api = {
    * contextual 分块还逐段调一次 fast 模型），和上传一份文件一样慢，不是一次普通的
    * 表单提交。
    */
-  async updateKnowledgeSource(userId: string, collection: string, source: string, content: string): Promise<KnowledgeUploadResponse> {
+  async updateKnowledgeSource(collection: string, source: string, content: string): Promise<KnowledgeUploadResponse> {
     return fetchJson<KnowledgeUploadResponse>(withQuery(`/knowledge/collections/${encodeURIComponent(collection)}/source`, {
-      user_id: requireResolvedUserId(userId),
       source,
     }), {
       method: 'PUT',
@@ -599,23 +566,20 @@ export const api = {
     }, DOCUMENT_TIMEOUT_MS);
   },
 
-  async deleteKnowledgeSource(userId: string, collection: string, source: string): Promise<KnowledgeDeleteResponse> {
+  async deleteKnowledgeSource(collection: string, source: string): Promise<KnowledgeDeleteResponse> {
     return fetchJson<KnowledgeDeleteResponse>(withQuery(`/knowledge/collections/${encodeURIComponent(collection)}/source`, {
-      user_id: requireResolvedUserId(userId),
       source,
     }), {
       method: 'DELETE',
     });
   },
 
-  async getKnowledgeCollectionStats(userId: string, collection: string): Promise<KnowledgeCollectionStats> {
-    return fetchJson<KnowledgeCollectionStats>(withQuery(`/knowledge/collections/${encodeURIComponent(collection)}/stats`, {
-      user_id: requireResolvedUserId(userId),
-    }));
+  async getKnowledgeCollectionStats(collection: string): Promise<KnowledgeCollectionStats> {
+    return fetchJson<KnowledgeCollectionStats>(`/knowledge/collections/${encodeURIComponent(collection)}/stats`);
   },
 
-  async listPresets(userId: string): Promise<TravelPreset[]> {
-    return fetchJson<TravelPreset[]>(`/presets?user_id=${encodeURIComponent(userId)}`);
+  async listPresets(): Promise<TravelPreset[]> {
+    return fetchJson<TravelPreset[]>('/presets');
   },
 
   async createPreset(data: PresetCreateData): Promise<TravelPreset> {
@@ -632,16 +596,16 @@ export const api = {
     });
   },
 
-  async deletePreset(id: string, userId: string): Promise<void> {
-    await fetchJson<{ status?: string }>(`/presets/${encodeURIComponent(id)}?user_id=${encodeURIComponent(userId)}`, {
+  async deletePreset(id: string): Promise<void> {
+    await fetchJson<{ status?: string }>(`/presets/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   },
 
-  async generatePresetInstructions(prompt: string, userId: string): Promise<GenerateInstructionsResult> {
+  async generatePresetInstructions(prompt: string): Promise<GenerateInstructionsResult> {
     return fetchJson<GenerateInstructionsResult>('/presets/generate-instructions', {
       method: 'POST',
-      body: JSON.stringify({ description: prompt, user_id: userId }),
+      body: JSON.stringify({ description: prompt }),
     }, LLM_TIMEOUT_MS);
   },
 };

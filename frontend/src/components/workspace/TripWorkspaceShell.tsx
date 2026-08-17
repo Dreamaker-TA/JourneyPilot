@@ -25,7 +25,7 @@ export const TripWorkspaceShell: React.FC = () => {
       payload: { status: 'loading', message: null },
     });
     try {
-      const bundle = await api.getCurrentDeliveryBundle(runId, state.userId, state.currentSessionId);
+      const bundle = await api.getCurrentDeliveryBundle(runId, state.currentSessionId);
       if (!isPublicDeliveryBundle(bundle) || bundle.manifest.run_id !== runId) {
         throw new Error('delivery bundle contract mismatch');
       }
@@ -41,7 +41,7 @@ export const TripWorkspaceShell: React.FC = () => {
         },
       });
     }
-  }, [currentStateRef, dispatch, state.currentSessionId, state.currentTripRunId, state.userId]);
+  }, [currentStateRef, dispatch, state.currentSessionId, state.currentTripRunId]);
 
   const hasCanvasWork = state.deliveryBundle !== null;
   const showCanvas = state.canvasOpen && hasCanvasWork;

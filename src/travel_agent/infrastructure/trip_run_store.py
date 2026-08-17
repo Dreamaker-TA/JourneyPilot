@@ -39,6 +39,7 @@ from ..entities.trip_run import (
     utc_now_iso,
     with_pending_choice_summary,
 )
+from ..local_profile import LOCAL_USER_ID
 from .database import get_db_session
 
 
@@ -384,7 +385,7 @@ def _run_from_row(row: Dict[str, Any]) -> TripRun:
     return TripRun(
         run_id=row["run_id"],
         session_id=row.get("session_id") or "",
-        user_id=row.get("user_id") or "anonymous",
+        user_id=row.get("user_id") or LOCAL_USER_ID,
         mode=coerce_mode(row.get("mode") or TripRunMode.DEEP.value),
         status=coerce_status(row.get("status") or TripRunStatus.CREATED.value),
         request_message_id=row.get("request_message_id") or "",
@@ -467,7 +468,7 @@ class TripRunStore:
         run = TripRun(
             run_id=run_id or generate_trip_run_id(),
             session_id=session_id,
-            user_id=user_id or "anonymous",
+            user_id=user_id or LOCAL_USER_ID,
             mode=coerce_mode(mode),
             request_message_id=request_message_id,
             assistant_message_id=assistant_message_id,
@@ -1737,7 +1738,7 @@ class InMemoryTripRunStore(TripRunStore):
         run = TripRun(
             run_id=run_id or generate_trip_run_id(),
             session_id=session_id,
-            user_id=user_id or "anonymous",
+            user_id=user_id or LOCAL_USER_ID,
             mode=coerce_mode(mode),
             request_message_id=request_message_id,
             assistant_message_id=assistant_message_id,

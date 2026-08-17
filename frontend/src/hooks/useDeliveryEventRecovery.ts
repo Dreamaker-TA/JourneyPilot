@@ -59,11 +59,10 @@ export function useDeliveryEventRecovery(): void {
   const readyRuns = React.useRef(new Set<string>());
   const finalizedRuns = React.useRef(new Set<string>());
   const runId = state.currentTripRunId;
-  const userId = state.userId;
   const sessionId = state.currentSessionId;
 
   React.useEffect(() => {
-    if (!runId || !userId) return;
+    if (!runId) return;
     if (finalizedRuns.current.has(runId)) {
       const current = currentStateRef.current;
       if (current.currentTripRunId === runId && current.deliveryBundle?.manifest.run_id === runId) {
@@ -83,7 +82,7 @@ export function useDeliveryEventRecovery(): void {
         payload: { status: 'loading', message: '正在恢复这趟旅行的正式结果…' },
       });
       // Product surface is current-only: no by-id history read.
-      const bundle = await api.getCurrentDeliveryBundle(runId, userId, sessionId);
+      const bundle = await api.getCurrentDeliveryBundle(runId, sessionId);
       if (
         !isPublicDeliveryBundle(bundle)
         || bundle.manifest.run_id !== runId
@@ -100,7 +99,7 @@ export function useDeliveryEventRecovery(): void {
       while (active) {
         const requestedAfter = cursorByRun.current.get(runId) ?? 0;
         try {
-          const window = await api.getTripRunEventWindow(runId, userId, {
+          const window = await api.getTripRunEventWindow(runId, {
             sessionId,
             afterSequence: requestedAfter,
           });
@@ -203,7 +202,7 @@ export function useDeliveryEventRecovery(): void {
 
     void monitor();
     return () => { active = false; };
-  }, [currentStateRef, dispatch, runId, sessionId, userId]);
+  }, [currentStateRef, dispatch, runId, sessionId]);
 }
 
 export const DeliveryEventRecovery: React.FC = () => {

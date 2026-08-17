@@ -3,8 +3,7 @@
 支持文档上传、索引、查询和删除。
 
 - Upload size cap
-- User-scoped collections (hard cut, no unscoped shared delete)
-- Client-declared user_id is the trust boundary for collection ownership
+- 集合归属由服务端的本地身份解析，客户端不声明所有者
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 
 from ...builders import get_components
+from ...local_profile import LOCAL_USER_ID
 from ...rag.collections import canonical_logical_collection, user_scoped_collection
 from ...utils.user_text import content_length
 from ..schemas import (
@@ -74,25 +74,10 @@ def _logical_collection_name(collection: str) -> str:
         ) from exc
 
 
-def scope_collection(user_id: str, collection: str) -> str:
-    """Project the shared user scope contract to an HTTP 400 boundary.
+def scope_collection(collection: str) -> str:
+    """把逻辑集合名解析成本机用户的物理集合名。"""
 
-    集合名那一半先答（它有自己的 code），剩下的才是「这是谁的库」——
-    否则一个打错的集合名会被回报成「认不出这是谁」，而两者要做的事不一样。
-    """
-
-    logical = _logical_collection_name(collection)
-    try:
-        return user_scoped_collection(user_id, logical)
-    except ValueError as exc:
-        logger.warning("资料库归属解析失败: %s", exc)
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "user_scope_unresolved",
-                "message": "没能确认这个资料库属于谁",
-            },
-        ) from exc
+    return user_scoped_collection(_logical_collection_name(collection))
 
 
 def _require_indexable_text(text: str) -> str:
@@ -174,13 +159,10 @@ def _extract_file_text(raw: bytes, suffix: str, filename: str) -> str:
 
 
 @router.post("/index", response_model=KnowledgeUploadResponse)
-async def index_text(
-    request: KnowledgeUploadRequest,
-    user_id: str = Query(..., min_length=1, description="集合所有者 user_id"),
-):
+async def index_text(request: KnowledgeUploadRequest):
     """将文本内容索引到知识库（用户作用域集合）。"""
     logical_collection = _logical_collection_name(request.collection)
-    collection = scope_collection(user_id, logical_collection)
+    collection = scope_collection(logical_collection)
     # 手输那一路和上传文件走同一道界：空内容不许换来一句「成功索引 0 个文本块」。
     _require_indexable_text(request.content or "")
     components = get_components()
@@ -189,7 +171,7 @@ async def index_text(
             text=request.content,
             source=request.source,
             collection=collection,
-            metadata={**(request.metadata or {}), "owner_user_id": user_id},
+            metadata={**(request.metadata or {}), "owner_user_id": LOCAL_USER_ID},
         )
         return KnowledgeUploadResponse(
             chunks_indexed=count,
@@ -206,7 +188,6 @@ async def upload_file(
     file: UploadFile = File(...),
     collection: str = Form("default"),
     source: str = Form(""),
-    user_id: str = Form(..., min_length=1),
 ):
     """上传文件并索引到知识库（支持 .txt / .md / .pdf / .docx；上限 10MB）。"""
     suffix = Path(file.filename or "").suffix.lower()
@@ -238,7 +219,7 @@ async def upload_file(
     text = _require_indexable_text(extracted)
     source_name = source or file.filename or "uploaded_file"
     logical_collection = _logical_collection_name(collection)
-    scoped = scope_collection(user_id, logical_collection)
+    scoped = scope_collection(logical_collection)
 
     components = get_components()
     try:
@@ -246,7 +227,7 @@ async def upload_file(
             text=text,
             source=source_name,
             collection=scoped,
-            metadata={"owner_user_id": user_id, "filename": file.filename or ""},
+            metadata={"owner_user_id": LOCAL_USER_ID, "filename": file.filename or ""},
         )
         return KnowledgeUploadResponse(
             chunks_indexed=count,
@@ -259,12 +240,9 @@ async def upload_file(
 
 
 @router.post("/query", response_model=KnowledgeQueryResponse)
-async def query_knowledge(
-    request: KnowledgeQueryRequest,
-    user_id: str = Query(..., min_length=1),
-):
+async def query_knowledge(request: KnowledgeQueryRequest):
     """语义查询知识库（仅当前用户作用域集合）。"""
-    collection = scope_collection(user_id, request.collection)
+    collection = scope_collection(request.collection)
     components = get_components()
     try:
         docs = await components.vector_retriever.retrieve(
@@ -279,13 +257,10 @@ async def query_knowledge(
 
 
 @router.delete("/collection/{collection_name}", response_model=KnowledgeDeleteResponse)
-async def delete_collection(
-    collection_name: str,
-    user_id: str = Query(..., min_length=1),
-):
-    """删除指定集合（必须属于 user_id 作用域）。"""
+async def delete_collection(collection_name: str):
+    """删除指定集合。"""
     logical_collection = _logical_collection_name(collection_name)
-    scoped = scope_collection(user_id, logical_collection)
+    scoped = scope_collection(logical_collection)
     components = get_components()
     try:
         count = await components.knowledge_indexer.delete_collection(scoped)
@@ -334,7 +309,6 @@ async def _require_source_document(collection: str, source: str) -> dict:
 )
 async def get_source_document(
     collection_name: str,
-    user_id: str = Query(..., min_length=1),
     source: str = Query(..., min_length=1, description="来源名，就是列表里显示的那一行"),
 ):
     """读一篇资料的正文（用户作用域）。
@@ -343,7 +317,7 @@ async def get_source_document(
     放进路径就要跟路由分段规则打架，而一个被路由切开的来源名会变成一次 404。
     """
     logical_collection = _logical_collection_name(collection_name)
-    scoped = scope_collection(user_id, logical_collection)
+    scoped = scope_collection(logical_collection)
     document = await _require_source_document(scoped, source)
     return KnowledgeSourceDocumentResponse(
         collection=logical_collection, **document
@@ -357,7 +331,6 @@ async def get_source_document(
 async def update_source_document(
     collection_name: str,
     request: KnowledgeSourceUpdateRequest,
-    user_id: str = Query(..., min_length=1),
     source: str = Query(..., min_length=1),
 ):
     """改写一篇资料的正文，并按新正文重新分段入库。
@@ -370,7 +343,7 @@ async def update_source_document(
     来源名静默变成一篇新资料。
     """
     logical_collection = _logical_collection_name(collection_name)
-    scoped = scope_collection(user_id, logical_collection)
+    scoped = scope_collection(logical_collection)
     await _require_source_document(scoped, source)
     # 手输那一路、上传那一路、改写这一路共用同一道正文下界。
     content = _require_indexable_text(request.content or "")
@@ -380,7 +353,7 @@ async def update_source_document(
             text=content,
             source=source,
             collection=scoped,
-            metadata={"owner_user_id": user_id},
+            metadata={"owner_user_id": LOCAL_USER_ID},
         )
         return KnowledgeUploadResponse(
             chunks_indexed=count,
@@ -398,12 +371,11 @@ async def update_source_document(
 )
 async def delete_source_document(
     collection_name: str,
-    user_id: str = Query(..., min_length=1),
     source: str = Query(..., min_length=1),
 ):
     """删除一篇资料（正文 + 它的全部段）。整库销毁仍走 `/collection/{name}`。"""
     logical_collection = _logical_collection_name(collection_name)
-    scoped = scope_collection(user_id, logical_collection)
+    scoped = scope_collection(logical_collection)
     components = get_components()
     result = await components.knowledge_indexer.delete_source(scoped, source)
     if not result["existed"]:
@@ -420,13 +392,10 @@ async def delete_source_document(
 
 
 @router.get("/collections/{collection_name}/stats", response_model=KnowledgeCollectionStatsResponse)
-async def get_collection_stats(
-    collection_name: str,
-    user_id: str = Query(..., min_length=1),
-):
+async def get_collection_stats(collection_name: str):
     """获取集合统计信息（用户作用域）。"""
     logical_collection = _logical_collection_name(collection_name)
-    scoped = scope_collection(user_id, logical_collection)
+    scoped = scope_collection(logical_collection)
     components = get_components()
     try:
         stats = await components.knowledge_indexer.get_collection_stats(scoped)

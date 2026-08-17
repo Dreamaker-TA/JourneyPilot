@@ -167,7 +167,7 @@ export const InputArea: React.FC<{ showCompaction?: boolean }> = ({ showCompacti
     setCompactError(null);
 
     try {
-      const result = await api.compactSession(sessionId, state.userId);
+      const result = await api.compactSession(sessionId);
       const compaction = normalizeContextCompactionEvent(result);
       if (!compaction) throw new Error('incomplete compaction event');
       dispatch({
@@ -187,7 +187,7 @@ export const InputArea: React.FC<{ showCompaction?: boolean }> = ({ showCompacti
     } finally {
       setIsCompacting(false);
     }
-  }, [state.currentSessionId, state.userId, isCompacting]);
+  }, [state.currentSessionId, isCompacting]);
 
   // 停止可达性：流式中，或存在一个「挂起等待决策」（计划审批门 / 等待回答）的运行且输入
   // 为空时，发送键切换为停止键——让用户在「等待批准方案」这类暂停态也能直接终止本次运行。

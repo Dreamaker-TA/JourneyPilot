@@ -124,12 +124,11 @@ def _log_corpus_reach(
         _count(injected, False),
         ",".join(factory_collections),
     )
-    if corpus.user_probe is not None:
-        logger.info(
-            "FastAnswer RAG reach [origin=user]:    pool=%d injected=%d",
-            _count(pool, True),
-            _count(injected, True),
-        )
+    logger.info(
+        "FastAnswer RAG reach [origin=user]:    pool=%d injected=%d",
+        _count(pool, True),
+        _count(injected, True),
+    )
 
 
 class FastAnswerRagResult(NamedTuple):
@@ -709,7 +708,7 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
     rag = await _run_rag(
         HybridRetriever(),
         user_query,
-        grounding_corpus(state.user_id or ""),
+        grounding_corpus(),
         advanced_fast_mode=advanced_fast_mode,
     )
     rag_prefix = rag.prompt_prefix

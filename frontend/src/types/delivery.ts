@@ -819,7 +819,6 @@ export type WorkspaceV2MutationOperation =
   | { type: 'dismiss_weather_adjustment'; proposal_id: string };
 
 export interface WeatherBundleRefreshRequest {
-  user_id: string;
   session_id: string | null;
   refresh_id: string;
   base_bundle_id: string;
@@ -843,7 +842,6 @@ export interface WeatherBundleRefreshResponse {
 }
 
 export interface WorkspaceV2MutationRequest {
-  user_id: string;
   session_id: string | null;
   mutation_id: string;
   base_bundle_id: string;
@@ -875,7 +873,6 @@ export interface WorkspaceV2UndoHead {
 }
 
 export interface WorkspaceV2UndoRequest {
-  user_id: string;
   session_id: string | null;
   undo_id: string;
   undo_of_mutation_id: string;

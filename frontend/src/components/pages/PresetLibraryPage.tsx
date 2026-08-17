@@ -31,14 +31,10 @@ export const PresetLibraryPage: React.FC = () => {
   const [loadError, setLoadError] = useState<RequestFailure | null>(null);
 
   const loadPresets = useCallback(async () => {
-    // 身份未解析出来时 state.userId 是空串、也可能是 anonymous 哨兵，两种都不能
-    // 去读用户私有数据面；以 userIdentityReady 为准，落定后 loadPresets 会重建
-    // 并由下面的 effect 重跑。
-    if (!state.userIdentityReady) return;
     setLoading(true);
     setLoadError(null);
     try {
-      const result = await api.listPresets(state.userId);
+      const result = await api.listPresets();
       setPresets(result);
     } catch (err) {
       setPresets([]);
@@ -46,7 +42,7 @@ export const PresetLibraryPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [state.userId, state.userIdentityReady]);
+  }, []);
 
   useEffect(() => {
     void loadPresets();
@@ -89,7 +85,7 @@ export const PresetLibraryPage: React.FC = () => {
     // so this runs only after the user confirms.
     async (preset: TravelPreset) => {
       try {
-        await api.deletePreset(preset.id, state.userId);
+        await api.deletePreset(preset.id);
         if (state.activePresetId === preset.id) {
           dispatch({ type: 'SET_ACTIVE_PRESET', payload: null });
         }
@@ -99,7 +95,7 @@ export const PresetLibraryPage: React.FC = () => {
         await loadPresets();
       }
     },
-    [state.userId, state.activePresetId, dispatch, loadPresets]
+    [state.activePresetId, dispatch, loadPresets]
   );
 
   const handleCreatorClose = useCallback(() => {
@@ -119,31 +115,29 @@ export const PresetLibraryPage: React.FC = () => {
    * `WHERE user_id = :uid OR is_preset = TRUE` 保证九个官方风格对每个用户都返回。所以它
    * 不挂图纸标记（`mark: null`）—— 一枚挂在到不了的分支上的标记是一件永远不会被看到的家具。
    */
-  const surfaceState: SurfaceState = !state.userIdentityReady
-    ? { kind: 'identity-unresolved' }
-    : loading
-      ? { kind: 'loading' }
-      : loadError
+  const surfaceState: SurfaceState = loading
+    ? { kind: 'loading' }
+    : loadError
+      ? {
+          kind: 'error',
+          title: '暂时读不到旅行风格',
+          failure: loadError,
+          onRetry: () => void loadPresets(),
+        }
+      : presets.length === 0
         ? {
-            kind: 'error',
-            title: '暂时读不到旅行风格',
-            failure: loadError,
-            onRetry: () => void loadPresets(),
+            kind: 'empty',
+            mark: null,
+            line: '还没有旅行风格',
+            hint: '创建一个，规划时就能直接用。',
           }
-        : presets.length === 0
+        : filteredPresets.length === 0
           ? {
-              kind: 'empty',
-              mark: null,
-              line: '还没有旅行风格',
-              hint: '创建一个，规划时就能直接用。',
+              kind: 'search-miss',
+              line: '没有找到匹配的旅行风格',
+              hint: search ? '试试其他关键词' : '这个分类下还没有风格',
             }
-          : filteredPresets.length === 0
-            ? {
-                kind: 'search-miss',
-                line: '没有找到匹配的旅行风格',
-                hint: search ? '试试其他关键词' : '这个分类下还没有风格',
-              }
-            : { kind: 'ready' };
+          : { kind: 'ready' };
 
   return (
     <>
@@ -151,7 +145,6 @@ export const PresetLibraryPage: React.FC = () => {
         title="旅行风格"
         purpose="选一个，规划时按它的口味安排"
         readout={presets.length > 0 ? `${presets.length} 个` : undefined}
-        identitySurface="旅行风格"
         actions={
           <Button
             variant="primary"

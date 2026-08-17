@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from ...builders import get_components
+from ...local_profile import LOCAL_USER_ID
 from ...memory.memory_store import (
     MemoryStore,
     USER_MANUAL_IMPORTANCE,
@@ -27,13 +28,12 @@ from ..schemas import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/users", tags=["memory"])
+router = APIRouter(prefix="/api/user", tags=["memory"])
 
 
 def _deletion_response(summary) -> MemoryDeletionResponse:
     return MemoryDeletionResponse(
         request_id=summary.request_id,
-        user_id=summary.user_id,
         scope=summary.scope.value if hasattr(summary.scope, "value") else str(summary.scope),
         category=summary.category,
         fact_id=summary.fact_id,
@@ -60,30 +60,27 @@ def _fact_item(row: dict) -> MemoryFactItem:
     )
 
 
-@router.get("/{user_id}/memory/facts", response_model=MemoryFactListResponse)
-async def list_memory_facts(user_id: str):
-    """List every long-term memory fact for a user (newest first)."""
+@router.get("/memory/facts", response_model=MemoryFactListResponse)
+async def list_memory_facts():
+    """List every long-term memory fact (newest first)."""
     try:
-        rows = await MemoryStore().list_facts(user_id)
+        rows = await MemoryStore().list_facts(LOCAL_USER_ID)
         facts = [_fact_item(row) for row in rows]
-        return MemoryFactListResponse(user_id=user_id, facts=facts, total=len(facts))
+        return MemoryFactListResponse(facts=facts, total=len(facts))
     except Exception as e:
         logger.error("读取 memory facts 失败: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="memory fact list failed")
 
 
-@router.post("/{user_id}/memory/facts", response_model=AddMemoryFactResponse)
-async def add_memory_fact(
-    user_id: str,
-    request: AddMemoryFactRequest = Body(...),
-):
+@router.post("/memory/facts", response_model=AddMemoryFactResponse)
+async def add_memory_fact(request: AddMemoryFactRequest = Body(...)):
     """
     Add one memory the traveller wants JourneyPilot to always follow.
 
     手动记忆用固定 session_id 打标，importance 取最高档，
     规划时无条件全量注入（不依赖语义匹配）。
 
-    **幂等**：同一个人把同一句话加两次，库里只留一条，两次拿回同一个 `fact_id`，
+    **幂等**：同一句话加两次，库里只留一条，两次拿回同一个 `fact_id`，
     第二次的 `status` 是 `existing`。    这条去重规则只写在这一处，调用方
     不许各自再写一份。
     """
@@ -94,16 +91,15 @@ async def add_memory_fact(
     category = (request.category or "").strip() or "preference"
     store = MemoryStore()
     try:
-        existing = await store.find_manual_fact(user_id, content)
+        existing = await store.find_manual_fact(LOCAL_USER_ID, content)
         if existing is not None:
             return AddMemoryFactResponse(
-                user_id=user_id,
                 status="existing",
                 fact=_fact_item(existing),
             )
 
         fact_id = await store.save_fact(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             session_id=USER_MANUAL_SESSION_ID,
             content=content,
             category=category,
@@ -112,14 +108,13 @@ async def add_memory_fact(
         if fact_id is None:
             raise HTTPException(status_code=500, detail="memory fact save failed")
         # 已经落下真实记忆后才建立画像行；读取和失败写入都不会制造空画像。
-        await get_components().user_profile_memory.ensure_profile_for_write(user_id)
+        await get_components().user_profile_memory.ensure_profile_for_write(LOCAL_USER_ID)
         # 身份由写入交回来，按它读回整条 —— 不拿内容去全量列表里猜是哪一条。
-        created = await store.get_fact(user_id, fact_id)
+        created = await store.get_fact(LOCAL_USER_ID, fact_id)
         if created is None:
             # 刚写进去、按 id 读不回来，是真故障，不许包装成「成功但没有对象」。
             raise HTTPException(status_code=500, detail="memory fact save failed")
         return AddMemoryFactResponse(
-            user_id=user_id,
             status="created",
             fact=_fact_item(created),
         )
@@ -130,9 +125,8 @@ async def add_memory_fact(
         raise HTTPException(status_code=500, detail="memory fact save failed")
 
 
-@router.delete("/{user_id}/memory/facts/{fact_id}", response_model=MemoryDeletionResponse)
+@router.delete("/memory/facts/{fact_id}", response_model=MemoryDeletionResponse)
 async def delete_memory_fact(
-    user_id: str,
     fact_id: str,
     options: MemoryDeleteOptions = Body(default_factory=MemoryDeleteOptions),
 ):
@@ -140,7 +134,7 @@ async def delete_memory_fact(
     components = get_components()
     try:
         summary = await components.memory_lifecycle_store.delete_one_fact(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             fact_id=fact_id,
             request_id=options.request_id,
             reason=options.reason,
@@ -151,9 +145,8 @@ async def delete_memory_fact(
         raise HTTPException(status_code=500, detail="memory fact delete failed")
 
 
-@router.delete("/{user_id}/memory/categories/{category}", response_model=MemoryDeletionResponse)
+@router.delete("/memory/categories/{category}", response_model=MemoryDeletionResponse)
 async def delete_memory_category(
-    user_id: str,
     category: str,
     options: MemoryDeleteOptions = Body(default_factory=MemoryDeleteOptions),
 ):
@@ -161,7 +154,7 @@ async def delete_memory_category(
     components = get_components()
     try:
         summary = await components.memory_lifecycle_store.delete_by_category(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             category=category,
             request_id=options.request_id,
             reason=options.reason,
@@ -175,16 +168,15 @@ async def delete_memory_category(
         raise HTTPException(status_code=500, detail="memory category delete failed")
 
 
-@router.delete("/{user_id}/memory", response_model=MemoryDeletionResponse)
+@router.delete("/memory", response_model=MemoryDeletionResponse)
 async def delete_all_user_memory(
-    user_id: str,
     options: MemoryDeleteAllOptions = Body(default_factory=MemoryDeleteAllOptions),
 ):
-    """Physically delete all first-party long-term memory for a user."""
+    """Physically delete all first-party long-term memory."""
     components = get_components()
     try:
         summary = await components.memory_lifecycle_store.delete_all_user_memory(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             request_id=options.request_id,
             reason=options.reason,
             clear_auto_portrait=options.clear_auto_portrait,
@@ -197,16 +189,15 @@ async def delete_all_user_memory(
         raise HTTPException(status_code=500, detail="user memory delete failed")
 
 
-@router.post("/{user_id}/memory/retention/cleanup", response_model=MemoryDeletionResponse)
+@router.post("/memory/retention/cleanup", response_model=MemoryDeletionResponse)
 async def cleanup_expired_memory(
-    user_id: str,
     request: MemoryRetentionCleanupRequest = Body(default_factory=MemoryRetentionCleanupRequest),
 ):
     """Manually run retention cleanup for expired facts; no scheduler is implied."""
     components = get_components()
     try:
         summary = await components.memory_lifecycle_store.delete_expired(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             request_id=request.request_id,
             reason=request.reason,
             limit=request.limit,
@@ -217,21 +208,17 @@ async def cleanup_expired_memory(
         raise HTTPException(status_code=500, detail="memory retention cleanup failed")
 
 
-@router.get("/{user_id}/memory/forgetting-audits", response_model=MemoryForgettingAuditListResponse)
-async def list_memory_forgetting_audits(
-    user_id: str,
-    limit: int = Query(default=50, ge=1, le=200),
-):
-    """Read audit-safe forgetting records for a user."""
+@router.get("/memory/forgetting-audits", response_model=MemoryForgettingAuditListResponse)
+async def list_memory_forgetting_audits(limit: int = Query(default=50, ge=1, le=200)):
+    """Read audit-safe forgetting records."""
     components = get_components()
     try:
-        audits = await components.memory_lifecycle_store.list_audits(user_id, limit=limit)
+        audits = await components.memory_lifecycle_store.list_audits(LOCAL_USER_ID, limit=limit)
         responses = [
             MemoryForgettingAuditResponse(**_deletion_response(audit).model_dump())
             for audit in audits
         ]
         return MemoryForgettingAuditListResponse(
-            user_id=user_id,
             audits=responses,
             total=len(responses),
         )

@@ -10,7 +10,6 @@ import { PageShell, type SurfaceState } from '../ui/PageShell';
 import { Chip } from '../ui/Chip';
 import { RuledList, RuledRow } from '../ui/RuledList';
 import { GROUP_LABEL, SECTION_NOTE, SECTION_TITLE } from '../../lib/typography';
-import { useApp } from '../../context/AppContext';
 import { api } from '../../lib/api';
 import { describeRequestFailure, type RequestFailure } from '../../lib/requestFailureMessage';
 import {
@@ -58,9 +57,8 @@ function memoryCategoryLabel(category: string | null): string | null {
 const SECTION_RULE = 'border-t border-stroke/60 pt-10';
 
 export const UserPreferencesPage: React.FC = () => {
-  const { state } = useApp();
   /**
-   * 选项表整份来自服务端（`GET /api/users/preference-options`）。
+   * 选项表整份来自服务端（`GET /api/user/preference-options`）。
    *
    * **这一屏不许自己带一份。** 后端 `TravelPreference` 只收表里的值，所以「存下来的值
    * 一定画得出来」这条保证由那一份表给；再抄一份两份表就会漂开 —— 一个存在的值会变成
@@ -97,18 +95,14 @@ export const UserPreferencesPage: React.FC = () => {
   const [loadError, setLoadError] = useState<RequestFailure | null>(null);
 
   const loadAll = async () => {
-    // 身份未解析出来时 state.userId 是空串、也可能是 anonymous 哨兵，两种都不能去读
-    // 用户私有数据面（空串会打成 /api/users//profile 这种空段路径）；以
-    // userIdentityReady 为准，落定后本 effect 会重跑。
-    if (!state.userIdentityReady) return;
     setLoading(true);
     setLoadError(null);
     try {
       const [optionsResult, profileResult, factsResult, originResult] = await Promise.allSettled([
         api.getPreferenceOptions(),
-        api.getUserProfile(state.userId),
-        api.listMemoryFacts(state.userId),
-        api.getDefaultOrigin(state.userId),
+        api.getUserProfile(),
+        api.listMemoryFacts(),
+        api.getDefaultOrigin(),
       ]);
       // 选项表读不到 = 这一屏的偏好那一整块画不出来。**走失败态，不画空的 chip 排。**
       // 一排「全都没选」的 chip 在一个满是偏好的账户上是一句假话；说「读不到」比画一个
@@ -159,7 +153,7 @@ export const UserPreferencesPage: React.FC = () => {
 
   const refreshFacts = async () => {
     try {
-      const factList = await api.listMemoryFacts(state.userId);
+      const factList = await api.listMemoryFacts();
       setFacts(factList.facts);
       setFactsUnavailable(false);
     } catch (err) {
@@ -171,7 +165,7 @@ export const UserPreferencesPage: React.FC = () => {
   useEffect(() => {
     void loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.userId, state.userIdentityReady]);
+  }, []);
 
   const toggleOption = (group: PreferenceOptionGroup, option: string) => {
     // 单选 / 多选的规则与 payload 的形状都在 `lib/preferenceGroups.ts` 的纯函数里。
@@ -182,7 +176,7 @@ export const UserPreferencesPage: React.FC = () => {
     setSaving(true);
     setStatusMessage(null);
     try {
-      await api.updatePreferences(state.userId, buildPreferencePayload(groups, selections));
+      await api.updatePreferences(buildPreferencePayload(groups, selections));
       setStatusMessage('偏好已保存。');
     } catch (err) {
       setStatusMessage(describeRequestFailure(err, '保存', '你的偏好').message);
@@ -197,7 +191,7 @@ export const UserPreferencesPage: React.FC = () => {
     setAdding(true);
     setStatusMessage(null);
     try {
-      const result = await api.addMemoryFact(state.userId, content);
+      const result = await api.addMemoryFact(content);
       setNewMemory('');
       await refreshFacts();
       // 服务端对同一句话是幂等的。不说这一句，用户看到的就是「按了添加、
@@ -216,7 +210,7 @@ export const UserPreferencesPage: React.FC = () => {
     setBusy(true);
     setStatusMessage(null);
     try {
-      await api.deleteMemoryFact(state.userId, fact.fact_id, {
+      await api.deleteMemoryFact(fact.fact_id, {
         reason: `remove memory fact: ${fact.content}`,
       });
       await refreshFacts();
@@ -232,7 +226,7 @@ export const UserPreferencesPage: React.FC = () => {
     setStatusMessage(null);
     setShowDeleteAllModal(false);
     try {
-      await api.deleteAllMemory(state.userId, {
+      await api.deleteAllMemory({
         reason: 'user requested full first-party memory deletion',
         clear_auto_portrait: true,
         clear_graph: true,
@@ -251,7 +245,7 @@ export const UserPreferencesPage: React.FC = () => {
     setBusy(true);
     setStatusMessage(null);
     try {
-      const cleanup = await api.cleanupExpiredMemory(state.userId, {
+      const cleanup = await api.cleanupExpiredMemory({
         reason: 'manual retention cleanup from Memory Center',
         limit: 1000,
       });
@@ -268,25 +262,22 @@ export const UserPreferencesPage: React.FC = () => {
     }
   };
 
-  const surfaceState: SurfaceState = !state.userIdentityReady
-    ? { kind: 'identity-unresolved' }
-    : loading
-      ? { kind: 'loading' }
-      : loadError
-        ? {
-            kind: 'error',
-            title: '暂时读不到你的偏好',
-            failure: loadError,
-            onRetry: () => void loadAll(),
-          }
-        : { kind: 'ready' };
+  const surfaceState: SurfaceState = loading
+    ? { kind: 'loading' }
+    : loadError
+      ? {
+          kind: 'error',
+          title: '暂时读不到你的偏好',
+          failure: loadError,
+          onRetry: () => void loadAll(),
+        }
+      : { kind: 'ready' };
 
   return (
     <>
     <PageShell
       title="我的偏好"
       purpose="规划时会默认按这里的口味来"
-      identitySurface="我的偏好"
       state={surfaceState}
     >
       <div className="flex flex-col gap-10">
@@ -326,7 +317,7 @@ export const UserPreferencesPage: React.FC = () => {
                 if (!defaultOrigin) return;
                 setSavingOrigin(true);
                 try {
-                  await api.setDefaultOrigin(state.userId, defaultOrigin);
+                  await api.setDefaultOrigin(defaultOrigin);
                   setStatusMessage('常用出发地已更新。');
                 } catch (err) {
                   setStatusMessage(describeRequestFailure(err, '保存', '常用出发地').message);

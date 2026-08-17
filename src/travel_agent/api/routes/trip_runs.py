@@ -2,9 +2,8 @@
 
 Threat model
 -------------------------------------------
-Resources are bound to client-declared ``user_id`` / ``session_id``.  There is
-no server-side session cookie or OAuth in this codebase: knowing (or guessing)
-``run_id`` + ``user_id`` is sufficient to read/write that run.
+本机单用户产品，没有登录：知道 ``run_id`` 就能读写那个 run。带 ``session_id``
+时额外校验它属于该会话，避免客户端把另一段会话的 run 当成当前这段的。
 
 TripRun records and durable events remain internal recovery data. Public routes
 expose traveller actions and the current delivery workspace only.
@@ -20,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from ...builders import get_components
 from ...entities.trip_run import TripRunStatus
+from ...local_profile import LOCAL_USER_ID
 from ...entities.workspace_v2_mutations import WorkspaceV2MutationError
 from ...entities.trip_input import classify_locked_identity_intent
 from ...infrastructure.delivery_bundle_store import (
@@ -152,7 +152,6 @@ def _run_response(
     return TripRunResponse(
         run_id=run.run_id,
         session_id=run.session_id,
-        user_id=run.user_id,
         mode=run.mode.value,
         status=run.status.value,
         title=title,
@@ -306,20 +305,11 @@ def _tool_audit_response(record) -> ToolAuditRecordResponse:
     )
 
 
-async def _get_authorized_run(
-    run_id: str,
-    *,
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-):
+async def _get_authorized_run(run_id: str, *, session_id: Optional[str] = None):
     components = get_components()
     detail = await components.trip_run_store.get_detail(run_id, event_limit=0)
     if detail is None:
         raise HTTPException(status_code=404, detail="TripRun 不存在")
-    if not user_id and not session_id:
-        raise HTTPException(status_code=400, detail="缺少 user_id 或 session_id，无法校验 TripRun 访问权限")
-    if user_id and detail.run.user_id != user_id:
-        raise HTTPException(status_code=403, detail="无权访问该 TripRun")
     if session_id and detail.run.session_id != session_id:
         raise HTTPException(status_code=403, detail="无权访问该 TripRun")
     return detail.run
@@ -332,7 +322,7 @@ async def create_trip_run(request: TripRunCreateRequest) -> TripRunResponse:
     components = get_components()
     run = await components.trip_run_store.create_run(
         session_id=request.session_id,
-        user_id=request.user_id,
+        user_id=LOCAL_USER_ID,
         mode="deep",
         request_message_id=request.request_message_id,
         assistant_message_id=request.assistant_message_id,
@@ -345,7 +335,6 @@ async def create_trip_run(request: TripRunCreateRequest) -> TripRunResponse:
 
 @router.get("", response_model=TripRunListResponse)
 async def list_trip_runs(
-    user_id: str = Query(...),
     session_id: Optional[str] = Query(default=None),
     status: Optional[str] = Query(default=None),
     mode: Optional[Literal["deep", "fast"]] = Query(default=None),
@@ -354,14 +343,14 @@ async def list_trip_runs(
     components = get_components()
     try:
         runs = await components.trip_run_store.list_runs(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             session_id=session_id,
             status=status,
             mode=mode,
             limit=limit,
         )
         total = await components.trip_run_store.count_runs(
-            user_id=user_id,
+            user_id=LOCAL_USER_ID,
             session_id=session_id,
             status=status,
             mode=mode,
@@ -379,7 +368,6 @@ async def list_trip_runs(
 
 @router.get("/metrics/completion", response_model=RunCompletionMetrics)
 async def read_completion_metrics(
-    user_id: str = Query(...),
     session_id: Optional[str] = Query(default=None),
     limit: int = Query(default=200, ge=1, le=200),
 ) -> RunCompletionMetrics:
@@ -390,7 +378,7 @@ async def read_completion_metrics(
     """
     components = get_components()
     runs = await components.trip_run_store.list_runs(
-        user_id=user_id,
+        user_id=LOCAL_USER_ID,
         session_id=session_id,
         limit=limit,
     )
@@ -418,11 +406,10 @@ async def read_completion_metrics(
 async def read_trip_run(
     run_id: str,
     event_limit: int = Query(default=50, ge=0, le=200),
-    user_id: str = Query(...),
     session_id: Optional[str] = Query(default=None),
 ):
     components = get_components()
-    await _get_authorized_run(run_id, user_id=user_id, session_id=session_id)
+    await _get_authorized_run(run_id, session_id=session_id)
     detail = await components.trip_run_store.get_detail(run_id, event_limit=event_limit)
     if detail is None:
         raise HTTPException(status_code=404, detail="TripRun 不存在")
@@ -437,14 +424,13 @@ async def read_trip_run(
 @router.get("/{run_id}/events", response_model=TripRunEventWindowResponse)
 async def list_trip_run_events(
     run_id: str,
-    user_id: str = Query(...),
     session_id: Optional[str] = Query(default=None),
     after_sequence: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=500),
     retention_events: int = Query(default=500, ge=1, le=5000),
 ) -> TripRunEventWindowResponse:
     components = get_components()
-    run = await _get_authorized_run(run_id, user_id=user_id, session_id=session_id)
+    run = await _get_authorized_run(run_id, session_id=session_id)
     window = await components.trip_run_store.read_event_window(
         run_id,
         after_sequence=after_sequence,
@@ -475,11 +461,10 @@ async def list_trip_run_events(
 @router.get("/{run_id}/bundle/current", response_model=PublicDeliveryBundleResponse)
 async def read_current_delivery_bundle(
     run_id: str,
-    user_id: str = Query(...),
     session_id: Optional[str] = Query(default=None),
 ) -> PublicDeliveryBundleResponse:
     components = get_components()
-    await _get_authorized_run(run_id, user_id=user_id, session_id=session_id)
+    await _get_authorized_run(run_id, session_id=session_id)
     try:
         bundle = await components.delivery_bundle_store.get_current(run_id)
     except BundleContractSuperseded as exc:
@@ -500,7 +485,7 @@ async def refresh_current_bundle_weather(
 ) -> WeatherBundleRefreshResponse:
     components = get_components()
     await _get_authorized_run(
-        run_id, user_id=request.user_id, session_id=request.session_id
+        run_id, session_id=request.session_id
     )
     # Identity is all this route needs to know a Bundle exists.  Parsing the whole
     # payload here would put the read cost — and, once the stamp is checked, the
@@ -602,7 +587,7 @@ async def export_current_trip_report_pdf(
 ) -> Response:
     components = get_components()
     await _get_authorized_run(
-        run_id, user_id=request.user_id, session_id=request.session_id
+        run_id, session_id=request.session_id
     )
     try:
         current = await components.delivery_bundle_store.get_current(run_id)
@@ -679,7 +664,7 @@ async def preview_workspace_v2_mutation(
 ) -> WorkspaceV2MutationPreviewResponse:
     components = get_components()
     await _get_authorized_run(
-        run_id, user_id=request.user_id, session_id=request.session_id
+        run_id, session_id=request.session_id
     )
     service = WorkspaceV2Service(components.delivery_bundle_store)
     try:
@@ -729,7 +714,7 @@ async def apply_workspace_v2_mutation(
 ) -> WorkspaceV2MutationResponse:
     components = get_components()
     await _get_authorized_run(
-        run_id, user_id=request.user_id, session_id=request.session_id
+        run_id, session_id=request.session_id
     )
     service = WorkspaceV2Service(components.delivery_bundle_store)
     try:
@@ -786,11 +771,10 @@ async def apply_workspace_v2_mutation(
 async def read_workspace_v2_mutation(
     run_id: str,
     mutation_id: str,
-    user_id: str = Query(...),
     session_id: Optional[str] = Query(default=None),
 ) -> WorkspaceV2MutationResponse:
     components = get_components()
-    await _get_authorized_run(run_id, user_id=user_id, session_id=session_id)
+    await _get_authorized_run(run_id, session_id=session_id)
     try:
         record = await components.delivery_bundle_store.get_commit(run_id, mutation_id)
     except BundleContractSuperseded as exc:
@@ -814,11 +798,10 @@ async def read_workspace_v2_mutation(
 )
 async def read_workspace_v2_undo_head(
     run_id: str,
-    user_id: str = Query(...),
     session_id: Optional[str] = Query(default=None),
 ) -> WorkspaceV2UndoHeadResponse:
     components = get_components()
-    await _get_authorized_run(run_id, user_id=user_id, session_id=session_id)
+    await _get_authorized_run(run_id, session_id=session_id)
     head = await components.delivery_bundle_store.get_undo_head(run_id)
     if head is None:
         return WorkspaceV2UndoHeadResponse(available=False)
@@ -839,7 +822,7 @@ async def undo_workspace_v2_mutation(
 ) -> WorkspaceV2UndoResponse:
     components = get_components()
     await _get_authorized_run(
-        run_id, user_id=request.user_id, session_id=request.session_id
+        run_id, session_id=request.session_id
     )
     service = WorkspaceV2Service(components.delivery_bundle_store)
     try:
@@ -902,8 +885,6 @@ async def add_trip_run_supplement(run_id: str, request: TripRunSupplementRequest
     detail = await components.trip_run_store.get_detail(run_id, event_limit=0)
     if detail is None:
         raise HTTPException(status_code=404, detail="TripRun 不存在")
-    if detail.run.user_id != request.user_id:
-        raise HTTPException(status_code=403, detail="无权修改该 TripRun")
     if request.session_id and detail.run.session_id != request.session_id:
         raise HTTPException(status_code=403, detail="无权修改该 TripRun")
     content = request.content.strip()
@@ -975,10 +956,6 @@ async def control_trip_run(run_id: str, request: TripRunControlRequest) -> TripR
     detail = await components.trip_run_store.get_detail(run_id, event_limit=0)
     if detail is None:
         raise HTTPException(status_code=404, detail="TripRun 不存在")
-    if not request.user_id:
-        raise HTTPException(status_code=422, detail="user_id is required")
-    if request.user_id and detail.run.user_id != request.user_id:
-        raise HTTPException(status_code=403, detail="无权控制该 TripRun")
     if request.session_id and detail.run.session_id != request.session_id:
         raise HTTPException(status_code=403, detail="无权控制该 TripRun")
 

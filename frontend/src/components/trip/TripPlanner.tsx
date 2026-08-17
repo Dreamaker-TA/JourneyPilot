@@ -205,21 +205,15 @@ export const TripPlanner: React.FC<{ guidedText?: string; compact?: boolean; ini
     return () => window.clearInterval(timer);
   }, [config, naturalFocused, naturalText, reducedMotion]);
 
-  // 常用出发地属于用户私有数据面：身份还没从本地持久化解析出来时 state.userId 是空串，
-  // 也可能是 anonymous 哨兵，两种都不能发请求（空串会打成 /api/users//default-origin
-  // 这种空段路径）。所以以 userIdentityReady 为准而不是 userId 非空：ensureUserId 的值
-  // 来自 localStorage，不保证一定是 u_ 前缀。解析完成后本 effect 自动重跑，期间界面停
-  // 在读取骨架上。
   React.useEffect(() => {
-    if (!state.userIdentityReady) return;
     let active = true;
-    api.getDefaultOrigin(state.userId).then((place) => {
+    api.getDefaultOrigin().then((place) => {
       if (!active) return;
       setOrigin(extracted?.origin ? null : place);
       setOriginReady(Boolean(place));
     }).catch(() => { if (active) setOriginReady(false); });
     return () => { active = false; };
-  }, [extracted?.origin, state.userId, state.userIdentityReady]);
+  }, [extracted?.origin]);
 
   const days = tripDays(startDate, endDate);
   const submitStructured = async () => {
@@ -266,7 +260,7 @@ export const TripPlanner: React.FC<{ guidedText?: string; compact?: boolean; ini
           <PlaceField role="origin" value={originSetup} onChange={setOriginSetup} label="常用出发地" />
           <Button variant="primary" className="flex-shrink-0" disabled={!originSetup} onClick={async () => {
             if (!originSetup) return;
-            const saved = await api.setDefaultOrigin(state.userId, originSetup);
+            const saved = await api.setDefaultOrigin(originSetup);
             setOrigin(saved); setOriginReady(true);
           }}>保存并继续</Button>
         </div>

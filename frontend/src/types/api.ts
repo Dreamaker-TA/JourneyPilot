@@ -80,7 +80,6 @@ export interface ChatRequest {
   }>;
   session_id?: string | null;
   run_id?: string | null;
-  user_id?: string;
   route?: JourneyRoute | null;
   route_decision?: RouteDecision | null;
   controlled_trip_identity?: ControlledTripIdentity | null;
@@ -219,7 +218,6 @@ export interface TripItem {
 }
 
 export interface UserProfile {
-  user_id: string;
   display_name: string;
   preferences: Record<string, unknown>;
   trip_history_count: number;
@@ -406,7 +404,6 @@ export function isTripRunResumable(status: TripRunStatus | null): boolean {
 
 export interface TripRunControlRequest {
   action: 'cancel';
-  user_id?: string | null;
   session_id?: string | null;
 }
 
@@ -430,7 +427,6 @@ export interface TripRunSupplementResponse {
 export interface TripRunResponse {
   run_id: string;
   session_id: string;
-  user_id: string;
   mode: string;
   status: TripRunStatus;
   title: string | null;
@@ -621,7 +617,6 @@ export interface MemoryRetentionCleanupRequest {
 
 export interface MemoryDeletionResponse {
   request_id: string;
-  user_id: string;
   scope: string;
   category: string | null;
   fact_id: string | null;
@@ -649,13 +644,11 @@ export interface MemoryFactItem {
 }
 
 export interface MemoryFactListResponse {
-  user_id: string;
   facts: MemoryFactItem[];
   total: number;
 }
 
 export interface AddMemoryFactResponse {
-  user_id: string;
   /** `created` = 这次真写了一条；`existing` = 同一句话本来就在，服务端没有重复写入。 */
   status: 'created' | 'existing';
   /** 一次成功的添加必然对着一条真事实，**不可为空**。 */

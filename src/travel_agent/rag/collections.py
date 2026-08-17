@@ -1,15 +1,16 @@
 """Canonical knowledge collection contracts.
 
 Public callers address logical collection names.  Physical PostgreSQL
-collection names are derived server-side from the resolved product user and
-must never cross the API or grounding boundary.
+collection names are derived server-side and must never cross the API or
+grounding boundary.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, MutableMapping, Optional
+from typing import Any, Iterable, Mapping, MutableMapping
+
+from ..local_profile import LOCAL_USER_ID
 
 USER_KNOWLEDGE_COLLECTION = "travel_knowledge"
 
@@ -20,8 +21,6 @@ FACTORY_KNOWLEDGE_COLLECTIONS = (
     "visa_policies",
     "travel_tips",
 )
-
-_USER_ID_SAFE_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 
 def canonical_logical_collection(collection: str) -> str:
@@ -35,14 +34,11 @@ def canonical_logical_collection(collection: str) -> str:
     return logical
 
 
-def user_scoped_collection(user_id: str, logical_collection: str) -> str:
+def user_scoped_collection(logical_collection: str) -> str:
     """Resolve the one internal physical name for a user-owned collection."""
 
-    cleaned_user = _USER_ID_SAFE_RE.sub("_", (user_id or "").strip())[:64]
-    if not cleaned_user or cleaned_user == "anonymous":
-        raise ValueError("user_id 无效")
     logical = canonical_logical_collection(logical_collection)
-    return f"u_{cleaned_user}__{logical}"
+    return f"u_{LOCAL_USER_ID}__{logical}"
 
 
 @dataclass(frozen=True)
@@ -55,14 +51,14 @@ class GroundingCorpus:
     而不是「主集合 + 备用集合」两档。
 
     它同时是「物理名不许越过接地边界」这条规则的唯一执行点：``probe_collections``
-    里的用户集合是物理名（``u_<user>__travel_knowledge``，检索层需要它），而
+    里的用户集合是物理名（``u_local__travel_knowledge``，检索层需要它），而
     ``logical_name`` 是任何会被人看见的地方——摘要的 coverage、SourceRecord 的
     snapshot、日志——必须改用的名字。两者写在同一个对象上，是为了让「查哪张表」
     和「对外叫什么」不可能各自漂移。
     """
 
     probe_collections: tuple[str, ...]
-    user_probe: Optional[str]
+    user_probe: str
     _logical_by_probe: Mapping[str, str]
 
     def logical_name(self, probe_collection: str) -> str:
@@ -79,22 +75,13 @@ class GroundingCorpus:
     def is_user_owned(self, logical_collection: str) -> bool:
         """这个**逻辑**集合名是不是用户自己上传的那一个。"""
 
-        return (
-            self.user_probe is not None
-            and logical_collection == USER_KNOWLEDGE_COLLECTION
-        )
+        return logical_collection == USER_KNOWLEDGE_COLLECTION
 
 
-def grounding_corpus(user_id: str) -> GroundingCorpus:
-    """出厂语料 + 这个用户自己上传的资料库，作为一份平等竞争的探针清单。
+def grounding_corpus() -> GroundingCorpus:
+    """出厂语料 + 本机用户上传的资料库，作为一份平等竞争的探针清单。
 
-    ``user_id`` 解析不出一个真实用户时（空串、``anonymous``）只有出厂语料 ——
-    那不是降级，是这台机器上确实没有第二份语料可查：用户库按 owner 物理隔离
-    （``user_scoped_collection``），没有 owner 就没有集合。这一支必须显式表达为
-    ``user_probe is None``，而不是让一个查不出东西的集合名混进清单：后者会让
-    「用户没上传过任何东西」和「上传了但一段都没被召回」在读数上长得一样。
-
-    **上面那句话对出厂那一半同样成立。** 出厂集合清单里的
+    出厂集合清单里的
     ``visa_policies`` 出厂就是空的（签证正文不含可安排的停留点，见
     本地种子说明里），却一直在被探针查 —— 每轮多印一行
     「向量 0 + lexical 0 → 融合 0」，而一次真正的接线断裂印出来的是同一行。
@@ -110,19 +97,12 @@ def grounding_corpus(user_id: str) -> GroundingCorpus:
     from .factory_seed import seeded_factory_collections
 
     probes = list(seeded_factory_collections())
-    logical_by_probe: dict[str, str] = {}
-    user_probe: Optional[str] = None
-    try:
-        user_probe = user_scoped_collection(user_id, USER_KNOWLEDGE_COLLECTION)
-    except ValueError:
-        user_probe = None
-    if user_probe is not None:
-        probes.append(user_probe)
-        logical_by_probe[user_probe] = USER_KNOWLEDGE_COLLECTION
+    user_probe = user_scoped_collection(USER_KNOWLEDGE_COLLECTION)
+    probes.append(user_probe)
     return GroundingCorpus(
         probe_collections=tuple(probes),
         user_probe=user_probe,
-        _logical_by_probe=logical_by_probe,
+        _logical_by_probe={user_probe: USER_KNOWLEDGE_COLLECTION},
     )
 
 
@@ -131,7 +111,7 @@ def relabel_to_logical_collections(
 ) -> None:
     """把检索层写在 doc 上的探针名改成公开逻辑名，就地改。
 
-    物理名（``u_<user>__travel_knowledge``）是检索层的地址，不是产品语汇：它会顺着
+    物理名（``u_local__travel_knowledge``）是检索层的地址，不是产品语汇：它会顺着
     ``doc["collection"]`` 流进 ``build_retrieval_summary`` 的 coverage、流进
     SourceRecord 的 snapshot，最后出现在用户点开的检查面上——而那一面连原始工具名
     都不许出现，更不用说一个带 owner id 的表内地址。

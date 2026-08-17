@@ -63,7 +63,6 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     session_id: Optional[str] = None
     run_id: Optional[str] = None
-    user_id: str = "anonymous"
     route: Optional[RouteName] = None
     route_decision: Optional[RouteDecision] = None
     controlled_trip_identity: Optional[ControlledTripIdentity] = None
@@ -119,7 +118,6 @@ class UpdateSessionRequest(BaseModel):
 
 class TripRunCreateRequest(BaseModel):
     session_id: str = ""
-    user_id: str = "anonymous"
     route_decision: RouteDecision
     controlled_trip_identity: ControlledTripIdentity
     request_message_id: str = ""
@@ -132,7 +130,6 @@ class DefaultOriginRequest(BaseModel):
 
 
 class DefaultOriginResponse(BaseModel):
-    user_id: str
     place: Optional[PlaceIdentity] = None
 
 
@@ -150,7 +147,6 @@ class PlaceSearchResponse(BaseModel):
 
 class TripRunControlRequest(BaseModel):
     action: Literal["cancel"]
-    user_id: Optional[str] = None
     session_id: Optional[str] = None
 
 
@@ -166,7 +162,6 @@ class TripRunControlResponse(BaseModel):
 class TripRunSupplementRequest(BaseModel):
     category: Literal["food", "transport", "accommodation", "pace", "must_do", "other"]
     content: str = Field(min_length=1, max_length=2000)
-    user_id: str = Field(min_length=1)
     session_id: Optional[str] = None
 
 
@@ -181,7 +176,6 @@ class TripRunSupplementResponse(BaseModel):
 class TripRunResponse(BaseModel):
     run_id: str
     session_id: str
-    user_id: str
     mode: str
     status: str
     title: Optional[str] = None
@@ -246,8 +240,8 @@ class TripRunListResponse(BaseModel):
     total: int = Field(
         default=0,
         description=(
-            "Number of TripRuns matching the query filters (user_id/session_id/"
-            "status/mode), ignoring `limit`. May exceed len(runs) when the page "
+            "Number of TripRuns matching the query filters (session_id/status/"
+            "mode), ignoring `limit`. May exceed len(runs) when the page "
             "is truncated."
         ),
     )
@@ -329,7 +323,6 @@ class TripRunCompletionDiagnosticsResponse(BaseModel):
 
 
 class WorkspaceV2MutationRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     session_id: Optional[str] = None
     mutation_id: str = Field(min_length=1, max_length=200)
     base_bundle_id: str = Field(min_length=1)
@@ -367,7 +360,6 @@ class WorkspaceV2UndoHeadResponse(BaseModel):
 
 
 class WorkspaceV2UndoRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     session_id: Optional[str] = None
     undo_id: str = Field(min_length=1, max_length=200)
     undo_of_mutation_id: str = Field(min_length=1, max_length=200)
@@ -384,7 +376,6 @@ class WorkspaceV2UndoResponse(BaseModel):
 
 
 class TripReportPdfExportRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     session_id: Optional[str] = None
     bundle_id: str = Field(min_length=1)
     workspace_revision: int = Field(ge=0)
@@ -393,7 +384,6 @@ class TripReportPdfExportRequest(BaseModel):
 
 
 class WeatherBundleRefreshRequest(BaseModel):
-    user_id: str = Field(min_length=1)
     session_id: Optional[str] = None
     refresh_id: str = Field(min_length=1, max_length=200)
     base_bundle_id: str = Field(min_length=1)
@@ -620,7 +610,6 @@ class KnowledgeQueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class UserProfileResponse(BaseModel):
-    user_id: str
     display_name: str
     preferences: Dict[str, Any]
 
@@ -673,7 +662,6 @@ class MemoryRetentionCleanupRequest(BaseModel):
 
 class MemoryDeletionResponse(BaseModel):
     request_id: str
-    user_id: str
     scope: str
     category: Optional[str] = None
     fact_id: Optional[str] = None
@@ -692,7 +680,6 @@ class MemoryForgettingAuditResponse(MemoryDeletionResponse):
 
 
 class MemoryForgettingAuditListResponse(BaseModel):
-    user_id: str
     audits: List[MemoryForgettingAuditResponse] = Field(default_factory=list)
     total: int = 0
 
@@ -709,7 +696,6 @@ class MemoryFactItem(BaseModel):
 
 
 class MemoryFactListResponse(BaseModel):
-    user_id: str
     facts: List[MemoryFactItem] = Field(default_factory=list)
     total: int = 0
 
@@ -720,7 +706,6 @@ class AddMemoryFactRequest(BaseModel):
 
 
 class AddMemoryFactResponse(BaseModel):
-    user_id: str
     # 'created' = 这次真写了一条；'existing' = 同一句话本来就在，没有重复写入。
     # 界面靠这个字眼解释「点了添加但列表没变长」。
     status: str
@@ -743,7 +728,6 @@ class PresetCreateRequest(BaseModel):
     category: str = "custom"
     instructions: str = Field(max_length=PRESET_INSTRUCTIONS_MAX_CHARS)
     constraints: PresetConstraints = Field(default_factory=PresetConstraints)
-    user_id: str
 
 
 class PresetUpdateRequest(BaseModel):
@@ -753,12 +737,10 @@ class PresetUpdateRequest(BaseModel):
     category: Optional[str] = None
     instructions: Optional[str] = Field(default=None, max_length=PRESET_INSTRUCTIONS_MAX_CHARS)
     constraints: Optional[PresetConstraints] = None
-    user_id: str
 
 
 class PresetResponse(BaseModel):
     id: str
-    user_id: str
     name: str = Field(max_length=PRESET_NAME_MAX_CHARS)
     description: str = Field(max_length=PRESET_DESCRIPTION_MAX_CHARS)
     icon: str
@@ -773,4 +755,3 @@ class PresetResponse(BaseModel):
 
 class GenerateInstructionsRequest(BaseModel):
     description: str
-    user_id: str = "anonymous"

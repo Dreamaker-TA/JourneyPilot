@@ -113,9 +113,6 @@ export interface AppState {
   activeItemId: string | null;
   /** 当前选中的现实地点；可来自已排入 item、待安排卡片或地图 marker。 */
   activePlaceId: string | null;
-  userId: string;
-  /** 用户身份已从本地持久化中解析或完成首次创建；ready 前不得访问用户私有数据面。 */
-  userIdentityReady: boolean;
   inputMode: 'normal' | 'stopped';
   activePresetId: string | null;
   activePresetName: string | null;
@@ -277,7 +274,6 @@ export type AppAction =
   | { type: 'SET_ACTIVE_DAY'; payload: number | null }
   | { type: 'SET_ACTIVE_ITEM'; payload: string | null }
   | { type: 'SET_ACTIVE_PLACE'; payload: string | null }
-  | { type: 'SET_USER_ID'; payload: string }
   | { type: 'SET_INPUT_MODE'; payload: 'normal' | 'stopped' }
   | { type: 'MARK_PENDING_DECISIONS_CANCELLED' }
   | { type: 'REMOVE_MESSAGE_BY_ID'; payload: string }
@@ -318,8 +314,6 @@ const initialState: AppState = {
   activeDayIndex: null,
   activeItemId: null,
   activePlaceId: null,
-  userId: '',
-  userIdentityReady: false,
   inputMode: 'normal',
   // 旅行风格的选择跨刷新存活（见 lib/activePresetStorage.ts）。初始态直接读存储，
   // 而不是先渲染成「没选」再由某个 effect 补回来：后者会让 chip 闪一下，
@@ -703,14 +697,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, lastRouteDecision: action.payload };
     case 'SET_CONTROLLED_TRIP_IDENTITY':
       return { ...state, controlledTripIdentity: action.payload };
-    case 'SET_USER_ID': {
-      const userId = action.payload.trim();
-      return {
-        ...state,
-        userId,
-        userIdentityReady: userId.length > 0 && userId !== 'anonymous',
-      };
-    }
     case 'SET_INPUT_MODE':
       return { ...state, inputMode: action.payload };
     case 'REMOVE_MESSAGE_BY_ID':

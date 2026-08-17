@@ -1,6 +1,5 @@
 import React, { useState, useCallback } from 'react';
 import { cn } from '../../lib/utils';
-import { useApp } from '../../context/AppContext';
 import { api } from '../../lib/api';
 import { describeRequestFailure } from '../../lib/requestFailureMessage';
 import { Button } from '../ui/Button';
@@ -58,7 +57,6 @@ interface PresetCreatorProps {
 }
 
 export const PresetCreator: React.FC<PresetCreatorProps> = ({ preset, onClose }) => {
-  const { state } = useApp();
   const isEdit = !!preset;
 
   const [step, setStep] = useState(0);
@@ -96,7 +94,7 @@ export const PresetCreator: React.FC<PresetCreatorProps> = ({ preset, onClose })
     setAiLoading(true);
     setAiError(null);
     try {
-      const result = await api.generatePresetInstructions(aiPrompt, state.userId);
+      const result = await api.generatePresetInstructions(aiPrompt);
       if (result.success && result.data) {
         const d = result.data;
         if (d.instructions) setInstructions(d.instructions);
@@ -125,7 +123,7 @@ export const PresetCreator: React.FC<PresetCreatorProps> = ({ preset, onClose })
     } finally {
       setAiLoading(false);
     }
-  }, [aiPrompt, aiLoading, state.userId, name, description]);
+  }, [aiPrompt, aiLoading, name, description]);
 
   const toggleFocusArea = (area: string) => {
     setFocusAreas((prev) => {
@@ -154,7 +152,6 @@ export const PresetCreator: React.FC<PresetCreatorProps> = ({ preset, onClose })
           category,
           instructions,
           constraints: finalConstraints,
-          user_id: state.userId,
         });
       } else {
         await api.createPreset({
@@ -164,7 +161,6 @@ export const PresetCreator: React.FC<PresetCreatorProps> = ({ preset, onClose })
           category,
           instructions,
           constraints: finalConstraints,
-          user_id: state.userId,
         });
       }
       onClose();
@@ -173,7 +169,7 @@ export const PresetCreator: React.FC<PresetCreatorProps> = ({ preset, onClose })
     } finally {
       setSaving(false);
     }
-  }, [saving, isEdit, preset, name, description, icon, category, instructions, constraints, focusAreas, state.userId, onClose]);
+  }, [saving, isEdit, preset, name, description, icon, category, instructions, constraints, focusAreas, onClose]);
 
   return (
     <Modal open onClose={onClose} title={isEdit ? '编辑旅行风格' : '创建旅行风格'} maxWidth="max-w-2xl">

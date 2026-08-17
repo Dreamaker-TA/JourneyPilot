@@ -38,6 +38,7 @@ from ..agents.orchestrator.delivery_quality_gate import (
 from ..agents.orchestrator.planner import planner_node
 from ..entities.trip_run import generate_trip_run_id
 from ..infrastructure.cost_ledger_store import get_cost_ledger_store
+from ..local_profile import LOCAL_USER_ID
 from ..infrastructure.delivery_bundle_store import DeliveryBundleStore
 from ..infrastructure.trip_run_store import TripRunStore, get_trip_run_store
 from ..infrastructure.tool_audit_store import get_tool_audit_store
@@ -555,7 +556,7 @@ class TravelPlanningWorkflow:
         self,
         user_message: str,
         session_id: str,
-        user_id: str = "anonymous",
+        user_id: str = LOCAL_USER_ID,
         selected_mcp_servers: Optional[List[str]] = None,
         current_time: str = "",
         conversation_history: Optional[list] = None,
@@ -608,7 +609,7 @@ class TravelPlanningWorkflow:
         self,
         user_message: str,
         session_id: str,
-        user_id: str = "anonymous",
+        user_id: str = LOCAL_USER_ID,
         selected_mcp_servers: Optional[List[str]] = None,
         current_time: str = "",
         conversation_history: Optional[list] = None,

@@ -23,10 +23,9 @@ export function conflictCurrentBundleId(error: unknown): string | null {
  */
 export async function readCurrentBundleAfterConflict(
   runId: string,
-  userId: string,
   sessionId: string | null
 ): Promise<PublicDeliveryBundle> {
-  const bundle = await api.getCurrentDeliveryBundle(runId, userId, sessionId);
+  const bundle = await api.getCurrentDeliveryBundle(runId, sessionId);
   if (!isPublicDeliveryBundle(bundle) || bundle.manifest.run_id !== runId) {
     throw new Error('current Delivery Bundle read after a conflict does not belong to this run');
   }

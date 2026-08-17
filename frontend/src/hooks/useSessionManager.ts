@@ -11,7 +11,6 @@ import type { ChatSession, FinalAnswerCitation, InformationAnnotation, Message, 
 import type { ControlledTripIdentity, SessionDetail, SessionSummary, TripRunStatus } from '../types/api';
 import { isPublicDeliveryBundle } from '../types/delivery';
 import { stripAssistantControlBlocks } from '../lib/visibleContent';
-import { USER_ID_STORAGE_KEY as USER_ID_KEY, resolveUserId } from '../lib/userIdentity';
 
 const LAST_SESSION_KEY = 'sta_last_session_id';
 
@@ -148,39 +147,15 @@ export function useSessionManager() {
     }
   }, []);
 
-  /**
-   * 这个浏览器是哪个用户。顺序（URL > 已存的 > 新生成）由
-   * `lib/userIdentity.ts::resolveUserId` 一处决定，这里只负责生成与落地。
-   */
-  const ensureUserId = useCallback((): string => {
-    let userId = '';
-    try {
-      const resolved = resolveUserId(window.location.search, localStorage.getItem(USER_ID_KEY));
-      userId = resolved.userId || `u_${generateId()}`;
-      if (resolved.persist) localStorage.setItem(USER_ID_KEY, userId);
-    } catch {
-      userId = `u_${generateId()}`;
-    }
-    dispatch({ type: 'SET_USER_ID', payload: userId });
-    return userId;
+  const refreshSessions = useCallback(async (): Promise<ChatSession[]> => {
+    const rawSessions = await api.listSessions();
+    const sessions = rawSessions.map(mapSummary);
+    dispatch({ type: 'SET_SESSIONS', payload: sessions });
+    return sessions;
   }, [dispatch]);
 
-  const refreshSessions = useCallback(
-    async (targetUserId?: string): Promise<ChatSession[]> => {
-      const userId = targetUserId || state.userId;
-      if (!userId) return [];
-      const rawSessions = await api.listSessions(userId);
-      const sessions = rawSessions.map(mapSummary);
-      dispatch({ type: 'SET_SESSIONS', payload: sessions });
-      return sessions;
-    },
-    [dispatch, state.userId]
-  );
-
   const openSession = useCallback(
-    async (sessionId: string, targetUserId?: string) => {
-      const userId = targetUserId || state.userId;
-      if (!userId) return;
+    async (sessionId: string) => {
       const seq = openSessionSeqRef.current + 1;
       openSessionSeqRef.current = seq;
 
@@ -206,8 +181,8 @@ export function useSessionManager() {
       }
 
       const [detail, runListResult] = await Promise.all([
-        api.getSessionDetail(userId, sessionId),
-        api.listTripRuns(userId, { sessionId, mode: 'deep', limit: 1 }).catch(() => null),
+        api.getSessionDetail(sessionId),
+        api.listTripRuns({ sessionId, mode: 'deep', limit: 1 }).catch(() => null),
       ]);
       if (seq !== openSessionSeqRef.current) return;
       cacheCurrentRuntimeIfStreaming(sessionId);
@@ -216,8 +191,8 @@ export function useSessionManager() {
       const latestRun = runListResult?.runs[0] || null;
       const [latestRunDetail, currentBundleResult] = latestRun
         ? await Promise.all([
-            api.getTripRunDetail(latestRun.run_id, userId).catch(() => null),
-            api.getCurrentDeliveryBundle(latestRun.run_id, userId, sessionId)
+            api.getTripRunDetail(latestRun.run_id).catch(() => null),
+            api.getCurrentDeliveryBundle(latestRun.run_id, sessionId)
               .then((bundle) => (
                 isPublicDeliveryBundle(bundle) && bundle.manifest.run_id === latestRun.run_id
                   ? { bundle, failed: false }
@@ -294,13 +269,12 @@ export function useSessionManager() {
 
       setLastSession(sessionId);
     },
-    [activeStreamRef, cacheCurrentRuntimeIfStreaming, dispatch, sessionRuntimeCacheRef, setLastSession, state.userId]
+    [activeStreamRef, cacheCurrentRuntimeIfStreaming, currentStateRef, dispatch, sessionRuntimeCacheRef, setLastSession]
   );
 
   const initializeSessions = useCallback(async () => {
     try {
-      const userId = ensureUserId();
-      const sessions = await refreshSessions(userId);
+      const sessions = await refreshSessions();
       if (sessions.length === 0) {
         // 首次进入本来就是空会话。不要用一次迟到的初始化结果重挂载首页表单，
         // 否则用户已经键入的地点或自然语言会被清空。
@@ -331,32 +305,29 @@ export function useSessionManager() {
         return;
       }
 
-      await openSession(targetId, userId);
+      await openSession(targetId);
     } catch {
       // 初始化失败时保留当前空会话。CLEAR_CHAT 会递增 conversationEpoch 并重挂载
       // 首页规划器，从而清空用户已经输入或选中的出发地。
     }
-  }, [ensureUserId, openSession, refreshSessions, state.activeView]);
+  }, [openSession, refreshSessions, state.activeView]);
 
   const deleteSession = useCallback(
     async (sessionId: string) => {
-      const userId = state.userId;
-      if (!userId) return;
-
-      await api.deleteSession(userId, sessionId);
+      await api.deleteSession(sessionId);
       dispatch({ type: 'REMOVE_SESSION', payload: sessionId });
 
       if (state.currentSessionId === sessionId) {
-        const sessions = await refreshSessions(userId);
+        const sessions = await refreshSessions();
         if (sessions.length > 0) {
-          await openSession(sessions[0].id, userId);
+          await openSession(sessions[0].id);
         } else {
           dispatch({ type: 'CLEAR_CHAT' });
           setLastSession(null);
         }
       }
     },
-    [dispatch, openSession, refreshSessions, setLastSession, state.currentSessionId, state.userId]
+    [dispatch, openSession, refreshSessions, setLastSession, state.currentSessionId]
   );
 
   /**
@@ -365,8 +336,6 @@ export function useSessionManager() {
    */
   const renameSession = useCallback(
     async (sessionId: string, nextTitle: string) => {
-      const userId = state.userId;
-      if (!userId) return;
       const trimmed = nextTitle.trim();
       if (!trimmed) return;
 
@@ -375,7 +344,7 @@ export function useSessionManager() {
 
       dispatch({ type: 'RENAME_SESSION', payload: { id: sessionId, title: trimmed } });
       try {
-        const updated = await api.renameSession(userId, sessionId, trimmed);
+        const updated = await api.renameSession(sessionId, trimmed);
         // 后端权威标题收口（可能因 20 字上限被截断）。
         dispatch({ type: 'RENAME_SESSION', payload: { id: sessionId, title: updated.title } });
       } catch (err) {
@@ -383,11 +352,10 @@ export function useSessionManager() {
         throw err instanceof Error ? err : new Error(String(err));
       }
     },
-    [dispatch, state.sessions, state.userId]
+    [dispatch, state.sessions]
   );
 
   return {
-    ensureUserId,
     refreshSessions,
     openSession,
     initializeSessions,

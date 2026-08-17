@@ -1,6 +1,5 @@
 export interface TravelPreset {
   id: string;
-  user_id: string;
   name: string;
   description: string;
   icon: string;
@@ -40,7 +39,6 @@ export interface PresetCreateData {
   category?: string;
   instructions: string;
   constraints?: PresetConstraints;
-  user_id: string;
 }
 
 export interface PresetUpdateData {
@@ -50,7 +48,6 @@ export interface PresetUpdateData {
   category?: string;
   instructions?: string;
   constraints?: PresetConstraints;
-  user_id: string;
 }
 
 export interface GenerateInstructionsResult {

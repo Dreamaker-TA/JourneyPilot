@@ -18,6 +18,7 @@ from langgraph.graph import END, START, StateGraph
 from ..entities.trip_run import generate_trip_run_id
 from ..agents.fast_answer.node import fast_answer_node
 from ..entities.state import TravelAgentState
+from ..local_profile import LOCAL_USER_ID
 from ..utils.message_helpers import build_messages
 from .run_control import run_attribution, with_run_control
 
@@ -58,7 +59,7 @@ class FastAnswerWorkflow:
         self,
         user_message: str,
         session_id: str,
-        user_id: str = "anonymous",
+        user_id: str = LOCAL_USER_ID,
         selected_mcp_servers: Optional[List[str]] = None,
         current_time: str = "",
         conversation_history: Optional[list] = None,
@@ -98,7 +99,7 @@ class FastAnswerWorkflow:
         self,
         user_message: str,
         session_id: str,
-        user_id: str = "anonymous",
+        user_id: str = LOCAL_USER_ID,
         selected_mcp_servers: Optional[List[str]] = None,
         current_time: str = "",
         conversation_history: Optional[list] = None,

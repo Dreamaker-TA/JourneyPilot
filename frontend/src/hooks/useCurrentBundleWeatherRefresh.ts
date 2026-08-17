@@ -32,7 +32,6 @@ export function useCurrentBundleWeatherRefresh(enabled: boolean) {
     let active = true;
 
     const request = {
-      user_id: state.userId,
       session_id: state.currentSessionId,
       refresh_id: refreshId,
       base_bundle_id: manifest.bundle_id,
@@ -67,7 +66,6 @@ export function useCurrentBundleWeatherRefresh(enabled: boolean) {
               try {
                 const current = await readCurrentBundleAfterConflict(
                   manifest.run_id,
-                  state.userId,
                   state.currentSessionId
                 );
                 if (active) dispatch({ type: 'CONFIRM_DELIVERY_BUNDLE', payload: current });
@@ -88,5 +86,5 @@ export function useCurrentBundleWeatherRefresh(enabled: boolean) {
     return () => {
       active = false;
     };
-  }, [bundle, currentStateRef, dispatch, enabled, state.currentSessionId, state.userId]);
+  }, [bundle, currentStateRef, dispatch, enabled, state.currentSessionId]);
 }

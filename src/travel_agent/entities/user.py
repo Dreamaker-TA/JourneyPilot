@@ -136,15 +136,15 @@ class TravelPreference(BaseModel):
     """用户在「我的偏好」那一屏亲手声明的旅行偏好。
 
     **这里的每一个字段都必须有产品内的写入方。** 唯一的写入方是
-    ``api/routes/user.py``：六组偏好走 ``PATCH /users/{id}/preferences``，
-    出发地走 ``PUT /users/{id}/default-origin``。记忆抽取器
+    ``api/routes/user.py``：六组偏好走 ``PATCH /api/user/preferences``，
+    出发地走 ``PUT /api/user/default-origin``。记忆抽取器
     （``memory/memory_extractor.py``）**不写任何偏好键** —— 它写记忆事实、
     知识图谱与 ``auto_portrait``，这是两套东西。
 
     界面上能编辑的那六组是唯一有写入方的合同，两条路径都只认它。
 
     **每一组的合法取值也在这个文件里**（``TRAVEL_PREFERENCE_GROUPS``），界面从
-    ``GET /api/users/preference-options`` 拿它 —— 那一屏不许自己写一份选项表。
+    ``GET /api/user/preference-options`` 拿它 —— 那一屏不许自己写一份选项表。
 
     这些字段抵达模型的通道**只有一条**：Constraint Pack 的
     ``panels/constraint.py::_map_manual_profile``，快慢两条路径共用。

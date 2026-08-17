@@ -46,7 +46,7 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({ className }) => 
     setLoadError(null);
     setNotice(null);
     try {
-      const result = await api.listPresets(state.userId);
+      const result = await api.listPresets();
       setPresets(result);
       if (state.activePresetId) {
         const stillThere = result.find((preset) => preset.id === state.activePresetId);
@@ -63,7 +63,7 @@ export const PresetSelector: React.FC<PresetSelectorProps> = ({ className }) => 
     } finally {
       setLoading(false);
     }
-  }, [dispatch, state.activePresetId, state.activePresetName, state.userId]);
+  }, [dispatch, state.activePresetId, state.activePresetName]);
 
   const handleClear = () => {
     dispatch({ type: 'SET_ACTIVE_PRESET', payload: null });

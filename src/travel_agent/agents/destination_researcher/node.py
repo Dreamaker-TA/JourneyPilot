@@ -1392,7 +1392,7 @@ async def destination_researcher_node(
     # 文本进不了 prompt，检索、精排、分级那几次调用就是白花；而 ``injected_rag_sources``
     # 若照旧交给解析器，接地守卫「模型只能引用它被展示过的那一段」这个前提就恰好在什么都
     # 没展示的那一轮失效。这个决定只写在一处。
-    corpus = grounding_corpus(state.user_id or "")
+    corpus = grounding_corpus()
     if require_current_candidate:
         rag_docs: List[Dict[str, Any]] = []
         retrieval_summary = None
@@ -1435,7 +1435,7 @@ async def destination_researcher_node(
         bool(state.constraint_pack),
         bool(state.session_anchor),
         bool(state.preset_context),
-        "user+factory" if corpus.user_probe else "factory",
+        "user+factory",
     )
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_content}]
@@ -1833,10 +1833,7 @@ def _log_rag_place_funnel(
     rows: List[tuple[str, tuple[str, ...]]] = []
     if factory_texts:
         rows.append(("factory", factory_texts))
-    if corpus.user_probe is not None:
-        rows.append(("user", user_texts))
-    if not rows:
-        return
+    rows.append(("user", user_texts))
 
     observed = observed_place_nominations(
         authoritative_tool_messages(authoritative_tool_results),

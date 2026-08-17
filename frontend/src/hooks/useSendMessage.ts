@@ -96,7 +96,6 @@ export function useSendMessage() {
         }],
         session_id: state.currentSessionId,
         run_id: initialRunId,
-        user_id: state.userId,
         route: options?.route ?? (initialRunId ? 'trip_refinement' : null),
         route_decision: options?.routeDecision ?? null,
         ...(options?.controlledTripIdentity
@@ -342,12 +341,12 @@ export function useSendMessage() {
       const recoverDeliveryTerminal = async () => {
         if (!deliveryReadyEvent || deliveryFinalized || !activeRunId) return;
         const readySequence = deliverySequence(deliveryReadyEvent, '旅行交付事件');
-        let window = await api.getTripRunEventWindow(activeRunId, state.userId, {
+        let window = await api.getTripRunEventWindow(activeRunId, {
           sessionId: activeSessionId,
           afterSequence: readySequence,
         });
         if (window.window_expired) {
-          window = await api.getTripRunEventWindow(activeRunId, state.userId, {
+          window = await api.getTripRunEventWindow(activeRunId, {
             sessionId: activeSessionId,
             afterSequence: Math.max(0, window.replay_floor_sequence - 1),
           });
@@ -887,9 +886,7 @@ export function useSendMessage() {
           activeStreamRef.current = null;
         }
         try {
-          if (state.userId) {
-            await refreshSessions(state.userId);
-          }
+          await refreshSessions();
         } catch {
           // ignore refresh failures
         }
