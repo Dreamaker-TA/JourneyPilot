@@ -117,7 +117,34 @@ async def get_status():
 #
 # ``database_schema`` 刻意不在这份名单里 —— 它拦门禁，判据与
 # ``db/report.py::GATES_READINESS`` 同源。
-_NON_BLOCKING_COMPONENTS = frozenset({"mcp", "data_snapshots", "knowledge_corpus"})
+_NON_BLOCKING_COMPONENTS = frozenset(
+    {"mcp", "data_snapshots", "knowledge_corpus", "run_execution"}
+)
+
+
+async def _probe_run_execution(components: Any) -> Dict[str, Any]:
+    """活跃租约与上一次恢复扫描的结论。**报出来，不拦门禁**。
+
+    一个 Run 被判成不可恢复不代表这台服务不能接活；运营者需要看见的是有几个 Run
+    在等他点「继续」，以及扫描本身有没有出错。
+    """
+
+    recovery = components.run_recovery_service
+    report = recovery.last_report if recovery is not None else None
+    payload: Dict[str, Any] = {
+        "ready": True,
+        "sweeper_running": recovery is not None,
+        "recovered_run_count": len(report.outcomes) if report else 0,
+        "resume_available": report.resume_available_count if report else 0,
+        "recovery_counts": report.counts if report else {},
+        "recovery_failures": list(report.failures) if report else [],
+    }
+    try:
+        payload["active_leases"] = await components.run_execution_store.count_active_leases()
+    except Exception as exc:
+        payload["active_leases"] = None
+        payload["message"] = f"执行租约计数失败: {exc}"
+    return payload
 
 
 async def _probe_knowledge_corpus() -> Dict[str, Any]:
@@ -285,6 +312,8 @@ async def readiness() -> JSONResponse:
         # 数据库合同：revision、结构指纹、缺表、可选能力。这一项拦门禁，
         # 不通过时读 `problems` 与 `next_action`。
         "database_schema": _probe_schema_report(components),
+        # 执行租约与启动恢复：报出来不拦门禁，理由见 `_probe_run_execution`。
+        "run_execution": await _probe_run_execution(components),
     }
     ready = all(
         component["ready"]

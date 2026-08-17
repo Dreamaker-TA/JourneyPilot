@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useReducer, type ReactNode } from 'react';
 import type { Message, ThinkingStep, ChatSession, PlanApprovalGate, TripSummaryCard } from '../types/chat';
-import type { ControlledTripIdentity, GuidedIntakeState, RouteDecision, RunCostSummary, TripRunStatus, UsageUpdateEvent } from '../types/api';
+import type { ControlledTripIdentity, GuidedIntakeState, RouteDecision, RunCostSummary, TripRunRecovery, TripRunStatus, UsageUpdateEvent } from '../types/api';
 import type { PublicDeliveryBundle } from '../types/delivery';
 import { readStoredActivePreset, writeStoredActivePreset } from '../lib/activePresetStorage';
 
@@ -66,6 +66,11 @@ export interface AppState {
   currentTripRunId: string | null;
   /** 后端持久化的当前 TripRun 生命周期；不得从消息或流连接状态反推。 */
   currentTripRunStatus: TripRunStatus | null;
+  /**
+   * 服务端给出的恢复判定（程序被关闭后这次运行还能不能继续）。同样不反推：
+   * 「可以继续」是后端看过 checkpoint 才敢说的话。
+   */
+  currentTripRunRecovery: TripRunRecovery | null;
   tripRunSource: 'none' | 'live';
   tripRunRefreshKey: number;
   sessions: ChatSession[];
@@ -151,6 +156,7 @@ export type SessionRuntimeSnapshot = Pick<
   | 'currentSessionId'
   | 'currentTripRunId'
   | 'currentTripRunStatus'
+  | 'currentTripRunRecovery'
   | 'tripRunSource'
   | 'tripRunRefreshKey'
   | 'currentMessages'
@@ -190,6 +196,7 @@ export function createSessionRuntimeSnapshot(state: AppState): SessionRuntimeSna
     currentSessionId: state.currentSessionId,
     currentTripRunId: state.currentTripRunId,
     currentTripRunStatus: state.currentTripRunStatus,
+    currentTripRunRecovery: state.currentTripRunRecovery,
     tripRunSource: state.tripRunSource,
     tripRunRefreshKey: state.tripRunRefreshKey,
     currentMessages: state.currentMessages,
@@ -289,6 +296,7 @@ const initialState: AppState = {
   conversationEpoch: 0,
   currentTripRunId: null,
   currentTripRunStatus: null,
+  currentTripRunRecovery: null,
   tripRunSource: 'none',
   tripRunRefreshKey: 0,
   sessions: [],
@@ -350,6 +358,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         currentTripRunStatus: action.payload.status !== undefined
           ? action.payload.status
           : (isDifferentRun ? null : state.currentTripRunStatus),
+        currentTripRunRecovery: isDifferentRun ? null : state.currentTripRunRecovery,
         tripRunSource: action.payload.source ?? (action.payload.runId ? state.tripRunSource : 'none'),
         tripSummaryCard: isDifferentRun ? null : state.tripSummaryCard,
         deliveryBundle: isDifferentRun ? null : state.deliveryBundle,
@@ -372,6 +381,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         currentTripRunStatus: status,
+        // 重新跑起来了，上一次中断的恢复提示到此为止。
+        currentTripRunRecovery: status === 'running' ? null : state.currentTripRunRecovery,
         currentMessages,
         planApprovalGate: waitingAllowed ? state.planApprovalGate : null,
         inputMode: 'normal',
@@ -737,6 +748,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         currentSessionId: null,
         currentTripRunId: null,
         currentTripRunStatus: null,
+        currentTripRunRecovery: null,
         tripRunSource: 'none',
         tripRunRefreshKey: state.tripRunRefreshKey + 1,
         splitViewActive: false,

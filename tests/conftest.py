@@ -115,6 +115,36 @@ def unmanaged_database(temp_database) -> object:
 
 
 @pytest.fixture
+async def migrated_async_database(temp_database, monkeypatch):
+    """迁到 head 的临时库，并且**把 API 侧那条异步引擎指向它**。
+
+    异步 store 用的是 `infrastructure/database.py` 里的全局引擎，它从 `get_settings()`
+    读 URL。所以要换库就得连着设置缓存和引擎缓存一起换 —— 只设环境变量不够，
+    而只 reload 设置不够：引擎已经建好了。漏掉任何一步，测试就会写到开发者自己的库上。
+    """
+
+    from travel_agent.config import reload_settings
+    from travel_agent.db import migrate
+    from travel_agent.infrastructure.database import close_db
+
+    migrate.upgrade(temp_database)
+    monkeypatch.setenv("DB_HOST", temp_database.host)
+    monkeypatch.setenv("DB_PORT", str(temp_database.port))
+    monkeypatch.setenv("DB_NAME", temp_database.database)
+    monkeypatch.setenv("DB_USER", temp_database.user)
+    monkeypatch.setenv("DB_PASSWORD", temp_database.password)
+    await close_db()
+    reload_settings()
+    try:
+        yield temp_database
+    finally:
+        # 引擎必须在 temp_database 删库之前断开，否则 DROP DATABASE 会因残留连接失败。
+        await close_db()
+        monkeypatch.undo()
+        reload_settings()
+
+
+@pytest.fixture
 def scratch_dir(tmp_path) -> Path:
     """备份类测试的输出目录。用 pytest 的 tmp_path，绝不写进仓库。"""
 

@@ -521,8 +521,18 @@ class TravelPlanningWorkflow:
 
     async def has_checkpoint(self, run_id: str) -> bool:
         """Return whether the compiled graph has persisted state for run_id."""
+        available, _checkpoint_id = await self.probe_checkpoint(run_id)
+        return available
+
+    async def probe_checkpoint(self, run_id: str) -> tuple[bool, Optional[str]]:
+        """Return resumability plus the id of the checkpoint that carries it.
+
+        The id is what a resume records as its safe boundary, so it comes from the
+        same read that decided resumability — a second read could answer about a
+        different checkpoint.
+        """
         if self._checkpointer is None:
-            return False
+            return False, None
         try:
             snapshot = await self._graph.aget_state(
                 {"configurable": {"thread_id": run_id}}
@@ -550,7 +560,12 @@ class TravelPlanningWorkflow:
                 raise CheckpointContractError(
                     "checkpoint does not satisfy the current JourneyPilot completion contract"
                 ) from exc
-        return bool(snapshot.values or snapshot.next or snapshot.tasks or snapshot.interrupts)
+        available = bool(
+            snapshot.values or snapshot.next or snapshot.tasks or snapshot.interrupts
+        )
+        configurable = (snapshot.config or {}).get("configurable") or {}
+        checkpoint_id = configurable.get("checkpoint_id")
+        return available, str(checkpoint_id) if checkpoint_id else None
 
     async def run(
         self,

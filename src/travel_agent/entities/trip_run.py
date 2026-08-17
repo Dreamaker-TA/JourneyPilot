@@ -54,6 +54,38 @@ class TripRunResumePolicy(str, Enum):
     CHECKPOINT = "checkpoint"
 
 
+class RunRecoveryStatus(str, Enum):
+    """执行归属的生命周期。与 TripRunStatus 正交：前者说「谁在跑」，后者说「跑到哪」。"""
+
+    IDLE = "idle"
+    CLAIMED = "claimed"
+    RUNNING = "running"
+    #: 进程收到关闭信号后主动放弃租约，交给下一次启动 census 判定。
+    SHUTDOWN_REQUESTED = "shutdown_requested"
+    ORPHANED = "orphaned"
+    RESUME_AVAILABLE = "resume_available"
+    NON_RESUMABLE = "non_resumable"
+    RELEASED = "released"
+    #: durable 事实自相矛盾，恢复不做猜测，只留诊断。
+    RECOVERY_CONTRACT_FAILURE = "recovery_contract_failure"
+
+
+class RunExecution(BaseModel):
+    """一个 TripRun 的执行租约与恢复判定。租约时钟以数据库 NOW() 为准。"""
+
+    run_id: str
+    executor_id: Optional[str] = None
+    lease_token: Optional[str] = None
+    lease_acquired_at: Optional[str] = None
+    lease_expires_at: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    process_started_at: Optional[str] = None
+    last_safe_checkpoint_id: Optional[str] = None
+    recovery_status: RunRecoveryStatus = RunRecoveryStatus.IDLE
+    recovery_reason: Optional[str] = None
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
 TERMINAL_TRIP_RUN_STATUSES: set[TripRunStatus] = {
     TripRunStatus.COMPLETED,
     TripRunStatus.FAILED,
@@ -128,6 +160,53 @@ def assert_status_transition_allowed(
 
 def is_terminal_status(value: str | TripRunStatus) -> bool:
     return coerce_status(value) in TERMINAL_TRIP_RUN_STATUSES
+
+
+def coerce_recovery_status(value: str | RunRecoveryStatus) -> RunRecoveryStatus:
+    return value if isinstance(value, RunRecoveryStatus) else RunRecoveryStatus(str(value))
+
+
+#: 可取消的状态。CANCEL_REQUESTED 仍在表里：取消请求可以重发，执行器可能已经消失。
+_CANCELLABLE_STATUSES = {
+    TripRunStatus.CREATED,
+    TripRunStatus.RUNNING,
+    TripRunStatus.AWAITING_INPUT,
+    TripRunStatus.CANCEL_REQUESTED,
+}
+
+_RESUMABLE_STATUSES = {
+    TripRunStatus.CREATED,
+    TripRunStatus.AWAITING_INPUT,
+    TripRunStatus.FAILED,
+    TripRunStatus.INTERRUPTED,
+}
+
+
+def available_run_actions(
+    run: "TripRun",
+    execution: Optional["RunExecution"] = None,
+) -> List[str]:
+    """这个 Run 现在真正能做的动作。
+
+    服务端说一次，客户端不从十几个字段自己推 —— 两处推导必然分叉，而分叉的表现是
+    一个亮着的「继续」按钮点下去拿 409。
+    """
+
+    actions: List[str] = []
+    resumable = run.status in _RESUMABLE_STATUSES and (
+        run.resume_policy == TripRunResumePolicy.CHECKPOINT
+        or run.status == TripRunStatus.CREATED
+    )
+    if execution is not None and execution.recovery_status in {
+        RunRecoveryStatus.NON_RESUMABLE,
+        RunRecoveryStatus.RECOVERY_CONTRACT_FAILURE,
+    }:
+        resumable = False
+    if resumable:
+        actions.append("resume")
+    if run.status in _CANCELLABLE_STATUSES:
+        actions.append("cancel")
+    return actions
 
 
 class TripRun(BaseModel):

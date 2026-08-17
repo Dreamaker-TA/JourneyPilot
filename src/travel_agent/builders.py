@@ -21,6 +21,10 @@ from .infrastructure.provider_snapshot_cache import (
     ProviderSnapshotCache,
     get_provider_snapshot_cache,
 )
+from .infrastructure.run_execution_store import (
+    RunExecutionStore,
+    get_run_execution_store,
+)
 from .infrastructure.trip_run_store import TripRunStore, get_trip_run_store
 from .infrastructure.tool_audit_store import ToolAuditStore, get_tool_audit_store
 from .infrastructure.weather_provider import default_weather_providers
@@ -35,6 +39,8 @@ from .rag.indexer import KnowledgeIndexer
 from .rag.retriever import HybridRetriever
 from .tools.mcp_manager import MCPManager, get_mcp_manager
 from .tools.registry import ToolRegistry, get_tool_registry
+from .services.run_lease import release_all_leases
+from .services.run_recovery import RunRecoveryService
 from .services.weather_context_builder import WeatherContextBuilder
 from .workflows.fast_answer import FastAnswerWorkflow
 from .workflows.travel_planning import TravelPlanningWorkflow
@@ -96,6 +102,10 @@ class AppComponents:
 
     # TripOps durable run lifecycle
     trip_run_store: TripRunStore = field(default_factory=get_trip_run_store)
+
+    # 执行归属：谁在跑这个 run，以及重启后的恢复判定。
+    run_execution_store: RunExecutionStore = field(default_factory=get_run_execution_store)
+    run_recovery_service: Optional[RunRecoveryService] = None
 
     # JourneyPilot v2 immutable delivery snapshots + current-bundle CAS.
     delivery_bundle_store: DeliveryBundleStore = field(default_factory=DeliveryBundleStore)
@@ -186,6 +196,20 @@ class AppBuilder:
         trip_run_store = get_trip_run_store()
         delivery_bundle_store = DeliveryBundleStore()
         weather_context_builder = WeatherContextBuilder(default_weather_providers())
+        travel_workflow = TravelPlanningWorkflow(
+            checkpointer=checkpointer,
+            delivery_bundle_store=delivery_bundle_store,
+            trip_run_store=trip_run_store,
+        )
+        run_execution_store = get_run_execution_store()
+        run_recovery_service = RunRecoveryService(
+            trip_run_store=trip_run_store,
+            execution_store=run_execution_store,
+            # 没有 checkpointer 时不传探针：那不是「探测失败」，而是「这个部署没有可恢复的
+            # 断点」，恢复判定要按 non_resumable 说出来。
+            checkpoint_probe=travel_workflow.has_checkpoint if checkpointer_available else None,
+            sweep_seconds=self.settings.run_control.recovery_sweep_seconds,
+        )
         return AppComponents(
             schema_report=schema_report,
             model_router=get_model_router(),
@@ -203,15 +227,13 @@ class AppBuilder:
             _checkpointer_pool=checkpointer_pool,
             checkpointer_available=checkpointer_available,
             checkpointer_init_error=checkpointer_init_error,
-            travel_workflow=TravelPlanningWorkflow(
-                checkpointer=checkpointer,
-                delivery_bundle_store=delivery_bundle_store,
-                trip_run_store=trip_run_store,
-                ),
+            travel_workflow=travel_workflow,
             fast_workflow=FastAnswerWorkflow(),
             preset_store=PresetStore(),
             product_configuration_store=ProductConfigurationStore(),
             trip_run_store=trip_run_store,
+            run_execution_store=run_execution_store,
+            run_recovery_service=run_recovery_service,
             delivery_bundle_store=delivery_bundle_store,
             weather_context_builder=weather_context_builder,
             tool_audit_store=get_tool_audit_store(),
@@ -219,8 +241,21 @@ class AppBuilder:
         )
 
     async def teardown(self) -> None:
-        """清理资源"""
+        """清理资源。
+
+        顺序不是随意的：租约与孤儿扫描都要写数据库，所以它们必须排在连接池关闭之前，
+        否则「交还租约」会变成一条关不掉的连接错误，而下一次启动要白等一个租约周期。
+        """
         components = _components
+        if components and components.run_recovery_service is not None:
+            await components.run_recovery_service.stop()
+        try:
+            released = await release_all_leases()
+            if released:
+                logger.info("已交还 %d 个执行租约", released)
+        except Exception as e:
+            logger.warning(f"执行租约交还失败: {e}")
+
         if components and components._checkpointer_pool is not None:
             try:
                 await components._checkpointer_pool.close()

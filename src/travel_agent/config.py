@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +228,27 @@ class CheckpointRetentionConfig(BaseModel):
 
 
 class RunControlConfig(BaseModel):
-    """JourneyPilot run-control feature flags."""
+    """JourneyPilot run-control feature flags and execution lease bounds."""
 
     plan_gate_enabled: bool = True
+    #: 租约有效期。过期即视为「执行器不在了」，由恢复扫描接管。
+    lease_seconds: int = Field(default=45, gt=0)
+    #: 心跳间隔。必须显著小于 lease_seconds，否则一次慢查询就会让活着的 run 被判成孤儿。
+    lease_heartbeat_seconds: int = Field(default=10, gt=0)
+    #: 连续心跳失败达到这个次数后，执行器停止发起新的外部调用。
+    lease_heartbeat_failure_threshold: int = Field(default=3, gt=0)
+    #: 孤儿扫描间隔。启动时先扫一次，之后按这个周期复扫 —— 上一个进程死时租约可能还剩
+    #: 几十秒，只在启动扫一次会把那些 run 永久留在 running。
+    recovery_sweep_seconds: int = Field(default=60, gt=0)
+
+    @model_validator(mode="after")
+    def _heartbeat_fits_lease(self) -> "RunControlConfig":
+        if self.lease_heartbeat_seconds * 2 > self.lease_seconds:
+            raise ValueError(
+                "lease_heartbeat_seconds 必须小于 lease_seconds 的一半，"
+                "否则丢一次心跳就会失去租约"
+            )
+        return self
 
 
 class GeocodingConfig(BaseModel):

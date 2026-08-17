@@ -175,7 +175,9 @@ export const Sheet: React.FC<SheetProps> = ({
               style={{ y, height: panelHeight }}
               className={cn(
                 'absolute inset-x-0 bottom-0 flex flex-col overflow-hidden border-t border-stroke bg-panel shadow-lg',
-                // 半径走角色名 `rounded-t-card`，**不要**写成 `rounded-t-[var(--radius-*)]`：
+                // 半径走角色名 `rounded-t-card`，**不要**在方括号里写尺寸名的半径变量
+                // （注释里也不要写出那个类名：Tailwind 的扫描器连注释一起扫，它会照样生成
+                // 一条带 `var(--radius-…)` 的规则，而 lightningcss 会因此让整个构建失败）：
                 // 半径 token 是角色命名的，尺寸名的变量并不存在，而一个未定义的 CSS 变量会让
                 // 整条 `border-radius` 静默失效（上两角变直角，没有任何报错）。`theme.borderRadius`
                 // 被整张替换过，就是为了让漏改的调用点显式坏掉；方括号里的任意值绕过那道门。

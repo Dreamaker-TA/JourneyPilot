@@ -125,6 +125,11 @@ tool_exposure:
 # Plan gate pause before Deep Research workers. Default true.
 run_control:
   plan_gate_enabled: true
+  # 执行租约（过期即由恢复扫描接管该 run）。心跳必须小于租约的一半。
+  lease_seconds: 45
+  lease_heartbeat_seconds: 10
+  lease_heartbeat_failure_threshold: 3
+  recovery_sweep_seconds: 60
 
 # Hybrid RAG second-stage rerank (Settings.rerank). llm needs no extra install.
 rerank:

@@ -228,10 +228,23 @@ class TripRunEventWindowResponse(BaseModel):
     events: List[TripRunEventResponse] = Field(default_factory=list)
 
 
+class TripRunExecutionResponse(BaseModel):
+    """执行归属与恢复判定。`status` 与 TripRun 的业务状态是两件事。"""
+
+    status: str
+    last_heartbeat_at: Optional[str] = None
+    lease_expires_at: Optional[str] = None
+    last_safe_checkpoint_id: Optional[str] = None
+    recovery_reason: Optional[str] = None
+
+
 class TripRunDetailResponse(BaseModel):
     run: TripRunResponse
     controlled_trip_identity: Optional[ControlledTripIdentity] = None
     state: TripRunStateResponse
+    execution: Optional[TripRunExecutionResponse] = None
+    # 服务端说清这个 run 现在能做什么，客户端不从状态、resume_policy 与恢复判定里自己推。
+    available_actions: List[str] = Field(default_factory=list)
     events: List[TripRunEventResponse] = Field(default_factory=list)
 
 

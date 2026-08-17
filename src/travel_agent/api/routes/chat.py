@@ -15,7 +15,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ...builders import get_components
-from ...entities.trip_run import TripRunResumePolicy, TripRunStatus
+from ...config import get_settings
+from ...entities.trip_run import RunRecoveryStatus, TripRunResumePolicy, TripRunStatus
 from ...entities.trip_input import RouteName, classify_locked_identity_intent
 from ...local_profile import LOCAL_USER_ID
 from ...services.route_intent import RouteIntentUnavailable, classify_route
@@ -49,6 +50,7 @@ from ...workflows.run_control import (
     run_ts_ms,
     set_run_ts_anchor,
 )
+from ...services.run_lease import RunLeaseKeeper
 from .chat_stream_handlers import (
     SSEContext,
     _SSE_HANDLERS,
@@ -287,7 +289,40 @@ async def chat_stream(
     usage_recorder = getattr(components, "usage_recorder", None)
     checkpoint_resume = False
     resume_payload: Optional[Dict[str, Any]] = None
+    safe_checkpoint_id: Optional[str] = None
+    lease_keeper: Optional[RunLeaseKeeper] = None
     gate_resume = request.gate_decision is not None
+
+    async def claim_execution_lease(
+        run_id: str,
+        *,
+        checkpoint_id: Optional[str] = None,
+    ) -> RunLeaseKeeper:
+        """抢下这个 Run 的执行权。抢不到就不开始 —— 两个执行器同时跑一个 Run 会写出
+        两份互相覆盖的状态，而用户看到的是随机一份。"""
+
+        lease_settings = get_settings().run_control
+        keeper = RunLeaseKeeper(
+            components.run_execution_store,
+            run_id,
+            lease_seconds=lease_settings.lease_seconds,
+            heartbeat_seconds=lease_settings.lease_heartbeat_seconds,
+            failure_threshold=lease_settings.lease_heartbeat_failure_threshold,
+            # 失去租约只是「停止发起新的外部调用」的信号，终态归属由 stop reason 决定。
+            on_lease_lost=lambda reason: run_control_registry.request_stop(
+                run_id, "lease_lost"
+            ),
+        )
+        if not await keeper.claim(last_safe_checkpoint_id=checkpoint_id):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "run_already_executing",
+                    "message": "这次运行正在别处执行，请刷新后查看当前状态。",
+                },
+            )
+        return keeper
+
     if gate_resume and not request.run_id:
         raise HTTPException(status_code=400, detail="gate_decision 需要提供 run_id")
     if request.plan_gate is True and use_deep_research and getattr(components, "checkpointer", None) is None:
@@ -352,11 +387,26 @@ async def chat_stream(
                 )
             if getattr(components, "checkpointer", None) is None:
                 raise HTTPException(status_code=409, detail="当前服务未启用 checkpoint，无法断点续跑")
-            has_checkpoint = getattr(components.travel_workflow, "has_checkpoint", None)
+            # 恢复扫描已经判定过「这个 run 没有可用断点」时，不要再走一遍探测得到同一个
+            # 答案 —— 它的判定就是为了让用户看到一句确定的话，而不是一次重试。
+            recovery_execution = await components.run_execution_store.get(trip_run.run_id)
+            if recovery_execution is not None and recovery_execution.recovery_status in {
+                RunRecoveryStatus.NON_RESUMABLE,
+                RunRecoveryStatus.RECOVERY_CONTRACT_FAILURE,
+            }:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "run_not_resumable",
+                        "message": "上次运行没有可继续的检查点，请重新规划这趟旅行。",
+                    },
+                )
+            probe_checkpoint = getattr(components.travel_workflow, "probe_checkpoint", None)
             try:
-                checkpoint_available = bool(
-                    has_checkpoint is not None
-                    and await has_checkpoint(trip_run.run_id)
+                checkpoint_available, safe_checkpoint_id = (
+                    await probe_checkpoint(trip_run.run_id)
+                    if probe_checkpoint is not None
+                    else (False, None)
                 )
             except CheckpointContractError as exc:
                 raise HTTPException(
@@ -377,6 +427,11 @@ async def chat_stream(
             else:
                 allowed_statuses = [TripRunStatus.FAILED, TripRunStatus.INTERRUPTED]
                 claim_node = None
+            # 租约先于状态写：状态一旦变成 RUNNING 而租约却抢不到，这个 Run 就落在
+            # 「显示在跑、没人在跑」的缝里，只能等下一轮恢复扫描捞回来。
+            lease_keeper = await claim_execution_lease(
+                trip_run.run_id, checkpoint_id=safe_checkpoint_id
+            )
             claimed = await trip_run_store.claim_checkpoint_resume(
                 trip_run.run_id,
                 allowed_statuses=allowed_statuses,
@@ -391,6 +446,7 @@ async def chat_stream(
                 },
             )
             if claimed is None:
+                await lease_keeper.release(reason="resume_lost_status_race")
                 raise HTTPException(status_code=409, detail="TripRun 已被其他请求恢复或状态已变化")
             trip_run = claimed
         elif gate_resume:
@@ -415,6 +471,8 @@ async def chat_stream(
             controlled_trip_identity=authoritative_controlled_trip_identity or None,
             route_decision=route_decision.model_dump(mode="json"),
         )
+    if lease_keeper is None:
+        lease_keeper = await claim_execution_lease(trip_run.run_id)
     if checkpoint_resume:
         history, session_anchor_data, session_compressed = [], None, False
     else:
@@ -805,6 +863,24 @@ async def chat_stream(
             finally:
                 clear_process_run_state()
 
+        async def mark_safe_boundary() -> None:
+            """把一个已经落盘的 checkpoint 记成安全边界。
+
+            LLM 调用刚开始时不算 —— 那时还没有任何东西被持久化。
+            """
+            probe = getattr(components.travel_workflow, "probe_checkpoint", None)
+            if probe is None or not use_deep_research:
+                return
+            try:
+                _available, checkpoint_id = await probe(trip_run.run_id)
+            except Exception as probe_err:
+                logger.warning(
+                    "安全边界探测失败 run_id=%s error=%s", trip_run.run_id, probe_err
+                )
+                return
+            if checkpoint_id:
+                await lease_keeper.mark_safe_checkpoint(checkpoint_id)
+
         async def cleanup_stream_exit(reason: str) -> None:
             """Persist exit truth before bounded best-effort workflow shutdown."""
             if workflow_task is not None and not workflow_task.done() and control_registered:
@@ -826,6 +902,10 @@ async def chat_stream(
                     convergence_err,
                     exc_info=True,
                 )
+
+            # 状态已经收敛，租约再没有工作可做。交还它 —— 否则「继续」按钮要等一个
+            # 已经没人在用的租约自然过期才点得动。
+            await lease_keeper.release(reason=reason)
 
             if workflow_task is not None and not workflow_task.done():
                 workflow_task.cancel()
@@ -861,6 +941,8 @@ async def chat_stream(
             if use_deep_research:
                 run_control_registry.register(trip_run.run_id)
                 control_registered = True
+            # 心跳与 SSE 客户端是否在线无关：它只说明执行器这个进程还活着。
+            lease_keeper.start()
             if not checkpoint_resume:
                 try:
                     await trip_run_store.transition_status(
@@ -952,6 +1034,8 @@ async def chat_stream(
                             "payload": payload,
                         },
                     )
+                    # interrupt 已经落盘：这是一个真正的安全边界。
+                    await mark_safe_boundary()
                     yield sse_event({
                         "type": "approval_gate_raised",
                         "message_id": message_id,
@@ -1176,37 +1260,64 @@ async def chat_stream(
                 assistant_content = strip_non_display_blocks(
                     strip_thinking_text(strip_think_blocks(ctx.full_response))
                 )
+            stop_node = (
+                cancelled.node_name
+                or ctx.final_step_name
+                or ctx.final_agent_name
+                or "workflow"
+            )
+            # 失去租约不是用户的决定：它收敛 INTERRUPTED，并且是可继续的那一类中断。
+            lease_lost = cancelled.reason == "lease_lost"
             try:
                 current_run = await trip_run_store.get_run(trip_run.run_id)
-                if current_run and current_run.status == TripRunStatus.RUNNING:
+                if lease_lost:
+                    if current_run and current_run.status == TripRunStatus.RUNNING:
+                        await trip_run_store.transition_status(
+                            trip_run.run_id,
+                            TripRunStatus.INTERRUPTED,
+                            current_node=stop_node,
+                            error_code="executor_lease_lost",
+                            event_type="run.interrupted",
+                            payload={"reason": "executor_lease_lost"},
+                        )
+                else:
+                    if current_run and current_run.status == TripRunStatus.RUNNING:
+                        await trip_run_store.transition_status(
+                            trip_run.run_id,
+                            TripRunStatus.CANCEL_REQUESTED,
+                            current_node=stop_node,
+                            event_type="run.control_requested",
+                            payload={"action": "cancel", "source": "workflow_boundary"},
+                        )
                     await trip_run_store.transition_status(
                         trip_run.run_id,
-                        TripRunStatus.CANCEL_REQUESTED,
-                        current_node=cancelled.node_name or ctx.final_step_name or ctx.final_agent_name or "workflow",
-                        event_type="run.control_requested",
-                        payload={"action": "cancel", "source": "workflow_boundary"},
+                        TripRunStatus.CANCELLED,
+                        current_node=stop_node,
+                        event_type="run.cancelled",
+                        payload={
+                            "reason": "user_cancelled",
+                            "trace_event_count": len(ctx.trace_events),
+                        },
                     )
-                await trip_run_store.transition_status(
-                    trip_run.run_id,
-                    TripRunStatus.CANCELLED,
-                    current_node=cancelled.node_name or ctx.final_step_name or ctx.final_agent_name or "workflow",
-                    event_type="run.cancelled",
-                    payload={
-                        "reason": "user_cancelled",
-                        "trace_event_count": len(ctx.trace_events),
-                    },
-                )
             except Exception as run_err:
-                logger.warning(f"TripRun 取消状态保存失败: {run_err}")
+                logger.warning(f"TripRun 停止状态保存失败: {run_err}")
             cost_summary = await finalize_cost_summary(terminal=True)
-            yield sse_event({
-                "type": "run_cancelled",
-                "message_id": message_id,
-                "run_id": trip_run.run_id,
-                "final_content": assistant_content,
-                "run_cost_summary": cost_summary,
-                "ts_ms": run_ts_ms(),
-            })
+            if lease_lost:
+                yield sse_event({
+                    "type": "error",
+                    "message": "这次规划被中断了（本机执行记录丢失），可以稍后继续。",
+                    "message_id": message_id,
+                    "run_id": trip_run.run_id,
+                })
+            else:
+                yield sse_event({
+                    "type": "run_cancelled",
+                    "message_id": message_id,
+                    "run_id": trip_run.run_id,
+                    "final_content": assistant_content,
+                    "run_cost_summary": cost_summary,
+                    "ts_ms": run_ts_ms(),
+                })
 
         except asyncio.CancelledError:
             stream_exit_reason = "client_disconnected"

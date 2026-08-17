@@ -1,7 +1,8 @@
 import React from 'react';
 import { AnimatePresence, m } from 'motion/react';
-import { CircleAlert, CheckCircle2, ChevronDown, Loader2, Route, Square } from 'lucide-react';
+import { CircleAlert, CheckCircle2, ChevronDown, Loader2, Play, Route, Square } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useSendMessage } from '../../hooks/useSendMessage';
 import { useStopRun } from '../../hooks/useStopRun';
 import { BrandMark } from '../ui/BrandMark';
 import { TRANSPORT_MODE_ICONS } from '../../lib/transportPresentation';
@@ -13,6 +14,9 @@ import { duration, easing } from '../../lib/motion';
 import { isTripRunActive, isTripRunAwaitingInput } from '../../types/api';
 
 const STAGES = ['理解需求', '制定计划', '并行调研', '核对事实', '生成行程'];
+
+/** 续跑请求的正文。断点续跑不读会话历史，这句话只是这次请求的可读标记。 */
+const RESUME_TEXT = '继续上次被中断的规划';
 
 function days(start: string, end: string): number {
   if (!start || !end) return 0;
@@ -28,8 +32,10 @@ function days(start: string, end: string): number {
 export const ResearchBoardingPass: React.FC = () => {
   const { state } = useApp();
   const { stopRun } = useStopRun();
+  const { sendMessage } = useSendMessage();
   const [expanded, setExpanded] = React.useState(true);
   const [flashing, setFlashing] = React.useState(false);
+  const [resuming, setResuming] = React.useState(false);
   /* 这里**不写** `useReducedMotion()` 分支：reduce 由根节点的 `MotionConfig
      reducedMotion="user"` 统一承担（见 `motion/MotionProviders.tsx`）。`"user"` 关掉的正是
      位置类键（transform / width / height / top-left-right-bottom），也就是下面这两处动画里的
@@ -64,6 +70,11 @@ export const ResearchBoardingPass: React.FC = () => {
   const answerStarted = Boolean(lastAssistant?.content?.trim());
   const snapshot = derivePlanningStageSnapshot({ steps: state.thinkingSteps, isStreaming: state.isStreaming, isSynthesizing: state.isSynthesizing, answerStarted });
   const runStatus = state.currentTripRunStatus;
+  const recovery = state.currentTripRunRecovery;
+  // 程序被关掉造成的中断与用户自己停下来是两件事，票面要说清是哪一件。
+  // 「能不能继续」只认服务端的判定（`available_actions`），不在这里第二次推导。
+  const interruptedByShutdown = runStatus === 'interrupted' && recovery !== null;
+  const canResume = runStatus === 'interrupted' && recovery?.resumable === true;
   // 本次 run 自己的 Bundle：跨 run 残留的那份既不代表这张票已完成，也不该决定票面字形。
   const bundle = state.deliveryBundle?.manifest.run_id === runId ? state.deliveryBundle : null;
   const completed = runStatus === 'completed' && bundle !== null;
@@ -78,13 +89,32 @@ export const ResearchBoardingPass: React.FC = () => {
         : runStatus === 'cancelled'
           ? '本次规划已取消'
           : runStatus === 'interrupted'
-            ? '运行已中断，可恢复'
+            ? (canResume
+                ? '上次运行被程序关闭中断，可继续'
+                : interruptedByShutdown
+                  ? '上次运行被中断，无法继续'
+                  : '运行已中断，可恢复')
             : runStatus === 'cancel_requested'
               ? '正在停止'
               : null;
   const activeIndex = completed
     ? STAGES.length
     : Math.min(STAGES.length - 1, snapshot.stages.filter((stage) => stage.status === 'done').length);
+
+  const resume = async () => {
+    if (!runId || resuming || state.isStreaming) return;
+    setResuming(true);
+    try {
+      await sendMessage(RESUME_TEXT, undefined, {
+        resumeRunId: runId,
+        route: 'trip_refinement',
+        assistantPendingLabel: '正在从最近检查点继续',
+      });
+    } finally {
+      // 失败时保留「继续」入口：同一次点击可以再试，而不是把按钮永久转成 loading。
+      setResuming(false);
+    }
+  };
 
   if (!runId || !identity) return null;
 
@@ -155,6 +185,21 @@ export const ResearchBoardingPass: React.FC = () => {
             始终可见的进度票上；展开 / 收起两态都够得着。 */}
         {/* 停止：运行中唯一的取消入口，做成常驻的破坏性红钮——与相邻的中性「收起」ghost 钮
             在静止态就明显区分，避免误触。 */}
+        {/* 继续：程序被关闭造成的中断是可恢复的，但恢复必须是用户按下的这一次点击 ——
+            重启不该在后台悄悄继续花模型的钱。所以这里只有入口，没有自动重试。 */}
+        {canResume && !state.isStreaming && (
+          <button
+            type="button"
+            data-testid="boarding-pass-resume"
+            onClick={() => void resume()}
+            disabled={resuming}
+            aria-label="从最近检查点继续这次规划"
+            className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-card border border-accent/40 bg-accent/10 px-3 text-xs font-semibold text-accent transition-colors hover:border-accent/60 hover:bg-accent/[0.16] disabled:opacity-60"
+          >
+            {resuming ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+            继续
+          </button>
+        )}
         {state.isStreaming && (
           <button
             type="button"

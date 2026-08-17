@@ -125,14 +125,26 @@ def run_ts_ms() -> Optional[float]:
     return round((time.perf_counter() - anchor) * 1000.0, 3)
 
 
-class RunCancelled(Exception):
-    """Raised when a user-requested cancellation reaches a cooperative boundary."""
+#: 为什么停。终态归属不同：用户取消收敛 CANCELLED，失去租约收敛 INTERRUPTED ——
+#: 后者不是用户的决定，把它记成「已取消」就是给记录里写一件没发生的事。
+RunStopReason = Literal["user_cancel", "lease_lost"]
 
-    def __init__(self, run_id: str, node_name: Optional[str] = None) -> None:
+
+class RunCancelled(Exception):
+    """Raised when a cooperative stop signal reaches a boundary."""
+
+    def __init__(
+        self,
+        run_id: str,
+        node_name: Optional[str] = None,
+        *,
+        reason: RunStopReason = "user_cancel",
+    ) -> None:
         self.run_id = run_id
         self.node_name = node_name
+        self.reason = reason
         label = f" at {node_name}" if node_name else ""
-        super().__init__(f"TripRun {run_id} cancelled{label}")
+        super().__init__(f"TripRun {run_id} stopped ({reason}){label}")
 
 
 @dataclass
@@ -141,9 +153,14 @@ class RunControlHandle:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     delivery_ready_event: asyncio.Event = field(default_factory=asyncio.Event)
     supplements: List[Dict[str, str]] = field(default_factory=list)
+    stop_reason: RunStopReason = "user_cancel"
+
+    def request_stop(self, reason: RunStopReason = "user_cancel") -> None:
+        self.stop_reason = reason
+        self.cancel_event.set()
 
     def request_cancel(self) -> None:
-        self.cancel_event.set()
+        self.request_stop("user_cancel")
 
     def mark_delivery_ready(self) -> None:
         """Seal this in-process run against late research writes.
@@ -183,12 +200,15 @@ class RunControlRegistry:
         if run_id:
             self._handles.pop(run_id, None)
 
-    def request_cancel(self, run_id: str) -> bool:
+    def request_stop(self, run_id: str, reason: RunStopReason = "user_cancel") -> bool:
         handle = self.get(run_id)
         if handle is None:
             return False
-        handle.request_cancel()
+        handle.request_stop(reason)
         return True
+
+    def request_cancel(self, run_id: str) -> bool:
+        return self.request_stop(run_id, "user_cancel")
 
     def request_supplement(self, run_id: str, category: str, content: str) -> bool:
         handle = self.get(run_id)
@@ -287,9 +307,9 @@ def run_attribution(
 
 
 def check_cancel_requested(node_name: Optional[str] = None) -> None:
-    """Raise ``RunCancelled`` when the in-process cancel flag is set.
+    """Raise ``RunCancelled`` when the in-process stop flag is set.
 
-    Cancellation is **cooperative**: checks run at node entry,
+    Stopping is **cooperative**: checks run at node entry,
     ReAct iteration boundaries, and after each tool result. An in-flight
     LLM stream or single tool HTTP call may still finish before the next
     checkpoint; latency is bounded by that in-flight round, not by a hard
@@ -298,7 +318,11 @@ def check_cancel_requested(node_name: Optional[str] = None) -> None:
     run_id = current_run_id.get()
     handle = run_control_registry.get(run_id)
     if handle is not None and handle.cancel_event.is_set():
-        raise RunCancelled(run_id or handle.run_id, node_name or current_node.get())
+        raise RunCancelled(
+            run_id or handle.run_id,
+            node_name or current_node.get(),
+            reason=handle.stop_reason,
+        )
 
 
 def observe_current_run_deadline() -> tuple[Optional[Any], Optional[DeadlineObservation]]:

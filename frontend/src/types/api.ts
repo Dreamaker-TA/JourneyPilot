@@ -398,6 +398,47 @@ export function isTripRunResumable(status: TripRunStatus | null): boolean {
   return status === 'interrupted';
 }
 
+/** 执行归属：谁在跑这个 run，以及重启后服务端给出的恢复判定。 */
+export type TripRunRecoveryStatus =
+  | 'idle'
+  | 'claimed'
+  | 'running'
+  | 'shutdown_requested'
+  | 'orphaned'
+  | 'resume_available'
+  | 'non_resumable'
+  | 'released'
+  | 'recovery_contract_failure';
+
+export interface TripRunExecutionResponse {
+  status: TripRunRecoveryStatus;
+  last_heartbeat_at: string | null;
+  lease_expires_at: string | null;
+  last_safe_checkpoint_id: string | null;
+  recovery_reason: string | null;
+}
+
+/**
+ * 一个 run 的恢复处境。`resumable` 直接来自服务端的 `available_actions`——
+ * 客户端不从状态和恢复判定里自己再推一遍，两处推导必然分叉。
+ */
+export interface TripRunRecovery {
+  status: TripRunRecoveryStatus;
+  reason: string | null;
+  resumable: boolean;
+}
+
+export function tripRunRecoveryFromDetail(
+  detail: { execution: TripRunExecutionResponse | null; available_actions: string[] } | null
+): TripRunRecovery | null {
+  if (!detail?.execution) return null;
+  return {
+    status: detail.execution.status,
+    reason: detail.execution.recovery_reason,
+    resumable: detail.available_actions.includes('resume'),
+  };
+}
+
 // TripRunCreateRequest intentionally omitted: product run creation is
 // chat-stream owned. Backend POST /api/trip-runs remains for controlled/script
 // callers only.
@@ -483,6 +524,8 @@ export interface TripRunDetailResponse {
   run: TripRunResponse;
   controlled_trip_identity: ControlledTripIdentity | null;
   state: TripRunStateResponse;
+  execution: TripRunExecutionResponse | null;
+  available_actions: string[];
   events: TripRunEventResponse[];
 }
 

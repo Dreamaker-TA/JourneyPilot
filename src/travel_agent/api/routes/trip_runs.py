@@ -18,7 +18,7 @@ from typing import Any, Dict, Literal, Mapping, Optional
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from ...builders import get_components
-from ...entities.trip_run import TripRunStatus
+from ...entities.trip_run import TripRunStatus, available_run_actions
 from ...local_profile import LOCAL_USER_ID
 from ...entities.workspace_v2_mutations import WorkspaceV2MutationError
 from ...entities.trip_input import classify_locked_identity_intent
@@ -60,6 +60,7 @@ from ..schemas import (
     TripRunCreateRequest,
     TripRunDetailResponse,
     TripRunEventResponse,
+    TripRunExecutionResponse,
     TripRunEventWindowResponse,
     TripRunListResponse,
     TripRunResponse,
@@ -210,6 +211,23 @@ def _state_response(state) -> TripRunStateResponse:
         pending_monitor_trigger_count=state.pending_monitor_trigger_count,
         last_error=audit_safe_value(state.last_error) if state.last_error else None,
         updated_at=state.updated_at,
+    )
+
+
+def _execution_response(execution) -> Optional[TripRunExecutionResponse]:
+    """执行归属的公开投影。`executor_id` 与 `lease_token` 留在服务端：
+
+    前者是主机名加进程标识，后者是抢占租约的凭据，两个都不是客户端需要的东西。
+    """
+
+    if execution is None:
+        return None
+    return TripRunExecutionResponse(
+        status=execution.recovery_status.value,
+        last_heartbeat_at=execution.heartbeat_at,
+        lease_expires_at=execution.lease_expires_at,
+        last_safe_checkpoint_id=execution.last_safe_checkpoint_id,
+        recovery_reason=execution.recovery_reason,
     )
 
 
@@ -413,10 +431,13 @@ async def read_trip_run(
     detail = await components.trip_run_store.get_detail(run_id, event_limit=event_limit)
     if detail is None:
         raise HTTPException(status_code=404, detail="TripRun 不存在")
+    execution = await components.run_execution_store.get(run_id)
     return TripRunDetailResponse(
         run=_run_response(detail.run),
         controlled_trip_identity=detail.run.controlled_trip_identity,
         state=_state_response(detail.state),
+        execution=_execution_response(execution),
+        available_actions=available_run_actions(detail.run, execution),
         events=_event_responses(detail.events),
     )
 

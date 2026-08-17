@@ -96,6 +96,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     "（详见 GET /api/health/ready 的 knowledge_corpus）| %s",
                     "；".join(corpus_problems),
                 )
+            # 孤儿 Run 普查放在这里而不是更早：它要写 trip_runs，所以必须等合同校验通过。
+            # 在接受业务请求之前跑完 —— 一个显示 running 的 Run 如果在恢复判定之前就被
+            # 客户端读到，用户看到的是一个永远不动的进度条。
+            recovery = components.run_recovery_service
+            if recovery is not None:
+                try:
+                    recovery_report = await recovery.sweep()
+                    recovery_report.log_summary()
+                    recovery.start()
+                except Exception as e:
+                    logger.error("启动恢复普查失败: %s", e, exc_info=True)
+                    degraded.append(f"启动恢复普查失败（{e}）")
         # checkpointer 的判据必须与 readiness 逐字同源（system.py::readiness 的
         # `bool(components.checkpointer) or not gates_enabled`）：门关掉时没有
         # checkpointer 是合法配置，不是降级。两处分叉就会一处报警一处放行。

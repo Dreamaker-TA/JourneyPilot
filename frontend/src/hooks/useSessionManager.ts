@@ -9,6 +9,7 @@ import { normalizePlanApprovalGate } from '../lib/planApprovalGate';
 import { hasResearchStarted, projectVisibleMessages } from '../lib/conversationFlow';
 import type { ChatSession, FinalAnswerCitation, InformationAnnotation, Message, ThinkingStep} from '../types/chat';
 import type { ControlledTripIdentity, SessionDetail, SessionSummary, TripRunStatus } from '../types/api';
+import { tripRunRecoveryFromDetail } from '../types/api';
 import { isPublicDeliveryBundle } from '../types/delivery';
 import { stripAssistantControlBlocks } from '../lib/visibleContent';
 
@@ -240,6 +241,7 @@ export function useSessionManager() {
         currentSessionId: sessionId,
         currentTripRunId: latestRun?.run_id ?? null,
         currentTripRunStatus,
+        currentTripRunRecovery: tripRunRecoveryFromDetail(latestRunDetail),
         tripRunSource: latestRun ? 'live' : 'none',
         tripRunRefreshKey: currentStateRef.current.tripRunRefreshKey,
         currentMessages: projectMessagesForRunLifecycle(messages, currentTripRunStatus),
