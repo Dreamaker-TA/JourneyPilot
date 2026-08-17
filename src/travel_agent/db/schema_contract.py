@@ -64,17 +64,19 @@ MANAGED_TABLES: tuple[str, ...] = (
 # 任何一张在，就不能把这个库当空库跑迁移。
 PROBE_TABLES: tuple[str, ...] = ("user_profiles", "chat_sessions", "trip_runs")
 
+# LangGraph checkpointer 的表。不进我们的迁移（langgraph 自带 `checkpoint_migrations`
+# 版本表，两个 owner 会撞车），建立点在 `db/checkpoint_schema.py`。
+LANGGRAPH_CHECKPOINT_TABLES: tuple[str, ...] = (
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+)
+
 # 别人拥有的表。它们出现在 public schema 里是**正常的**，不是 schema drift ——
 # 所以指纹不扫它们，报告也不把它们算成「未知多余表」。
-#
-# checkpoint* 由 LangGraph 的 `AsyncPostgresSaver.setup()` 建立并自带版本表
-# （`checkpoint_migrations`）。把它们纳入我们的迁移等于同时有两个 owner，
-# 下一次 langgraph 升级就会撞车。
 EXTERNALLY_OWNED_TABLES: dict[str, str] = {
-    "checkpoints": "langgraph-checkpoint-postgres",
-    "checkpoint_blobs": "langgraph-checkpoint-postgres",
-    "checkpoint_writes": "langgraph-checkpoint-postgres",
-    "checkpoint_migrations": "langgraph-checkpoint-postgres",
+    **{name: "langgraph-checkpoint-postgres" for name in LANGGRAPH_CHECKPOINT_TABLES},
     "alembic_version": "alembic",
 }
 

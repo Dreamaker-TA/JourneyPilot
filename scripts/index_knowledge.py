@@ -57,11 +57,10 @@ COLLECTIONS = FACTORY_KNOWLEDGE_COLLECTIONS
 
 
 async def index_wikipedia(titles: list, collection: str) -> None:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.sources.wikipedia_fetcher import WikipediaFetcher
 
-    print(f"初始化数据库...")
-    await init_db()
+    await require_database_contract()
 
     fetcher = WikipediaFetcher(lang="zh")
     print(f"开始从中文 Wikipedia 抓取 {len(titles)} 个条目...")
@@ -75,14 +74,13 @@ async def index_wikipedia(titles: list, collection: str) -> None:
 
 
 async def index_wikipedia_popular(collection: str) -> None:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.sources.wikipedia_fetcher import (
         WikipediaFetcher,
         POPULAR_DESTINATIONS_ZH,
     )
 
-    print(f"初始化数据库...")
-    await init_db()
+    await require_database_contract()
 
     fetcher = WikipediaFetcher(lang="zh")
     print(f"开始从中文 Wikipedia 抓取 {len(POPULAR_DESTINATIONS_ZH)} 个热门目的地...")
@@ -99,11 +97,10 @@ async def index_wikipedia_popular(collection: str) -> None:
 
 
 async def index_urls(urls: list, collection: str) -> None:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.sources.web_crawler import WebCrawler
 
-    print(f"初始化数据库...")
-    await init_db()
+    await require_database_contract()
 
     crawler = WebCrawler()
     print(f"开始爬取 {len(urls)} 个 URL...")
@@ -113,11 +110,10 @@ async def index_urls(urls: list, collection: str) -> None:
 
 
 async def index_directory(directory: str, collection: str) -> None:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.sources.document_loader import DocumentLoader
 
-    print(f"初始化数据库...")
-    await init_db()
+    await require_database_contract()
 
     loader = DocumentLoader()
     print(f"开始索引目录：{directory}")
@@ -126,11 +122,10 @@ async def index_directory(directory: str, collection: str) -> None:
 
 
 async def index_file(file_path: str, collection: str) -> None:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.sources.document_loader import DocumentLoader
 
-    print(f"初始化数据库...")
-    await init_db()
+    await require_database_contract()
 
     loader = DocumentLoader()
     print(f"开始索引文件：{file_path}")
@@ -161,11 +156,10 @@ async def index_from_jsondirs(
     chunker 由 --chunker-type 指定（text/semantic/contextual），
     collection 由 --collection 指定（建议 knowledge_text/semantic/contextual）。
     """
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.indexer import KnowledgeIndexer
 
-    print(f"初始化数据库...")
-    await init_db()
+    await require_database_contract()
     indexer = KnowledgeIndexer(chunker_type=chunker_type)
 
     if drop_existing:
@@ -219,10 +213,10 @@ async def index_from_jsondirs(
 
 
 async def show_stats() -> None:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.indexer import KnowledgeIndexer
 
-    await init_db()
+    await require_database_contract()
     indexer = KnowledgeIndexer()
 
     print("\n知识库统计：")

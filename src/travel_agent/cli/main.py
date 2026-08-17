@@ -1,12 +1,13 @@
 """`journeypilot` CLI：doctor / migrate / backup / restore。
 
-这是 dev docs ADR-P0-03 里那个「启动编排器」的手动入口。它与 API 进程的分工：
+这是 dev docs ADR-P0-03 里那个「启动编排器」。它是启动路径的一部分，不是可选的运维工具：
+API 进程不建表，所以 `migrate` 必须在 API 之前跑完（Compose entrypoint 与 `run.sh` 都这么做）。
 
 ```
 journeypilot CLI                     API 进程
   ├─ census                            ├─ connect
-  ├─ backup                            ├─ 只读 schema report
-  ├─ migrate（持锁）                    └─ serve or readiness 503
+  ├─ backup                            ├─ 只读合同校验
+  ├─ migrate（持锁；含 checkpoint 表）  └─ serve or readiness 503
   ├─ restore
   └─ doctor
 ```
@@ -125,6 +126,7 @@ def _plan_lines(plan: Any) -> list[str]:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     from ..db.backup import list_backups
+    from ..db.checkpoint_schema import missing_checkpoint_tables
     from ..db.connection import connect
     from ..db.lock import release, try_acquire
     from ..db.migrate import plan
@@ -142,6 +144,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 embedding_dimensions=settings.embedding.dimensions,
                 allow_destructive=False,
             )
+            missing_checkpoints = missing_checkpoint_tables(conn)
             # 「现在有人在迁移吗」：拿到锁就立刻还回去，doctor 不持锁。
             lock_free = try_acquire(conn)
             if lock_free:
@@ -173,6 +176,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     payload["optional_capabilities"] = census.optional_capabilities
     payload["migration"] = migration_plan.to_dict()
     payload["census"] = census.to_dict()
+    # checkpoint 表不在 census / 指纹里（owner 是 langgraph），但缺了它们
+    # plan_gate 与崩溃恢复就是关着的。
+    payload["checkpoint_schema"] = {
+        "ready": not missing_checkpoints,
+        "missing_tables": list(missing_checkpoints),
+        "next_action": "journeypilot migrate" if missing_checkpoints else "",
+    }
 
     backup_root = _backup_root(settings, args.backup_dir)
     backups = list_backups(backup_root)
@@ -195,6 +205,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not args.json:
         lines.extend(_plan_lines(migration_plan))
         lines.append("")
+        lines.append(
+            "checkpoint 表   "
+            + ("就绪" if not missing_checkpoints else f"缺 {'、'.join(missing_checkpoints)} —— journeypilot migrate")
+        )
         lines.append(f"迁移锁          {'空闲' if lock_free else '被占用（另一个 migrate 在跑）'}")
         lines.append(f"备份目录        {backup_root}（{len(backups)} 份）")
         for entry in backups[:5]:
@@ -217,10 +231,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
-    from ..db.backup import create_backup
+    from ..db.checkpoint_schema import create_checkpoint_schema
     from ..db.connection import connect
-    from ..db.lock import MigrationLockTimeout, migration_lock
-    from ..db.migrate import Decision, plan, stamp, upgrade, upgrade_sql
+    from ..db.migrate import Decision, plan, upgrade_sql
 
     settings = _settings()
     target = _target(settings)
@@ -257,12 +270,43 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         print("拒绝执行迁移。上面的「问题」和「下一步」说明了原因。", file=sys.stderr)
         return EXIT_FAILED
 
-    if migration_plan.decision is Decision.UP_TO_DATE:
-        return EXIT_OK
-
     if args.dry_run:
         print("\n--dry-run：以上是将要执行的动作，未改动数据库。")
         return EXIT_OK
+
+    if migration_plan.decision is not Decision.UP_TO_DATE:
+        code = _run_migration(args, settings, target, migration_plan)
+        if code != EXIT_OK:
+            return code
+
+    # ---- LangGraph checkpoint 表 ------------------------------------------ #
+    # 即使自己的迁移无事可做也要跑：这四张表不在 `alembic_version` 的管辖里，
+    # 「已是最新」不代表它们建好了。
+    try:
+        created = create_checkpoint_schema(target)
+    except Exception as exc:
+        print(f"\nLangGraph checkpoint 表建立失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        print("没有它们，plan_gate 与崩溃恢复不可用（API 会报 checkpointer 不可用）。", file=sys.stderr)
+        return EXIT_FAILED
+    if created:
+        print(f"\n已建立 LangGraph checkpoint 表：{'、'.join(created)}")
+
+    with connect(target) as conn:
+        after = plan(conn, target, embedding_dimensions=settings.embedding.dimensions)
+    print("")
+    print(f"迁移完成：revision {after.current_revision}，指纹 {after.fingerprint_digest[:16]}…")
+    return EXIT_OK
+
+
+def _run_migration(
+    args: argparse.Namespace, settings: Any, target: Any, migration_plan: Any
+) -> int:
+    """备份闸门 + 持锁执行。已经判定过不拒绝、不是 dry-run、且确有待执行迁移。"""
+
+    from ..db.backup import create_backup
+    from ..db.connection import connect
+    from ..db.lock import MigrationLockTimeout, migration_lock
+    from ..db.migrate import Decision, plan, stamp, upgrade
 
     # ---- 备份闸门 --------------------------------------------------------- #
     # 非空库必须先有一份**校验通过**的备份才允许自动迁移（dev docs 02 §4.3）。
@@ -346,10 +390,6 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         print("数据库已回滚到这一条迁移执行前的状态（PostgreSQL 事务性 DDL）。", file=sys.stderr)
         return EXIT_FAILED
 
-    with connect(target) as conn:
-        after = plan(conn, target, embedding_dimensions=settings.embedding.dimensions)
-    print("")
-    print(f"迁移完成：revision {after.current_revision}，指纹 {after.fingerprint_digest[:16]}…")
     return EXIT_OK
 
 
@@ -614,7 +654,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
 
     migrate = subparsers.add_parser(
-        "migrate", help="执行版本化迁移（持锁；非空库先自动备份）"
+        "migrate",
+        help="执行版本化迁移并建立 checkpoint 表（持锁；非空库先自动备份）。启动 API 之前必须先跑这条",
     )
     add_common(migrate)
     migrate.add_argument(
@@ -629,7 +670,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="只打印判定与待执行迁移，不改数据库"
     )
     migrate.add_argument(
-        "--sql", action="store_true", help="离线输出迁移 SQL 而不执行（不连库、不加锁）"
+        "--sql", action="store_true",
+        help="离线输出迁移 SQL 而不执行（不连库、不加锁；不含 langgraph 自己建的 checkpoint 表）",
     )
     migrate.set_defaults(func=cmd_migrate)
 

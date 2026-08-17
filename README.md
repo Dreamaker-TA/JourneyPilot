@@ -207,7 +207,7 @@ The optional local knowledge corpus is intentionally not included in this public
 
 ## Database, backups, and upgrades
 
-Schema changes are versioned migrations under [`migrations/versions/`](migrations/versions/), not something the API process performs on startup. The `journeypilot` command is the maintenance entry point:
+The API process issues no DDL at all. It creates no tables, alters no columns, and deletes no rows on startup — it only verifies, read-only, that the database matches the schema contract of the code that is running. Schema changes are versioned migrations under [`migrations/versions/`](migrations/versions/), applied by the `journeypilot` command:
 
 ```bash
 uv run python journeypilot.py doctor          # database, migration revision, schema, extensions, backups
@@ -218,6 +218,10 @@ uv run python journeypilot.py restore <dir>   # restore into a new database, ver
 
 Every command accepts `--json` for CI use.
 
+`migrate` runs **before** the API, not alongside it. Both supported entry points do this for you — the Docker image's entrypoint and `./run.sh start` each run it and refuse to start the API if it does not pass. Running the API against a database that has not been migrated is not a degraded mode: `GET /api/health/ready` returns 503 with the exact problem and the command that fixes it, and no request is served.
+
+Because the API never needs DDL rights, you can run it under a PostgreSQL role that only has `SELECT/INSERT/UPDATE/DELETE` and sequence usage, and reserve schema ownership for `journeypilot migrate`. This is verified by a test, not just asserted.
+
 What the safeguards actually do:
 
 - **A non-empty database is backed up before any migration**, and the backup is verified (non-empty file, `pg_restore --list` parses, checksums recorded). If the backup fails, the migration does not run.
@@ -225,9 +229,9 @@ What the safeguards actually do:
 - **Migrations that delete data require `--allow-destructive`.** A first install on an empty database does not, because there is nothing to lose.
 - **Restore never overwrites the current database in place.** It restores into a new database, checks the schema fingerprint and row counts against the manifest, and only then switches. The previous database is kept as `<name>_prerestore_<timestamp>` until you delete it.
 
-`maintenance.*` in `config.yaml` controls the backup directory, retention, and the lock timeout. Backups are written outside version control.
+- **The LangGraph checkpoint tables are created by `migrate` too**, not by the API. They are owned by `langgraph-checkpoint-postgres` and carry their own version table, so they stay out of our migration history — but creating them is still DDL. Without them the API reports `checkpointer` as unavailable at startup rather than failing on the first interrupt.
 
-In this release the API process still creates its own tables on startup, and reports what it found read-only under `database_schema` in `GET /api/health/ready`. Moving table creation out of the API entirely is the next step.
+`maintenance.*` in `config.yaml` controls the backup directory, retention, and the lock timeout. Backups are written outside version control.
 
 ## Development
 

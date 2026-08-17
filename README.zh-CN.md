@@ -207,7 +207,7 @@ uv run python scripts/check_mcp.py
 
 ## 数据库、备份与升级
 
-结构变更是 [`migrations/versions/`](migrations/versions/) 下的版本化迁移，不是 API 进程启动时顺手做的事。`journeypilot` 是维护入口：
+API 进程不执行任何 DDL：不建表、不改列、不删数据，启动时只**只读**校验「这个库是否匹配当前代码的结构合同」。结构变更是 [`migrations/versions/`](migrations/versions/) 下的版本化迁移，由 `journeypilot` 执行：
 
 ```bash
 uv run python journeypilot.py doctor          # 体检：数据库、迁移版本、结构、扩展、备份现状
@@ -218,6 +218,10 @@ uv run python journeypilot.py restore <目录>   # 恢复到新库、验证通�
 
 每个命令都支持 `--json`，供 CI 使用。
 
+`migrate` 跑在 API **之前**，不是与它并行。两条官方入口都已经替你做了这件事：Docker 镜像的 entrypoint 和 `./run.sh start` 各自先跑一次迁移，不通过就不启动 API。让 API 连上一个没迁移过的库不是「降级运行」——`GET /api/health/ready` 返回 503，附上具体问题和那条能修好它的命令，一条业务请求都不会被服务。
+
+因为 API 不需要 DDL 权限，你可以用一个只有 `SELECT/INSERT/UPDATE/DELETE` 和 sequence 使用权的 PostgreSQL 角色运行它，把结构所有权留给 `journeypilot migrate`。这一条有测试保证，不只是一句声明。
+
 这几道保护具体做了什么：
 
 - **非空数据库在任何迁移之前必定先备份**，而且备份要通过校验（文件非空、`pg_restore --list` 能解析、checksum 已记录）。备份失败就不迁移。
@@ -225,9 +229,9 @@ uv run python journeypilot.py restore <目录>   # 恢复到新库、验证通�
 - **会删数据的迁移需要 `--allow-destructive`。** 空库首次安装不需要 —— 那里没有数据可丢。
 - **恢复绝不原地覆盖当前数据库。** 它先恢复到一个新库，比对结构指纹和行数，通过之后才切换；恢复前的数据库保留为 `<库名>_prerestore_<时间戳>`，直到你自己删除。
 
-`config.yaml` 里的 `maintenance.*` 控制备份目录、保留份数和锁超时。备份目录不进版本控制。
+- **LangGraph 的 checkpoint 表同样由 `migrate` 建**，不由 API 建。它们的 owner 是 `langgraph-checkpoint-postgres` 并自带版本表，所以不进我们的迁移历史 —— 但建它们仍然是 DDL。缺了它们，API 在启动时就报 `checkpointer` 不可用，而不是等第一次 interrupt 才失败。
 
-这个版本里 API 进程仍会在启动时自建表，并在 `GET /api/health/ready` 的 `database_schema` 下**只读**报告它看到的结构状态。把建表彻底移出 API 进程是下一步。
+`config.yaml` 里的 `maintenance.*` 控制备份目录、保留份数和锁超时。备份目录不进版本控制。
 
 ## 参与开发
 

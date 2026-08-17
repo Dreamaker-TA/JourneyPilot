@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any, Dict
 
-from ..infrastructure.database import init_db
+from ..db.report import require_database_contract
 from .product_config import (
     TRIP_PLANNER_CONFIG_KEY,
     ProductConfigurationStore,
@@ -41,9 +41,14 @@ def build_publication_summary() -> Dict[str, Any]:
 
 
 async def publish_seed() -> Dict[str, Any]:
-    """Validate and explicitly replace release-managed product data in the DB."""
+    """Validate and explicitly replace release-managed product data in the DB.
+
+    Publishing writes rows; it never creates tables. An unmigrated database is
+    refused up front with the command that fixes it, rather than failing halfway
+    through on the first INSERT.
+    """
     summary = build_publication_summary()
-    await init_db()
+    await require_database_contract()
     await ProductConfigurationStore().publish_seed()
     await PresetStore().publish_system_presets()
     return summary

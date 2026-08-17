@@ -51,28 +51,16 @@ def _public_config_payload(settings: Any) -> Dict[str, Any]:
     }
 
 
-# P21-01: init_db 是单事务，schema 断言失败会整体回滚、旧表原样留下，只探一张表
-# 会把「合同已被违反」的库报成绿的。四张表覆盖会话、TripRun、当前 Bundle 三条主链路。
-_REQUIRED_TABLES = (
-    "user_profiles",
-    "chat_sessions",
-    "trip_runs",
-    "delivery_bundle_heads_v2",
-)
-
-
 async def _probe_database() -> Tuple[bool, str]:
+    """只探连接活性。「表在不在、结构对不对」归 `database_schema` 那一项，
+    在这里再列一份必需表清单就是同一个合同的第二份定义。
+    """
+
     try:
         from ...infrastructure.database import get_engine
 
         async with get_engine().connect() as conn:
             await conn.execute(text("SELECT 1"))
-            for table in _REQUIRED_TABLES:
-                try:
-                    await conn.execute(text(f"SELECT 1 FROM {table} LIMIT 0"))
-                except Exception as exc:
-                    # 必须点名是哪张表，否则运营者从探针里学不到任何东西。
-                    return False, f"业务表 {table} 不可用: {exc}"
         return True, "ok"
     except Exception as exc:
         return False, str(exc)
@@ -127,15 +115,9 @@ async def get_status():
 # that degrades an answer rather than preventing one.  Anything not named here
 # blocks readiness — the default is the strict one.
 #
-# ``database_schema`` 报告 migration revision、结构指纹和缺表，但在 P0-A 这一阶段
-# **不阻塞**：`init_db()` 仍然是建表的人，而它不写 `alembic_version` —— 于是每一个
-# 现有部署在被 `journeypilot migrate` 纳管之前都处于「结构对、版本号空」的状态。
-# 现在就让它 503，等于用一条诊断信息换掉所有人的可用性。它进入门禁的时点是
-# PR-P0-02（`init_db()` → `verify_database_contract()`，迁移移交启动编排器）。
-# 判据与 `db/report.py::GATES_READINESS` 逐字同源，两处分叉就会一处报警一处放行。
-_NON_BLOCKING_COMPONENTS = frozenset(
-    {"mcp", "data_snapshots", "knowledge_corpus", "database_schema"}
-)
+# ``database_schema`` 刻意不在这份名单里 —— 它拦门禁，判据与
+# ``db/report.py::GATES_READINESS`` 同源。
+_NON_BLOCKING_COMPONENTS = frozenset({"mcp", "data_snapshots", "knowledge_corpus"})
 
 
 async def _probe_knowledge_corpus() -> Dict[str, Any]:
@@ -232,12 +214,10 @@ def _probe_data_snapshots(settings: Any) -> Dict[str, Any]:
 
 
 def _probe_schema_report(components: Any) -> Dict[str, Any]:
-    """把启动时生成的只读 schema 报告原样端出来。
+    """把启动时那份只读合同校验原样端出来，并让它决定放不放行。
 
-    **不在这里重新体检**：报告是启动那一刻的事实，而 readiness 每 30 秒被探针调用一次。
-    每次都重跑五条 introspection 查询，只为得到一个几乎不会在运行期变化的答案，
-    是把一个观察手段变成一份持续开销。结构在运行期变了 —— 那正是这一整个 P0 项
-    要消灭的事 —— 会在下一次启动时被报出来。
+    不在这里重新体检：readiness 每 30 秒被调一次，而结构在运行期不再变化。
+    报告缺失与校验不通过一样按不就绪处理 —— 门禁的默认值只能是关着的。
     """
 
     from ...db.report import GATES_READINESS
@@ -245,12 +225,12 @@ def _probe_schema_report(components: Any) -> Dict[str, Any]:
     report = getattr(components, "schema_report", None)
     if report is None:
         return {
-            "ready": True,
+            "ready": False,
             "gates_readiness": GATES_READINESS,
             "available": False,
-            "message": "启动时未能生成只读 schema 报告（详见启动日志）",
+            "message": "启动时未执行数据库合同校验（详见启动日志）",
         }
-    return {"ready": True, "available": True, **report.to_dict()}
+    return {"ready": report.compatible, "available": True, **report.to_dict()}
 
 
 @router.get("/health/ready")
@@ -262,15 +242,6 @@ async def readiness() -> JSONResponse:
     db_ok, db_message = await _probe_database()
     redis_ok, redis_message = await _probe_redis()
     model_ok, model_message = _probe_model_config()
-
-    # P21-01: 启动期 init_db 的成败是独立一等组件。连接探针可能因旧表还在而全绿，
-    # 但 schema 合同已经没建起来；这条必须参与 ready 计算（不像 mcp 被排除）。
-    db_init_ok = bool(components.db_available)
-    db_init_message = (
-        "ok"
-        if db_init_ok
-        else f"启动时 init_db 失败，业务 schema 合同未建立: {components.db_init_error}"
-    )
 
     gates_enabled = bool(settings.run_control.plan_gate_enabled)
     checkpointer_ok = bool(components.checkpointer) or not gates_enabled
@@ -296,7 +267,6 @@ async def readiness() -> JSONResponse:
 
     components_status = {
         "database": {"ready": db_ok, "message": db_message},
-        "database_init": {"ready": db_init_ok, "message": db_init_message},
         "redis": {"ready": redis_ok, "message": redis_message},
         "models": {"ready": model_ok, "message": model_message},
         "checkpointer": {"ready": checkpointer_ok, "message": checkpointer_message},
@@ -312,9 +282,8 @@ async def readiness() -> JSONResponse:
         # An empty knowledge base makes grounding worse, it does not stop the service
         # answering; 503-ing on it would hold a working deployment behind a seed file.
         "knowledge_corpus": await _probe_knowledge_corpus(),
-        # 只读 schema 报告（P0-A）。`ready` 恒为 True，理由见
-        # `_NON_BLOCKING_COMPONENTS` 上方那段注释。运营者要读的是 `problems` 和
-        # `next_action` —— 它们给出的是一条可以直接敲的命令，不是「结构不对」四个字。
+        # 数据库合同：revision、结构指纹、缺表、可选能力。这一项拦门禁，
+        # 不通过时读 `problems` 与 `next_action`。
         "database_schema": _probe_schema_report(components),
     }
     ready = all(

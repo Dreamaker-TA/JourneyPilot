@@ -90,7 +90,10 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    restart: unless-stopped
+    # Not unless-stopped: the entrypoint migrates first and exits non-zero when it
+    # refuses. Three attempts absorb a slow Postgres; a real refusal then stops and
+    # leaves its reason in `docker compose logs api` instead of a restart loop.
+    restart: on-failure:3
 
 # 卷名保持原值（不加 journeypilot- 前缀）：重命名会让 Docker 新建空卷、
 # 丢失本地既有数据。容器/镜像名已改为品牌名，卷名不动 = 零迁移成本。

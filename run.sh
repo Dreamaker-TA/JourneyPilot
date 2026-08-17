@@ -659,6 +659,30 @@ step_frontend_deps() {
   fi
 }
 
+step_migrate() {
+  # 必须在 backend 之前：API 进程不建表。被拒绝时原样打出 CLI 输出，
+  # 那里面有「差在哪」和「下一条能敲的命令」。
+  print_section "Database"
+
+  local out status
+  start_spinner "journeypilot migrate..."
+  out=$( (cd "$ROOT_DIR" && uv run python journeypilot.py migrate 2>&1) ) && status=0 || status=$?
+  stop_spinner
+
+  if (( status != 0 )); then
+    print_item "database" fail "migration refused — 数据库未被改动"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      printf "  ${DIM}│${RESET}      ${DIM}%s${RESET}\n" "$line"
+    done <<< "$out"
+    return 1
+  fi
+
+  local revision
+  revision=$(echo "$out" | sed -n 's/^迁移完成：revision \([^,]*\).*/\1/p' | tail -1)
+  print_item "database" ok "revision ${revision:-head}"
+}
+
 step_start_backend() {
   print_section "Services"
   mkdir -p "$LOG_DIR"
@@ -758,6 +782,7 @@ cmd_start() {
   step_config
   step_infra
   step_python || exit 1
+  step_migrate || exit 1
   step_mcp
   step_frontend_deps
   resolve_backend_port || exit 1
@@ -1027,6 +1052,24 @@ cmd_check() {
     done <<< "$bad_lines"
   else
     print_item "mcp" ok "all servers configured"
+  fi
+
+  # doctor 只读、不加锁，所以 check 可以跑它；migrate 不能挪进 check。
+  start_spinner "journeypilot doctor..."
+  local doctor_out doctor_status
+  doctor_out=$( (cd "$ROOT_DIR" && uv run python journeypilot.py doctor 2>&1) ) \
+    && doctor_status=0 || doctor_status=$?
+  stop_spinner
+
+  if (( doctor_status == 0 )); then
+    print_item "database" ok "$(echo "$doctor_out" | sed -n 's/^判定 *\(.*\)$/\1/p' | tail -1)"
+  else
+    print_item "database" fail "see below — run: uv run python journeypilot.py doctor"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      printf "  ${DIM}│${RESET}      ${DIM}%s${RESET}\n" "$line"
+    done <<< "$doctor_out"
+    status=1
   fi
 
   echo

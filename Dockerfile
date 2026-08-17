@@ -21,10 +21,8 @@ RUN uv sync --frozen
 COPY src/ ./src/
 COPY mcp_servers/ ./mcp_servers/
 COPY main.py .
-# 迁移脚本与维护 CLI。镜像里必须有它们，原因有两个：
-#  1) 容器内的只读 schema 报告要读迁移历史才能说出「代码的 head 是哪一个」；
-#  2) `docker compose exec api uv run python journeypilot.py doctor/backup/migrate`
-#     是容器化部署里唯一能敲的维护入口 —— 宿主机上可能连 PostgreSQL 客户端都没有。
+# 迁移脚本与维护 CLI：entrypoint 要用它迁移，只读合同校验要读迁移历史，
+# doctor/backup/restore 也是容器里唯一能敲的维护入口。
 COPY alembic.ini ./
 COPY migrations/ ./migrations/
 COPY journeypilot.py .
@@ -38,5 +36,7 @@ RUN npm install
 # 创建必要目录
 RUN mkdir -p outputs uploads logs
 
-# 启动
-CMD ["uv", "run", "python", "main.py"]
+# 启动编排器 → API
+COPY docker/api-entrypoint.sh /usr/local/bin/api-entrypoint.sh
+RUN chmod +x /usr/local/bin/api-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/api-entrypoint.sh"]

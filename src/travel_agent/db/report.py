@@ -1,22 +1,8 @@
-"""API 进程唯一被允许调用的数据库生命周期模块：**只读** schema 报告。
+"""API 进程唯一被允许调用的数据库生命周期模块：只读合同校验。
 
-ADR-P0-03 把「改 Schema」整体移出 API 进程。P0-A 这一阶段还不删 `init_db()`
-（那是 PR-P0-02 的事），但先把「API 该怎么看数据库」这件事建立起来：
-
-- 只跑 `SELECT`，一条 DDL 都没有；
-- 只回答三个问题：**版本号是什么、结构对不对、缺什么**；
-- 结论进日志和 `GET /api/health/ready`，让运营者一眼看到，而不是等第一条请求 500。
-
-## 这一阶段刻意**不**拦启动
-
-`gates_readiness` 现在恒为 False。理由：`init_db()` 还在跑，它会把结构建成合同的样子
-但**不写 `alembic_version`** —— 于是每一个现有部署在纳管之前都处于「结构对、版本号空」
-的状态。这个阶段就让它拦启动，等于用一条诊断信息换掉所有人的可用性，而问题本身
-（升级期数据安全）还没有被这一个 PR 解决。
-
-所以现在的合同是：**说得非常清楚，但不拦。** 拦的那一步在 PR-P0-02 —— 那时
-`init_db()` 变成 `verify_database_contract()`，迁移由启动编排器执行，"版本号是空的"
-才真正意味着"这个库没有被任何迁移管过"。
+只跑 SELECT，回答「版本号是什么、结构对不对、缺什么」。结论进启动日志，并决定
+`GET /api/health/ready` 放不放行。真正「不启动」的闸门在编排器一侧
+（`journeypilot migrate` 不通过就不 exec API）。
 """
 
 from __future__ import annotations
@@ -30,8 +16,12 @@ from .schema_contract import EXTERNALLY_OWNED_TABLES, MANAGED_TABLES
 
 logger = logging.getLogger(__name__)
 
-#: 这一阶段报告不参与 readiness 门禁（理由见模块 docstring）。
-GATES_READINESS = False
+#: 合同不通过时 readiness 返回 503。判据与 `api/routes/system.py` 的非阻塞名单同源。
+GATES_READINESS = True
+
+
+class DatabaseContractError(RuntimeError):
+    """数据库结构不满足当前代码的合同。消息里带上 `next_action`。"""
 
 
 @dataclass
@@ -59,8 +49,8 @@ class SchemaReport:
 
     @property
     def compatible(self) -> bool:
-        """当前代码能不能安全地读写这个库。"""
-        return self.reachable and not self.missing_tables and self.schema_matches_revision is not False
+        """当前代码能不能安全地读写这个库。判据就是 `problems` 空不空。"""
+        return self.reachable and not self.problems
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,19 +73,15 @@ class SchemaReport:
     def log_summary(self) -> None:
         """把结论写成运营者能直接照做的一行（或几行）。"""
 
-        if not self.reachable:
-            logger.error("数据库 schema 报告：库不可达（%s）", "；".join(self.problems))
-            return
-
-        if self.problems:
+        if not self.compatible:
             logger.error(
-                "数据库 schema 报告：%s | 下一步：%s",
-                "；".join(self.problems),
+                "数据库合同校验未通过，服务不会进入就绪：%s | 下一步：%s",
+                "；".join(self.problems) or "库不可达",
                 self.next_action or "journeypilot doctor",
             )
         else:
             logger.info(
-                "数据库 schema 报告：revision %s（head %s），结构与合同一致，指纹 %s…",
+                "数据库合同校验通过：revision %s（head %s），指纹 %s…",
                 self.revision, self.head_revision, self.fingerprint_sha256[:12],
             )
 
@@ -113,7 +99,7 @@ _ALEMBIC_REVISION_SQL = """
     SELECT version_num FROM alembic_version
 """
 
-_UNMANAGED_TABLES_SQL = """
+_PUBLIC_TABLES_SQL = """
     SELECT c.relname AS name
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -122,8 +108,11 @@ _UNMANAGED_TABLES_SQL = """
 """
 
 
-async def build_schema_report(engine: Any, *, embedding_dimensions: int) -> SchemaReport:
-    """从 SQLAlchemy 异步引擎读一份只读报告。绝不修改任何东西。"""
+async def verify_database_contract(engine: Any, *, embedding_dimensions: int) -> SchemaReport:
+    """校验这个库是否满足当前代码的合同。只读，且永不抛异常。
+
+    永不抛：调用点是 FastAPI lifespan，起不来就读不到 readiness 诊断。
+    """
 
     from sqlalchemy import text
 
@@ -135,7 +124,7 @@ async def build_schema_report(engine: Any, *, embedding_dimensions: int) -> Sche
                 conn, embedding_dimensions=embedding_dimensions
             )
 
-            result = await conn.execute(text(_UNMANAGED_TABLES_SQL))
+            result = await conn.execute(text(_PUBLIC_TABLES_SQL))
             all_tables = [row["name"] for row in result.mappings()]
 
             revision: str | None = None
@@ -150,23 +139,29 @@ async def build_schema_report(engine: Any, *, embedding_dimensions: int) -> Sche
             next_action="journeypilot doctor  # 先确认数据库可达",
         )
 
+    try:
+        line = revision_line()
+    except Exception as exc:
+        # 读不到迁移历史就说不出代码的 head 是哪一个，也就无从判断结构对不对。
+        return SchemaReport(
+            reachable=True,
+            fingerprint_sha256=fingerprint_digest(fingerprint),
+            problems=[f"读不到迁移历史：{type(exc).__name__}: {exc}"],
+            next_action="journeypilot doctor --json",
+        )
+
     unmanaged = tuple(
         name
         for name in all_tables
         if name not in MANAGED_TABLES and name not in EXTERNALLY_OWNED_TABLES
     )
     missing = tuple(fingerprint.get("missing_tables", ()))
-
-    line = revision_line()
     head = line[-1] if line else ""
 
     problems: list[str] = []
     schema_matches: bool | None = None
-    # `next_action` 必须是一条**真能修好当前问题**的命令。所以它按「问题是什么」
-    # 决定，而不是按代码里几个分支的先后顺序覆盖：
-    #   未纳管 / 版本落后        → migrate 能修
-    #   版本已在 head 但结构不符 → migrate 什么都不会做（它会判 UP_TO_DATE 之外的拒绝），
-    #                             真正的下一步是导诊断、再从备份恢复或重建
+    # `next_action` 按问题类型决定，不按分支顺序覆盖：未纳管/版本落后 migrate 能修，
+    # 版本已在 head 但结构漂移则不能（migrate 无事可做），只能导诊断后恢复或重建。
     next_action = ""
 
     if missing:
@@ -174,8 +169,8 @@ async def build_schema_report(engine: Any, *, embedding_dimensions: int) -> Sche
 
     if revision is None:
         problems.append(
-            "这个数据库还没有被版本化迁移纳管（没有 alembic_version）。"
-            "当前由 init_db() 建表，升级前没有自动备份"
+            "这个数据库还没有被版本化迁移纳管（没有 alembic_version），"
+            "无法确认它的结构与当前代码匹配"
         )
         next_action = "journeypilot migrate  # 比对指纹后纳管，不会重复建表"
     else:
@@ -199,7 +194,6 @@ async def build_schema_report(engine: Any, *, embedding_dimensions: int) -> Sche
 
     if unmanaged:
         # 不算 problem：多一张没人管的表不影响这份代码读写自己的表。
-        # 但要留下痕迹 —— 它通常是上一个版本留下的遗留表。
         logger.info(
             "public schema 里有 %d 张合同外的表（既不受迁移管辖，也没有已知外部 owner）：%s",
             len(unmanaged), "、".join(unmanaged),
@@ -218,3 +212,22 @@ async def build_schema_report(engine: Any, *, embedding_dimensions: int) -> Sche
         problems=problems,
         next_action=next_action,
     )
+
+
+async def require_database_contract() -> SchemaReport:
+    """同一份校验的「不通过就抛」版本，给没有 readiness 探针的一次性脚本用。"""
+
+    from ..config import get_settings
+    from ..infrastructure.database import get_engine
+
+    settings = get_settings()
+    report = await verify_database_contract(
+        get_engine(), embedding_dimensions=settings.embedding.dimensions
+    )
+    if not report.compatible:
+        raise DatabaseContractError(
+            "数据库结构不满足当前代码的合同："
+            + "；".join(report.problems)
+            + f"。下一步：{report.next_action or 'journeypilot doctor'}"
+        )
+    return report

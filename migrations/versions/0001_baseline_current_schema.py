@@ -6,40 +6,24 @@ Create Date: 2026-08-17
 
 ## 这条迁移是什么
 
-commit b867a3a 时 `init_db()` 在一个空库上跑完之后的**最终形态**，一次建成。
+业务结构的完整定义，一次建成。它是「历史被折叠成的一个点」，不是历史的第一步 ——
+产品没有用户，没有任何库需要从更早的形状逐级爬上来。
 
-它不是「历史的第一步」，而是「历史被折叠成的一个点」。`init_db()` 里那些
-`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`、`DROP COLUMN valid_until`、
-`DROP INDEX uq_memory_relations_active` 都是从更早形状爬上来的台阶；产品还没有
-用户，没有任何库需要从那些更早的形状爬 —— 所以台阶不进 baseline，
-只有台阶的终点进。
+## 门禁
 
-**等价性不靠人眼保证**：`tests/db/test_migration_baseline.py` 在两个临时库上分别跑
-`init_db()` 和 `alembic upgrade head`，断言两份 schema 指纹逐字相同。改这个文件而不
-改 `init_db()`（或反过来）会让那个测试红。
-
-## 强制门禁六问
-
-- **影响面**：只有 DB。后端/前端/Compose/配置/文档不因这条迁移改变行为
-  （`init_db()` 在 P0-A 里原样保留，见 ADR-P0-03 的分阶段落地）。
-- **旧数据路径**：这条迁移只在**空库**上执行。已经有核心表但没有 `alembic_version`
-  的库走 adoption：先比指纹，一致才 `stamp 0001`，不重复建表
-  （`db/migrate.py::plan`）。指纹不一致的库拒绝自动升级。
-- **失败注入**：单条迁移在一个事务里（`env.py` 的 `transaction_per_migration`），
-  PostgreSQL 事务性 DDL 保证中途失败后库回到执行前，`alembic_version` 不前进。
-- **幂等**：全部 `IF NOT EXISTS`。重复执行不报错、不重复建。
-- **观察信号**：失败时 CLI 非零退出并打印 alembic 报错；API 侧
-  `GET /api/health/ready` 的 `database_schema` 会报缺表清单。
-- **回滚**：`downgrade()` 删掉本迁移建立的所有表。这会**删光业务数据** ——
-  它存在是为了让测试能验证 up/down 对称，不是给生产用的回退路径。
+- **影响面**：只有 DB。
+- **旧数据路径**：只在空库上执行。有核心表但无 `alembic_version` 的库走 adoption
+  （先比指纹，一致才 `stamp 0001`），指纹不一致则拒绝（`db/migrate.py::plan`）。
+- **失败注入**：单条迁移一个事务，中途失败整体回滚，`alembic_version` 不前进。
+- **幂等**：全部 `IF NOT EXISTS`。
+- **观察信号**：CLI 非零退出；API 侧 `GET /api/health/ready` 的 `database_schema`。
+- **回滚**：`downgrade()` 删光本迁移建立的表和数据，只供测试验证 up/down 对称。
 
 ## 两处随环境变化的地方
 
-- **向量维度**取自 `embedding.dimensions` 配置。三张表的 `embedding` 列共用它。
-- **`knowledge_chunks.tsv` 的 text search config**：zhparser 装上并注册了 `chinese`
-  就用 `chinese`，否则退到 `simple`，并且**说出来**（不静默假装中文词法完整）。
-  生成列的表达式一旦建好就固定了，切换 config 需要一条专门的重建迁移
-  （dev docs 02 §10.2）。
+- **向量维度**取自 `embedding.dimensions` 配置，三张表共用。
+- **`knowledge_chunks.tsv` 的 text search config**：有 `chinese` 就用，否则退到
+  `simple` 并告警。生成列表达式建好即固定，切换需要一条专门的重建迁移。
 """
 
 from __future__ import annotations

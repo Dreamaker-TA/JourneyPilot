@@ -363,13 +363,15 @@ chromedriver/
 
 # 本地知识库与生成数据（不进入开源仓库）
 data/
-# 测试文件
+# 仓库任意位置的临时测试脚本不进版本控制，但 tests/ 整棵树要进（含子目录）。
 test_*.py
 *_test.py
 test_output/
 !tests/
-!tests/test_*.py
-!tests/*_test.py
+!tests/**
+# `!tests/**` 也会把这些捞回来，所以在它之后重新排除。
+tests/**/__pycache__/
+tests/**/*.pyc
 
 
 # =============================================================================

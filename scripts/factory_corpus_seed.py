@@ -27,10 +27,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 
 async def do_export() -> int:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.factory_seed import DEFAULT_SEED_DIR, export_seed
 
-    await init_db()
+    await require_database_contract()
     manifest = await export_seed()
     print(f"已导出 → {DEFAULT_SEED_DIR}")
     print(f"  embedder   : {manifest.embedder}")
@@ -61,10 +61,10 @@ def do_verify() -> int:
 
 
 async def do_load(force: bool) -> int:
-    from travel_agent.infrastructure.database import init_db
+    from travel_agent.db.report import require_database_contract
     from travel_agent.rag.factory_seed import load_seed
 
-    await init_db()
+    await require_database_contract()
     report = await load_seed(force=force)
     if report.reembedded:
         print("⚠ 种子的 embedder 与当前配置不一致，已用当前 embedder 重算向量")

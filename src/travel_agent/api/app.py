@@ -69,17 +69,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("JourneyPilot API 启动中...")
         components = await builder.build()
         set_components(components)
-        try:
-            await components.preset_store.ensure_presets()
-            await components.product_configuration_store.ensure_seed()
-            logger.info("预设与产品配置初始化完成")
-        except Exception as e:
-            logger.warning(f"预设初始化失败: {e}")
         # 破库 / 无持久化启动绝不能显示「系统就绪」——运营者只看这一行。
         degraded: list[str] = []
-        if not components.db_available:
-            degraded.append(f"数据库初始化失败（{components.db_init_error}）")
+        report = components.schema_report
+        if report is None or not report.compatible:
+            problems = "；".join(report.problems) if report else "合同校验未执行"
+            action = (report.next_action if report else "") or "journeypilot doctor"
+            degraded.append(f"数据库合同校验未通过（{problems}）→ {action}")
         else:
+            # 出厂数据写入只在合同校验通过后跑：结构没建好时这些 DML 会成批失败，
+            # 而那批失败只是同一个问题的回声。
+            try:
+                await components.preset_store.ensure_presets()
+                await components.product_configuration_store.ensure_seed()
+                logger.info("预设与产品配置初始化完成")
+            except Exception as e:
+                logger.warning(f"预设初始化失败: {e}")
             # 出厂语料自举。放在这里而不是 run.sh：docker compose 起的那一路不经过
             # run.sh，而「知识库是空的」在两路上是同一件事。空库时检索静默返回 0 条、
             # 规划照常交付，所以要自成一条 ERROR，不并进下面那句「请勿放行流量」，

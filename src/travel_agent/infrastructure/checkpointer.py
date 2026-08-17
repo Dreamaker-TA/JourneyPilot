@@ -23,6 +23,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from ..config import Settings
+from ..db.checkpoint_schema import missing_checkpoint_tables_async
 from ..utils.log_filters import install_checkpoint_serde_log_dedup
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,11 @@ logger = logging.getLogger(__name__)
 async def build_checkpointer(
     settings: Settings,
 ) -> Tuple[AsyncPostgresSaver, AsyncConnectionPool]:
-    """Create and initialize the LangGraph Postgres checkpointer.
+    """Bind the LangGraph Postgres checkpointer to an already-migrated database.
+
+    Deliberately does not call ``setup()`` — creating those tables is DDL, which
+    ``journeypilot migrate`` owns. Missing tables raise here so an unmigrated
+    database surfaces at startup rather than on the first interrupt.
 
     Constructing the saver is also where its serializer's log noise starts, so
     the one de-duplicating filter is installed here: this is the single place any
@@ -59,9 +64,15 @@ async def build_checkpointer(
     await pool.open()
 
     try:
+        async with pool.connection() as conn:
+            missing = await missing_checkpoint_tables_async(conn)
+        if missing:
+            raise RuntimeError(
+                "LangGraph checkpoint 表缺失（" + "、".join(missing) + "）。"
+                "它们由启动编排器建立，API 进程不建表 —— 先跑 `journeypilot migrate`。"
+            )
         checkpointer = AsyncPostgresSaver(pool)
-        await checkpointer.setup()
-        logger.info("LangGraph Postgres checkpointer 初始化完成")
+        logger.info("LangGraph Postgres checkpointer 已就绪")
         return checkpointer, pool
     except Exception:
         await pool.close()

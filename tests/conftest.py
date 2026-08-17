@@ -1,8 +1,9 @@
 """测试夹具。
 
 这一批测试是**对真实 PostgreSQL 跑的**，理由很直接：要验证的东西（pgvector 列的
-typmod、生成列的表达式、advisory lock 的竞争、`pg_restore --list` 认不认这个文件）
-在任何 mock 里都不存在。用 sqlite 或 mock 跑出来的绿灯，恰好在这一个 PR 里没有意义。
+typmod、生成列的表达式、advisory lock 的竞争、`pg_restore --list` 认不认这个文件、
+一个只有 DML 权限的角色能不能跑起 API）在任何 mock 里都不存在。用 sqlite 或 mock
+跑出来的绿灯，恰好在这些不变量上没有意义。
 
 连不上库时**跳过而不是失败**：CI 里没有 PostgreSQL 的那一档不该因此变红，
 但跳过的原因会打印出来，不会静默变成「0 个测试通过」。
@@ -96,53 +97,21 @@ def temp_database(base_target, postgres_available) -> Iterator[object]:
 
 
 @pytest.fixture
-def second_temp_database(base_target, postgres_available) -> Iterator[object]:
-    """第二个临时库。等价性测试要同时持有两个（一个 init_db、一个 alembic）。"""
+def unmanaged_database(temp_database) -> object:
+    """结构对、没有版本号的库：迁到 baseline 后删掉 `alembic_version`。
 
-    if not postgres_available:
-        pytest.skip("需要可达的 PostgreSQL")
-
-    from travel_agent.db.connection import connect_maintenance
-
-    name = f"jp_test_{uuid.uuid4().hex[:12]}"
-    with connect_maintenance(base_target) as conn:
-        with conn.cursor() as cur:
-            cur.execute(f'CREATE DATABASE "{name}"')
-    try:
-        yield base_target.with_database(name)
-    finally:
-        with connect_maintenance(base_target) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = %s AND pid <> pg_backend_pid()",
-                    (name,),
-                )
-                cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
-
-
-@pytest.fixture
-def run_init_db(settings):
-    """在指定的临时库上跑一次遗留 `init_db()`，模拟「当前生产快照」。
-
-    `init_db()` 走的是 `infrastructure/database.py` 里那个**全局**异步引擎，
-    而它的地址来自 `settings.database`。所以这里临时改库名并重置全局引擎，
-    跑完还原 —— 顺序反了就会把 `init_db()` 跑到开发者的真实库上。
+    纳管判定与「拒绝未纳管的库」两条路径的输入。
     """
 
-    async def _run(target) -> None:
-        from travel_agent.infrastructure import database as db_module
+    from travel_agent.db import migrate
+    from travel_agent.db.connection import connect
+    from travel_agent.db.schema_contract import BASELINE_REVISION
 
-        original_name = settings.database.name
-        settings.database.name = target.database
-        await db_module.close_db()  # 丢掉指向旧库的引擎
-        try:
-            await db_module.init_db()
-        finally:
-            await db_module.close_db()
-            settings.database.name = original_name
-
-    return _run
+    migrate.upgrade(temp_database, BASELINE_REVISION)
+    with connect(temp_database) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE alembic_version")
+    return temp_database
 
 
 @pytest.fixture
