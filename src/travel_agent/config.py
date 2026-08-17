@@ -254,6 +254,21 @@ class RunControlConfig(BaseModel):
         return self
 
 
+class StreamingConfig(BaseModel):
+    """SSE 缓冲的内存预算。**全仓唯一定义处**，`api/sse_buffer.py` 读它。"""
+
+    #: 不可丢事件的队列长度。满了生产者等待，不丢。
+    critical_queue_size: int = Field(default=128, ge=1)
+    #: 相邻同源文本合并成一块的字符上限。太小等于没合并，太大会让首帧变迟。
+    max_coalesced_chunk_chars: int = Field(default=2048, ge=1)
+    #: 缓冲区里未发出的正文字符总量上限。
+    max_pending_text_chars: int = Field(default=65536, ge=1024)
+    #: 保活帧间隔。它不进业务队列。
+    heartbeat_seconds: float = Field(default=15.0, gt=0)
+    #: 生产者等消费者腾位置的上限。超过即判定消费者卡住，结束传输交给 durable 恢复。
+    stalled_consumer_seconds: float = Field(default=30.0, gt=0)
+
+
 class BackgroundJobsConfig(BaseModel):
     """durable 后台任务 worker 的边界。"""
 
@@ -615,6 +630,7 @@ class Settings(BaseModel):
     data_snapshots: DataSnapshotsConfig = Field(default_factory=DataSnapshotsConfig)
     run_control: RunControlConfig = Field(default_factory=RunControlConfig)
     background_jobs: BackgroundJobsConfig = Field(default_factory=BackgroundJobsConfig)
+    streaming: StreamingConfig = Field(default_factory=StreamingConfig)
     geocoding: GeocodingConfig = Field(default_factory=GeocodingConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     provider_snapshot_cache: ProviderSnapshotCacheConfig = Field(default_factory=ProviderSnapshotCacheConfig)

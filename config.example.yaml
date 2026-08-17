@@ -133,6 +133,15 @@ run_control:
   # 取消 / 追加要求先落 trip_run_commands，执行器按这个间隔轮询（同进程会被立即唤醒）。
   command_poll_seconds: 2.0
 
+# SSE 缓冲的内存预算（Settings.streaming）。
+streaming:
+  critical_queue_size: 128
+  max_coalesced_chunk_chars: 2048
+  max_pending_text_chars: 65536
+  heartbeat_seconds: 15.0
+  # 生产者等消费者腾位置的上限；超过即结束传输，状态以 durable 记录为准。
+  stalled_consumer_seconds: 30.0
+
 # 后台任务 worker（记忆抽取等，落 background_jobs）。
 background_jobs:
   poll_seconds: 5.0

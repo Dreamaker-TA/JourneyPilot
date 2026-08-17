@@ -12,13 +12,12 @@ Destination Researcher Agent 节点 (Domain Layer)
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -93,6 +92,9 @@ from .prompts import (
     NO_DINING_OPTIONS,
     TASK_TEMPLATE,
 )
+
+if TYPE_CHECKING:
+    from ...api.sse_buffer import SSEBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -1345,7 +1347,7 @@ async def destination_researcher_node(
     # (planner/synthesizer) keeps the primary tier.
     llm = router.get_fast()
     retriever = HybridRetriever()
-    stream_queue: Optional[asyncio.Queue] = config.get("configurable", {}).get("stream_queue")
+    stream_queue: Optional["SSEBuffer"] = config.get("configurable", {}).get("stream_queue")
 
     current_time = state.current_time or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     user_query = state.user_query or ""

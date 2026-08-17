@@ -16,16 +16,18 @@ Scope 阶段节点 (Domain Layer)
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from langchain_core.runnables import RunnableConfig
 
 from ...entities.state import TravelAgentState
 from ..utils import session_history_for_context_builder
 from .prompts import SCOPE_CONTEXT_SYSTEM_PROMPT
+
+if TYPE_CHECKING:
+    from ...api.sse_buffer import SSEBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +147,7 @@ async def _measure_session_size(
 
 async def _check_and_handle_compaction_deep(
     state: TravelAgentState,
-    stream_queue: Optional[asyncio.Queue],
+    stream_queue: Optional["SSEBuffer"],
     system_prompt: str,
 ) -> dict:
     """
@@ -224,7 +226,7 @@ async def clarifier_node(state: TravelAgentState, config: Optional[RunnableConfi
     它**不**装配送给模型的记忆上下文：深度路径上那件事归 Constraint Pack，
     见 ``_measure_session_size`` 的说明。
     """
-    stream_queue: Optional[asyncio.Queue] = None
+    stream_queue: Optional["SSEBuffer"] = None
     if config is not None:
         stream_queue = config.get("configurable", {}).get("stream_queue")
 

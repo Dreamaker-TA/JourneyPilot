@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, TypedDict
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set, Tuple, TypedDict
 
 from ..config import get_settings
 from ..tools.builtin_tools import SEARCH_TOOLS_NAME, build_search_tools_item
@@ -53,6 +53,9 @@ from ..workflows.run_control import (
     remaining_model_seconds,
     run_ts_ms,
 )
+
+if TYPE_CHECKING:
+    from ..api.sse_buffer import SSEBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -1718,7 +1721,7 @@ async def streaming_react_loop(
     messages: List[Dict[str, Any]],
     tool_schemas: List[Dict[str, Any]],
     available_tools: List[Dict[str, Any]],
-    stream_queue: Optional[asyncio.Queue],
+    stream_queue: Optional["SSEBuffer"],
     node_name: str,
     max_iterations: int = 5,
     can_ask_user: bool = False,

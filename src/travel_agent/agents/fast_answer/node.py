@@ -10,14 +10,13 @@ FastAnswer Agent 节点 (Domain Layer)
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import json
 import logging
 import re
 import time
 import uuid
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -43,6 +42,9 @@ from ...panels.constraint import (
 from ..scope.constraint_normalizer import build_run_constraint_pack
 from ..utils import session_history_for_context_builder
 from .prompts import DISCOVERY_OBJECTIVE_INSTRUCTION, SYSTEM_PROMPT
+
+if TYPE_CHECKING:
+    from ...api.sse_buffer import SSEBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -466,7 +468,7 @@ def _build_exchange_realtime_context(
 async def _build_realtime_tool_context(
     *,
     state: TravelAgentState,
-    stream_queue: Optional[asyncio.Queue],
+    stream_queue: Optional["SSEBuffer"],
 ) -> Dict[str, Any]:
     pair = _detect_currency_pair(state.user_query or "")
     if not pair:
@@ -563,7 +565,7 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
     """
     router = get_model_router()
 
-    stream_queue: Optional[asyncio.Queue] = config.get("configurable", {}).get("stream_queue")
+    stream_queue: Optional["SSEBuffer"] = config.get("configurable", {}).get("stream_queue")
 
     llm = router.get_fast()
     user_query = state.user_query or ""

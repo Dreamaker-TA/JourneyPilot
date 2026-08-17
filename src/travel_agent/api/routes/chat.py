@@ -36,6 +36,7 @@ from ...services.public_delivery import (
     public_delivery_bundle,
     public_event_manifest,
 )
+from ..sse_buffer import build_sse_buffer
 from ..sse_projection import project_sse_payload
 from ...entities.delivery_bundle import DeliveryContractViolation
 from ...entities.evidence_basis import PublicProjectionContractViolation
@@ -67,8 +68,7 @@ _WORKFLOW_CANCEL_GRACE_SECONDS = 1.0
 # Deep Research 可以在单个节点里静默数分钟。没有任何字节写出时，一条仍在工作的流与
 # 一条已经死掉的流在 socket 层面完全无法区分（代理/浏览器/运维都只能看到静默），
 # 因此空闲这么久就写一帧 SSE 注释保活。注释不是事件：它不携带 data: 行，不进入
-# project_sse_payload，也不改变任何事件语义或顺序。
-_SSE_HEARTBEAT_SECONDS = 15.0
+# project_sse_payload，也不改变任何事件语义或顺序。保活间隔在 `Settings.streaming`。
 _SSE_HEARTBEAT_FRAME = ": heartbeat\n\n"
 
 
@@ -491,7 +491,9 @@ async def chat_stream(
         #   ("node_lifecycle", payload)  —— 节点执行边界（内部持久化，不直接作为产品 SSE）
         #   ("error", exception)
         #   ("done",)
-        event_queue: asyncio.Queue = asyncio.Queue()
+        # 有界、分类的缓冲，不是无界 Queue：慢客户端不该让内存无限增长。
+        event_queue = build_sse_buffer(get_settings().streaming)
+        heartbeat_seconds = get_settings().streaming.heartbeat_seconds
 
         _stream_profile = await load_user_profile(
             components.user_profile_memory, LOCAL_USER_ID,
@@ -1024,14 +1026,21 @@ async def chat_stream(
 
             # 主循环：kind 分发到对应 handler
             while True:
-                try:
-                    item = await asyncio.wait_for(
-                        event_queue.get(), _SSE_HEARTBEAT_SECONDS
+                if event_queue.stalled:
+                    # 生产者已经等不到这个消费者了。结束传输而不是让缓冲继续长 ——
+                    # 之后一切以 durable 状态为准，客户端按恢复协议重连。
+                    logger.warning(
+                        "sse_consumer_stalled run_id=%s buffer=%s",
+                        trip_run.run_id,
+                        event_queue.snapshot(),
                     )
+                    stream_exit_reason = "sse_consumer_stalled"
+                    return
+                try:
+                    item = await event_queue.get(heartbeat_seconds)
                 except asyncio.TimeoutError:
-                    # 单消费者场景下超时取消 Queue.get() 不会丢事件：get() 只在自身
-                    # 协程里 get_nowait()，被取消时该调用尚未发生，事件仍留在队列中，
-                    # 下一轮立即取到。保活帧不参与事件流，continue 后控制流不变。
+                    # 超时只是「这段时间没有事件」，缓冲里的东西一条都没动，下一轮
+                    # 立即取到。保活帧不参与事件流，continue 后控制流不变。
                     yield _SSE_HEARTBEAT_FRAME
                     continue
                 kind = item[0]
