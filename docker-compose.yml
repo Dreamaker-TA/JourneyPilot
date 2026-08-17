@@ -1,10 +1,18 @@
 services:
   # ──────────────────────────────────────────────────────────
-  # PostgreSQL + pgvector
+  # PostgreSQL + pgvector（默认：官方镜像，不编译任何东西）
+  #
+  # 默认档只承诺基础能力：PostgreSQL、pgvector、`simple` 词法检索。
+  # 中文分词增强（zhparser）是**可选 profile**，见下面的 postgres-zhparser。
+  # 让每个用户第一次启动都编译 SCWS + zhparser，换来的是一个在 ARM 上、
+  # 在网络不好的地方、在 apt 源变动那天就装不上的产品。
   # ──────────────────────────────────────────────────────────
   postgres:
-    build: ./docker
-    image: journeypilot-postgres:pg18-zhparser
+    # 固定 digest 而不是只固定 tag：`pg18` 会被上游重新指向，而「同一份 compose
+    # 在两台机器上起出两个不同的数据库版本」是没有任何读数能解释的一类故障。
+    # 这是多架构 index 的 digest（含 linux/amd64 与 linux/arm64），所以两种机器
+    # 拉的是同一份声明。换 digest 走 PR：它是一次依赖升级，不是一次配置微调。
+    image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
     container_name: journeypilot-postgres
     environment:
       POSTGRES_DB: travel_agent
@@ -12,8 +20,41 @@ services:
       POSTGRES_PASSWORD: travel_agent_pwd
     ports:
       # Host 55433 (not 5433): isolate from other local Postgres. Processes on the
-      # host that use this compose stack must set config.yaml database.port: 55433.
-      # config.example.yaml defaults to 5433 for a separate non-compose instance.
+      # host that use this compose stack must set JOURNEYPILOT_DATABASE__PORT=55433
+      # (or database.port: 55433 in config.yaml).
+      - "55433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travel_agent -d travel_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────
+  # PostgreSQL + pgvector + zhparser（可选增强）
+  #
+  #   docker compose --profile zhparser up -d --build postgres-zhparser redis api
+  #
+  # **必须显式点名服务**：默认的 postgres 没有 profile（默认档要开箱可用），所以
+  # 不点名的 `--profile zhparser up` 会把两个数据库一起起来，而它们抢同一个容器名、
+  # 同一个端口、同一个卷。
+  #
+  # 与默认档共用同一个卷和同一个端口：它是同一个数据库的增强版本，不是第二个数据库。
+  # 切换之后必须重建词法索引（`journeypilot doctor` 报出当前实际生效的 lexical config）。
+  # 构建失败不影响默认档 —— 那正是把它拆成 profile 的理由。
+  # ──────────────────────────────────────────────────────────
+  postgres-zhparser:
+    build: ./docker
+    image: journeypilot-postgres:pg18-zhparser
+    container_name: journeypilot-postgres
+    profiles: ["zhparser"]
+    environment:
+      POSTGRES_DB: travel_agent
+      POSTGRES_USER: travel_agent
+      POSTGRES_PASSWORD: travel_agent_pwd
+    ports:
       - "55433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
@@ -32,7 +73,7 @@ services:
     container_name: journeypilot-redis
     ports:
       # Host 16379 (not 6379): isolate from other local Redis. Host-side config
-      # using this stack: redis.port: 16379. Example defaults stay 6379 for non-compose.
+      # using this stack: JOURNEYPILOT_REDIS__PORT=16379.
       - "16379:6379"
     volumes:
       - redis_data:/data
@@ -51,37 +92,41 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 依赖分组：core 是默认交付面。要本地 Qwen Embedding 或 Cross Encoder
+        # 的话在这里加组（见 pyproject.toml 的 [dependency-groups]）。
+        DEPENDENCY_GROUPS: ${JOURNEYPILOT_DEPENDENCY_GROUPS:-local-embedding}
     container_name: journeypilot-api
     ports:
       - "8001:8001"
     environment:
-      # 数据库
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: travel_agent
-      DB_USER: travel_agent
-      DB_PASSWORD: travel_agent_pwd
-      # Redis
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      # 服务器
-      SERVER_HOST: "0.0.0.0"
-      SERVER_PORT: "8001"
-      SERVER_RELOAD: "false"
-      APP_ENV: production
-      # 本地 embedding 模型缓存
-      HF_HOME: /root/.cache/huggingface
+      # 统一前缀 JOURNEYPILOT_<段>__<字段>，一处解析（src/travel_agent/config/env.py）。
+      # 认不出的 JOURNEYPILOT_* 变量会让启动失败 —— 拼错一个字母不该静默无效。
+      JOURNEYPILOT_DATABASE__HOST: postgres
+      JOURNEYPILOT_DATABASE__PORT: "5432"
+      JOURNEYPILOT_DATABASE__NAME: travel_agent
+      JOURNEYPILOT_DATABASE__USER: travel_agent
+      JOURNEYPILOT_DATABASE__PASSWORD: travel_agent_pwd
+      JOURNEYPILOT_REDIS__HOST: redis
+      JOURNEYPILOT_REDIS__PORT: "6379"
+      JOURNEYPILOT_SERVER__HOST: "0.0.0.0"
+      JOURNEYPILOT_SERVER__PORT: "8001"
+      JOURNEYPILOT_SERVER__RELOAD: "false"
+      JOURNEYPILOT_ENV: production
+      # 本地 embedding 模型缓存（HF 自己的变量名，不是本仓的配置项）。
+      HF_HOME: /home/journeypilot/.cache/huggingface
     env_file:
-      - path: .env  # 可选：将 API key 等敏感信息放在 .env 文件中
+      - path: .env  # 可选：把 API key 等敏感信息放在 .env 文件中
         required: false
     volumes:
       - ./outputs:/app/outputs
       - ./uploads:/app/uploads
       - ./config.yaml:/app/config.yaml:ro
-      - huggingface_cache:/root/.cache/huggingface
+      - huggingface_cache:/home/journeypilot/.cache/huggingface
+    # 只 depends_on redis：数据库可能是 postgres 也可能是 postgres-zhparser，而
+    # depends_on 写死一个名字会让另一档起不来。entrypoint 本来就会重试等库
+    # （`restart: on-failure:3` 吸收一次慢启动），所以这里不需要第二处等待逻辑。
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:

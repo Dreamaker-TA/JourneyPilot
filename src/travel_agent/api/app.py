@@ -16,6 +16,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ..builders import AppBuilder, set_components
+from ..capabilities import capability_gaps
 from ..config import get_settings
 from .middleware import request_logging_middleware
 from .routes import chat, knowledge, memory, places, preset, product, sessions, system, trip_runs, user
@@ -96,6 +97,16 @@ async def _probe_pdf_font() -> Optional[str]:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """应用生命周期管理：启动时初始化，关闭时清理"""
     settings = get_settings()
+    # 配置要求了但没装的增强依赖 → **拒绝启动**。让它跑起来的后果是用户问出第一个
+    # 问题、等到检索那一步才拿到一个 ImportError，而那条错误里没有可敲的命令。
+    gaps = capability_gaps(settings)
+    if gaps:
+        for gap in gaps:
+            logger.error("增强依赖缺失：%s", gap.message())
+        raise RuntimeError(
+            "配置选择的增强能力缺少依赖："
+            + "；".join(gap.message() for gap in gaps)
+        )
     builder = AppBuilder(settings)
 
     try:

@@ -1,0 +1,26 @@
+# DeepSeek 官方 endpoint。
+#
+# capability 全部来自真实调用观察，不是文档摘抄：
+#   json_schema  —— 直连 endpoint 拒绝 json_schema（400 "This response_format type
+#                   is unavailable now"），所以走 json_object + prompt 里明写 schema。
+#   token 字段   —— 只读 max_tokens；langchain-openai 无条件把它改名成
+#                   max_completion_tokens，两者相乘会让输出上限彻底空转。
+#   reasoning    —— 直连读请求体里的 thinking 开关。
+id: deepseek
+label: DeepSeek Official
+base_url: https://api.deepseek.com
+last_verified_at: "2026-07-03"
+hostnames:
+  - api.deepseek.com
+models:
+  primary: deepseek-v4-pro
+  fast: deepseek-v4-flash
+capabilities:
+  supports_json_schema: false
+  supports_json_object: true
+  supports_stream_usage: true
+  reasoning_control: deepseek
+  token_limit_field: max_tokens
+notes: >
+  API Key 从 https://platform.deepseek.com 获取，交互输入到 .env
+  （JOURNEYPILOT_PRIMARY_MODEL__API_KEY），不写进 config.yaml。

@@ -1,0 +1,26 @@
+# OpenRouter 聚合网关。
+#
+# 经 OpenRouter 访问的 DeepSeek 与直连**不是同一份 capability**：
+#   json_schema  —— 网关接受完整 json_schema，不必降级。
+#   reasoning    —— 只读 reasoning 开关；thinking 经代理完全无效
+#                   （实测 reasoning_tokens 照样 664）。
+#   价格         —— 模型 id 带 `deepseek/` 前缀，价格表里是独立几行
+#                   （config/pricing.py），缓存读价也确实不同。
+id: openrouter
+label: OpenRouter
+base_url: https://openrouter.ai/api/v1
+last_verified_at: "2026-07-31"
+hostnames:
+  - openrouter.ai
+models:
+  primary: deepseek/deepseek-v4-pro
+  fast: deepseek/deepseek-v4-flash
+capabilities:
+  supports_json_schema: true
+  supports_json_object: true
+  supports_stream_usage: true
+  reasoning_control: openrouter
+  token_limit_field: both
+notes: >
+  同一个模型经网关的每 token 速度显著低于直连（实测 82 tok/s 直连 vs 19 tok/s 经代理，
+  同一个 deepseek-v4-pro）。Deadline 窗口按更慢的那一档设，见 run_deadline 配置段。

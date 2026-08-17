@@ -6,11 +6,24 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Annotated, Any, Callable, Literal, Mapping, Optional, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 from pydantic import Field, model_validator
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    # 只给类型标注用：运行期 import 它会与 provider_evidence 成环。
+    # 不 import 的话那个字符串前向引用指向不存在的名字，读起来像有类型其实没有。
+    from .provider_evidence import ProviderRouteLegScope
 
 from .provider_reference_service import (
     ProviderReferenceService,
@@ -25,7 +38,6 @@ from .delivery_bundle import (
     EntityType,
     LodgingCandidate,
     LodgingStay,
-    MinimumDeliveryDraft,
     RecommendationCatalog,
     ResearchCandidate,
     SELECTION_SLOT_ENTITY_TYPES,
@@ -55,6 +67,8 @@ from .controlled_place_name import (
 )
 from .day_theme import derive_day_theme
 from .trip_highlights import derive_trip_highlights
+
+logger = logging.getLogger(__name__)
 
 
 def _total_budget_cap_cny(anchors: Optional[list[UserInputAnchor]]) -> Optional[float]:

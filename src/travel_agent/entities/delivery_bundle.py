@@ -2277,11 +2277,6 @@ class TripWorkspaceV2(StrictModel):
         anchor_ids = [item.anchor_id for item in self.user_input_anchors]
         if len(anchor_ids) != len(set(anchor_ids)):
             raise ValueError("workspace user-input anchor ids must be unique")
-        hard_constraint_ids = {
-            item.constraint_id
-            for item in self.user_input_anchors
-            if item.input_kind == "hard_constraint" and item.constraint_id is not None
-        }
         slot_status = {
             slot.selection_slot_id: slot.status for slot in self.selection_slots
         }
@@ -2289,23 +2284,6 @@ class TripWorkspaceV2(StrictModel):
             candidate.candidate_id: packet.research_packet_id
             for packet in catalog.research_packets
             for candidate in packet.candidates
-        }
-        passed_candidate_ids = {
-            candidate_id
-            for (candidate_id, _slot_id), admission in admissions.items()
-            if admission.status == "passed"
-        }
-        unadmitted_candidate_fact_ids = {
-            fact_id
-            for candidate_id, candidate in candidates.items()
-            if candidate_id not in passed_candidate_ids
-            for fact_id in candidate.fact_assertion_ids
-        }
-        unadmitted_candidate_source_ids = {
-            source_id
-            for candidate_id, candidate in candidates.items()
-            if candidate_id not in passed_candidate_ids
-            for source_id in candidate.source_record_ids
         }
         influence_ids = {item.influence_id for item in self.personalization_influences}
         if len(influence_ids) != len(self.personalization_influences):

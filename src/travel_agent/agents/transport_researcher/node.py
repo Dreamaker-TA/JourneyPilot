@@ -58,7 +58,6 @@ from ...entities.provider_evidence import (
     ProviderRouteLegScope,
     parse_provider_evidence_assignments,
 )
-from ...entities.itinerary_composition_v2 import MIN_LOCAL_TRANSFER_MINUTES
 from ...services.constraint_applicability import active_hard_constraints, active_hard_constraint_ids
 from ..research_packet_prompt import build_research_packet_system_prompt
 from ..worker_errors import format_worker_last_error

@@ -19,7 +19,6 @@ from travel_agent.db.backup import (
     list_backups,
     load_manifest,
     prune_automatic_backups,
-    redact,
     verify_backup,
 )
 from travel_agent.db.connection import connect
@@ -183,7 +182,13 @@ def test_manifest_records_the_pg_client_strategy(temp_database, settings, scratc
 
 
 def test_redaction_keeps_structure_and_drops_secrets():
-    """脱敏保留结构，Secret 只留「已配置 / 未配置」这一个比特。"""
+    """脱敏保留结构，Secret 只留 <set> / <unset> 这一个比特。
+
+    备份目录里那份 config.redacted.yaml 与 `journeypilot config show` 用**同一份**
+    规则（`config/redaction.py`），所以这一条同时钉住了两处。
+    """
+
+    from travel_agent.config import redact
 
     payload = {
         "primary_model": {"model_name": "gpt-x", "api_key": "sk-real-secret"},
@@ -194,9 +199,9 @@ def test_redaction_keeps_structure_and_drops_secrets():
     redacted = redact(payload)
 
     assert redacted["primary_model"]["model_name"] == "gpt-x"
-    assert redacted["primary_model"]["api_key"] == "<configured>"
+    assert redacted["primary_model"]["api_key"] == "<set>"
     assert redacted["database"]["host"] == "localhost"
-    assert redacted["database"]["password"] == "<not-configured>"
-    assert redacted["mcp"]["servers"]["amap"]["env"]["AMAP_TOKEN"] == "<configured>"
+    assert redacted["database"]["password"] == "<unset>"
+    assert redacted["mcp"]["servers"]["amap"]["env"]["AMAP_TOKEN"] == "<set>"
     assert redacted["rag"]["top_k"] == 5
     assert "sk-real-secret" not in json.dumps(redacted)

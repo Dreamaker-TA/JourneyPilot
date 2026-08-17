@@ -1,0 +1,22 @@
+# 本机 Ollama。零费用、零 Key，但也没有 usage 元数据。
+id: ollama
+label: Ollama (local)
+base_url: http://127.0.0.1:11434/v1
+last_verified_at: ""
+hostnames:
+  # 带端口精确匹配：同一台机器上别的推理服务不该拿到 Ollama 的 capability。
+  - 127.0.0.1:11434
+  - localhost:11434
+models:
+  primary: qwen3:14b
+  fast: qwen3:4b
+capabilities:
+  supports_json_schema: false
+  supports_json_object: true
+  # 不回 usage：成本与 token 读数只能按字符数粗估，台账里那些行会带 estimated=true。
+  supports_stream_usage: false
+  reasoning_control: all_dialects
+  token_limit_field: both
+notes: >
+  api_key 可填任意非空字符串（OpenAI 兼容层要求存在该头）。价格表不会命中，
+  费用一栏恒为 null —— 这是正确的，本机推理没有按 token 计的费用。

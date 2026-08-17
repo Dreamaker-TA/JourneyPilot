@@ -113,19 +113,21 @@ cd JourneyPilot
 cp config.example.yaml config.yaml
 ```
 
-Open `config.yaml` and add your model settings:
+Fill in the model section from a provider preset, then supply the API key through the
+environment. Keys never belong in `config.yaml` — that file gets copied, committed and
+pasted into issues:
 
-```yaml
-primary_model:
-  api_key: "your-api-key"
-  model_name: "your-model"
-  base_url: "https://your-openai-compatible-endpoint/v1"
+```bash
+uv run python journeypilot.py configure --list              # available presets
+uv run python journeypilot.py configure --provider deepseek # writes the model section
+export JOURNEYPILOT_PRIMARY_MODEL__API_KEY="your-api-key"
+export JOURNEYPILOT_FAST_MODEL__API_KEY="your-api-key"
 ```
 
 Start the app with the database and Redis ports used by the included Compose stack:
 
 ```bash
-DB_PORT=55433 REDIS_PORT=16379 ./run.sh
+JOURNEYPILOT_DATABASE__PORT=55433 JOURNEYPILOT_REDIS__PORT=16379 ./run.sh
 ```
 
 The first start installs backend and frontend dependencies and starts PostgreSQL, Redis, the API, and the web app. The default local embedding model is downloaded on first use.
@@ -146,6 +148,31 @@ Useful commands:
 ```
 
 If you always use the included Compose stack, you can save `database.port: 55433` and `redis.port: 16379` in `config.yaml` and start later runs with `./run.sh`.
+
+### Optional capabilities
+
+The default install carries the core product: chat, planning, PostgreSQL/pgvector, Redis,
+MCP tools, PDF export and document import. Heavier enhancements are opt-in, and a
+configuration that asks for one without its dependency **refuses to start** rather than
+failing on the first real call:
+
+```bash
+uv sync                            # core
+uv sync --group local-embedding    # local Qwen3 ONNX embeddings (embedding.provider=qwen3)
+uv sync --group cross-encoder      # BGE reranker (rerank.provider=cross_encoder, pulls torch)
+```
+
+The default Compose database is the official `pgvector` image and compiles nothing.
+Chinese word segmentation (zhparser) is an optional profile, and a build failure there
+leaves the default stack untouched:
+
+```bash
+docker compose --profile zhparser up -d --build postgres-zhparser redis api
+```
+
+Both profiles share one volume and one port, so name the services explicitly and rebuild
+the lexical indexes after switching. `journeypilot doctor` reports the lexical
+configuration actually in effect.
 
 ## How it works
 
@@ -173,7 +200,23 @@ Under the hood, JourneyPilot combines a LangGraph workflow with FastAPI, Postgre
 
 ## Configuration
 
-Settings are read from built-in defaults and `config.yaml`, with environment variables taking precedence. [`config.example.yaml`](config.example.yaml) documents the available options.
+Settings are read from built-in defaults and `config.yaml`, with environment variables
+taking precedence. Unknown fields are **rejected** rather than ignored, so a misspelled
+key fails loudly instead of silently doing nothing.
+
+- [`config.example.yaml`](config.example.yaml) — annotated starting point
+- [`docs/configuration.md`](docs/configuration.md) — every field, default, range and
+  environment-variable name (generated from the schema; `journeypilot config docs`)
+
+```bash
+uv run python journeypilot.py config show      # effective values + where each came from
+uv run python journeypilot.py config validate  # check without starting the service
+uv run python journeypilot.py config env       # every valid environment variable
+```
+
+Every field can be overridden with `JOURNEYPILOT_<section>__<field>`, for example
+`JOURNEYPILOT_DATABASE__PORT=55433`. An unrecognised `JOURNEYPILOT_*` variable stops
+startup — a typo should not be a silent no-op.
 
 | Setting | What it controls |
 |---|---|
@@ -182,6 +225,10 @@ Settings are read from built-in defaults and `config.yaml`, with environment var
 | `embedding.*` | Local Qwen3 ONNX embeddings by default, or an OpenAI-compatible embedding service. |
 | `run_control.plan_gate_enabled` | Pauses a deep-research run for plan review before research begins. |
 | `rerank.*` | Second-stage ranking for knowledge-base retrieval. |
+| `run_deadline.*` | The four time windows one deep research run may spend. |
+| `run_budget.*` | Call, token and cost ceilings sealed when a run is authorised. |
+| `provider_channels.*` | Per-upstream concurrency, so an ingest cannot starve online requests. |
+| `ingest.*` | Upload and document-parsing limits (size, pages, zip expansion, timeout). |
 | `mcp.servers.*` | Credentials and settings for external research providers. |
 
 ### Data sources
@@ -248,7 +295,7 @@ Before opening a pull request, run the relevant checks:
 ```bash
 # Backend
 uv run ruff check src
-DB_PORT=55433 uv run pytest    # migration/backup tests use temporary databases; skipped without PostgreSQL
+JOURNEYPILOT_DATABASE__PORT=55433 uv run pytest   # migration/backup tests use temporary databases; skipped without PostgreSQL
 
 # Frontend
 cd frontend
@@ -266,7 +313,7 @@ Issues and pull requests are welcome. Keep changes focused, add a regression tes
 | API | FastAPI, Uvicorn, Server-Sent Events |
 | Agent workflow | LangGraph with PostgreSQL checkpoints |
 | Models | OpenAI-compatible model routing through `langchain-openai` |
-| Data | PostgreSQL, pgvector, zhparser, Redis |
+| Data | PostgreSQL, pgvector, Redis (zhparser optional) |
 | Retrieval | Vector search, PostgreSQL full-text search, RRF, reranking |
 | Tools | Model Context Protocol over stdio |
 | Packaging | uv, npm, Docker Compose |

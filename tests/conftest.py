@@ -128,11 +128,11 @@ async def migrated_async_database(temp_database, monkeypatch):
     from travel_agent.infrastructure.database import close_db
 
     migrate.upgrade(temp_database)
-    monkeypatch.setenv("DB_HOST", temp_database.host)
-    monkeypatch.setenv("DB_PORT", str(temp_database.port))
-    monkeypatch.setenv("DB_NAME", temp_database.database)
-    monkeypatch.setenv("DB_USER", temp_database.user)
-    monkeypatch.setenv("DB_PASSWORD", temp_database.password)
+    monkeypatch.setenv("JOURNEYPILOT_DATABASE__HOST", temp_database.host)
+    monkeypatch.setenv("JOURNEYPILOT_DATABASE__PORT", str(temp_database.port))
+    monkeypatch.setenv("JOURNEYPILOT_DATABASE__NAME", temp_database.database)
+    monkeypatch.setenv("JOURNEYPILOT_DATABASE__USER", temp_database.user)
+    monkeypatch.setenv("JOURNEYPILOT_DATABASE__PASSWORD", temp_database.password)
     await close_db()
     reload_settings()
     try:
@@ -167,4 +167,5 @@ def _quiet_alembic_logging():
 
 
 def pytest_report_header(config: pytest.Config) -> str:
-    return f"[tests] DB_HOST={os.getenv('DB_HOST', '(config.yaml)')}"
+    host = os.getenv("JOURNEYPILOT_DATABASE__HOST", "(config.yaml)")
+    return f"[tests] JOURNEYPILOT_DATABASE__HOST={host}"

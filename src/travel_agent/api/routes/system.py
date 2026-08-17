@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from ...builders import get_components
+from ...capabilities import capability_report
 from ...config import get_settings, persist_model_config
 from ...models.router import ModelTier, get_model_router
 from ..schemas import ModelConfigRequest, SystemStatus
@@ -398,6 +399,9 @@ async def readiness() -> JSONResponse:
         "run_execution": await _probe_run_execution(components),
         # 后台任务积压：同样报出来不拦门禁，理由见 `_probe_background_jobs`。
         "background_jobs": await _probe_background_jobs(components),
+        # 增强依赖：配置要求了但没装的能力。**这一项拦门禁** —— 与空语料那一类不同，
+        # 它会在第一次真正调用时抛 ImportError，而不是让质量下降一点。
+        "optional_capabilities": capability_report(settings),
         # 资源边界与积压：报出来不拦门禁，理由见 `_probe_resource_limits`。
         "resource_limits": _probe_resource_limits(settings),
         # PDF 导出可用性：报出来不拦门禁，理由见 `_probe_pdf_export`。

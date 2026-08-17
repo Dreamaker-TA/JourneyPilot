@@ -1130,11 +1130,6 @@ def _rule_fallback_extract(free_items: List[Dict[str, Any]]) -> ConstraintExtrac
             for token in ("禁过夜", "禁止过夜", "不安排过夜", "不要过夜", "避免过夜", "不过夜交通")
         )
         if transport_avoid or has_transport_window or avoid_overnight:
-            labels = {
-                "night_bus": "夜巴",
-                "red_eye_flight": "红眼航班",
-                "many_transfers": "多次换乘",
-            }
             found.append({
                 "category": "transport_constraint",
                 "value": text,

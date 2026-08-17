@@ -26,9 +26,15 @@ from typing import (
     Protocol,
     runtime_checkable,
 )
-from urllib.parse import urlparse
 
-from ..config import FastModelConfig, PrimaryModelConfig, get_settings, resolve_price
+from ..config import (
+    FastModelConfig,
+    PrimaryModelConfig,
+    ProviderCapabilities,
+    capabilities_for,
+    get_settings,
+    resolve_price,
+)
 from ..entities.trip_run import utc_now_iso
 from ..utils.concurrency import channel_gate
 from ..workflows.run_control import (
@@ -234,15 +240,40 @@ def _to_langchain_messages(messages: List[Dict[str, Any]]) -> List[Any]:
     return converted
 
 
-def _is_direct_deepseek_configuration(*, provider: str, base_url: str) -> bool:
-    """仅识别已在真实运行中确认不支持 json_schema 的官方 DeepSeek endpoint。"""
-    if provider != "deepseek":
-        return False
-    try:
-        hostname = (urlparse(base_url).hostname or "").lower().rstrip(".")
-    except ValueError:
-        return False
-    return hostname == "api.deepseek.com"
+def _provider_extra_body(
+    capabilities: ProviderCapabilities, *, max_tokens: int
+) -> Dict[str, Any]:
+    """关思维链 + 把输出上限送到上游真正会读的那个键。
+
+    本项目从不需要思维链，只需要答案：worker 的 ReAct 与结构化输出都不依赖它，而开着
+    思维链时 DeepSeek 会 (1) 拒绝 response_format（400 "This response_format type is
+    unavailable now"）、(2) 在多轮工具调用里破坏 tool 消息顺序，推理 token 还会整条
+    拖慢流水线（实测同一个 deepseek-v4-pro，直连 82 tok/s、经代理 19 tok/s）。
+
+    方言的归属现在**来自 preset 的声明**，不再靠 base_url 猜：
+
+      thinking   —— DeepSeek 直连自己的请求体开关；
+      reasoning  —— OpenRouter 的开关，也是被代理的 DeepSeek 唯一真正读的那个
+                    （实测 thinking 经代理完全无效，reasoning_tokens 照样 664）；
+      max_tokens —— langchain-openai 在 _get_request_payload 里无条件把 max_tokens
+                    改名成 max_completion_tokens，而 DeepSeek 只读 max_tokens，
+                    两者相乘会让配置的输出上限彻底空转（实测 fast tier 峰值 3932 >
+                    配置 2048 且 finish_reason=stop）。openai SDK 把 extra_body 平铺
+                    进 body，于是两个键共存，各取所需。
+
+    ``all_dialects`` 是保守档：认不出的上游把每一种都发一遍，认不出的那种会被对方
+    忽略（三个 provider 逐一实测过）。少发一种的代价是开关静默失效。
+    """
+
+    body: Dict[str, Any] = {}
+    control = capabilities.reasoning_control
+    if control in ("deepseek", "all_dialects"):
+        body["thinking"] = {"type": "disabled"}
+    if control in ("openrouter", "all_dialects"):
+        body["reasoning"] = {"enabled": False}
+    if capabilities.token_limit_field in ("max_tokens", "both"):
+        body["max_tokens"] = max_tokens
+    return body
 
 
 _JSON_OBJECT_PROMPT_TOKEN = (
@@ -251,17 +282,20 @@ _JSON_OBJECT_PROMPT_TOKEN = (
 
 
 def _normalize_response_format(
-    kwargs: Dict[str, Any], *, provider: str, base_url: str
+    kwargs: Dict[str, Any], *, capabilities: ProviderCapabilities
 ) -> Dict[str, Any]:
-    """只为确认不支持 json_schema 的直连 DeepSeek 降级 response format。
+    """按上游声明的 capability 决定要不要降级 response format。
 
-    OpenRouter（包括 hy3）与其余 OpenAI-compatible provider 保留调用方给出的完整
-    ``json_schema``。这样不会把已支持严格结构化输出的 transport 意外弱化为
-    ``json_object``；直连 DeepSeek 才使用已验证可工作的兼容格式。
+    降级的判据从「base_url 长得像不像 api.deepseek.com」换成了一份**声明**
+    （`configs/providers/*.yaml`）：前者在同一个模型搬到代理后面那天就不成立，
+    而失效是静默的 —— 开关不再命中，结构化输出退回一个形状正确但键名不对的对象。
+
+    认不出的上游走保守档（不声明支持 json_schema），走 json_object + 在 prompt 里
+    明写 schema 那条路。它更啰嗦但两边都能到；反过来（假设支持）拿到的是一次 400。
     """
     response_format = kwargs.get("response_format")
     if (
-        _is_direct_deepseek_configuration(provider=provider, base_url=base_url)
+        not capabilities.supports_json_schema
         and isinstance(response_format, dict)
         and response_format.get("type") == "json_schema"
     ):
@@ -301,12 +335,12 @@ def _satisfy_json_object_prompt_requirement(
 
 
 def _downgraded_json_schema(
-    kwargs: Dict[str, Any], *, provider: str, base_url: str
+    kwargs: Dict[str, Any], *, capabilities: ProviderCapabilities
 ) -> Optional[Dict[str, Any]]:
     """Return the schema `_normalize_response_format` is about to drop, if any."""
     response_format = kwargs.get("response_format")
     if not (
-        _is_direct_deepseek_configuration(provider=provider, base_url=base_url)
+        not capabilities.supports_json_schema
         and isinstance(response_format, dict)
         and response_format.get("type") == "json_schema"
     ):
@@ -341,38 +375,14 @@ class OpenAICompatibleLLM(BaseLLM):
         self.tier = tier
         self.base_url = base_url
         self.provider = infer_provider(base_url, model_name)
+        # 这个上游支持什么，来自 `configs/providers/*.yaml` 的声明；认不出走保守档。
+        self.capabilities = capabilities_for(base_url)
         self._usage_recorder = usage_recorder
         # 预算守卫按「本次最坏输出」估账，而最坏输出就是这个上限。
         self._max_tokens = int(max_tokens)
-        # 本项目从不需要思维链，只需要答案：worker 的 ReAct 与结构化输出都不依赖它，
-        # 而开着思维链时 DeepSeek 会 (1) 拒绝 response_format（400 "This response_format
-        # type is unavailable now"）、(2) 在多轮工具调用里破坏 tool 消息顺序，推理 token
-        # 还会整条拖慢流水线（实测同一个 deepseek-v4-pro，直连 82 tok/s、经代理 19 tok/s，
-        # 其中一半的差距是凭空多出来的推理 token）。
-        #
-        # 这个意图是**无条件**的，所以下面无条件地把它的每一种方言都发出去，**不按 base_url
-        # 猜是谁在应答**：`"deepseek" in base_url` 那种判据在同一个模型搬到代理后面那天就不
-        # 成立，开关静默失效、推理 token 全部回来。三种方言各有归属，认不出的那种会被对方
-        # 忽略（三个 provider 逐一实测过）：
-        #   thinking   —— DeepSeek 直连自己的请求体开关；
-        #   reasoning  —— OpenRouter 的开关，也是被代理的 DeepSeek 唯一真正读的那个
-        #                 （实测 thinking 经代理完全无效，reasoning_tokens 照样 664）；
-        #   max_tokens —— langchain-openai 在 _get_request_payload 里**无条件**把
-        #                 max_tokens 改名成 max_completion_tokens，而 DeepSeek 只读
-        #                 max_tokens，两者相乘会让配置的输出上限彻底空转（实测 fast tier
-        #                 峰值 3932 > 配置 2048 且 finish_reason=stop）。openai SDK 把
-        #                 extra_body 平铺进 body，于是两个键共存，各取所需。
-        extra_body = {
-            "thinking": {"type": "disabled"},
-            "reasoning": {"enabled": False},
-            "max_tokens": max_tokens,
-        }
         # ``request_timeout`` is this client's default per SDK attempt.  A call
         # site needing a wider bound passes ``timeout=`` in its own kwargs; the
         # SDK applies that to the single request instead of the shared client.
-        # stream_usage=True 是 C 域捕获层的第一行改动：langchain-openai 仅在默认
-        # OpenAI base_url 下自动开启，我们全部模型自定义 base_url（MiniMax/DeepSeek），
-        # 不显式开则流式 usage 永远为空（02 号 §3，源码级确认）。
         self._client = ChatOpenAI(
             api_key=api_key,
             model=model_name,
@@ -381,8 +391,10 @@ class OpenAICompatibleLLM(BaseLLM):
             max_tokens=max_tokens,
             request_timeout=timeout,
             max_retries=max_retries,
-            stream_usage=True,
-            extra_body=extra_body,
+            # langchain-openai 仅在默认 OpenAI base_url 下自动开启流式 usage，而本仓
+            # 全部模型自定义 base_url，不显式开则流式 usage 永远为空。
+            stream_usage=self.capabilities.supports_stream_usage,
+            extra_body=_provider_extra_body(self.capabilities, max_tokens=max_tokens),
         )
 
     # --- usage 捕获织入 ------------------------------------------------ #
@@ -540,12 +552,8 @@ class OpenAICompatibleLLM(BaseLLM):
         )
 
     async def ainvoke(self, messages: List[Dict[str, Any]], **kwargs: Any) -> str:
-        dropped_schema = _downgraded_json_schema(
-            kwargs, provider=self.provider, base_url=self.base_url
-        )
-        kwargs = _normalize_response_format(
-            kwargs, provider=self.provider, base_url=self.base_url
-        )
+        dropped_schema = _downgraded_json_schema(kwargs, capabilities=self.capabilities)
+        kwargs = _normalize_response_format(kwargs, capabilities=self.capabilities)
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
@@ -576,12 +584,8 @@ class OpenAICompatibleLLM(BaseLLM):
         tools: List[Dict[str, Any]],
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        dropped_schema = _downgraded_json_schema(
-            kwargs, provider=self.provider, base_url=self.base_url
-        )
-        kwargs = _normalize_response_format(
-            kwargs, provider=self.provider, base_url=self.base_url
-        )
+        dropped_schema = _downgraded_json_schema(kwargs, capabilities=self.capabilities)
+        kwargs = _normalize_response_format(kwargs, capabilities=self.capabilities)
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
@@ -615,12 +619,8 @@ class OpenAICompatibleLLM(BaseLLM):
         messages: List[Dict[str, Any]],
         **kwargs: Any,
     ) -> AsyncIterator[str]:
-        dropped_schema = _downgraded_json_schema(
-            kwargs, provider=self.provider, base_url=self.base_url
-        )
-        kwargs = _normalize_response_format(
-            kwargs, provider=self.provider, base_url=self.base_url
-        )
+        dropped_schema = _downgraded_json_schema(kwargs, capabilities=self.capabilities)
+        kwargs = _normalize_response_format(kwargs, capabilities=self.capabilities)
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )

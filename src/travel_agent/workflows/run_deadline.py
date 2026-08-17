@@ -23,23 +23,16 @@ from typing import Dict, Literal, Optional, Tuple
 
 from ..entities.delivery_bundle import MinimumDeliveryDraft, RunDeadlineSnapshot
 from ..entities.run_deadline_policy import (
-    CLOSEOUT_SECONDS,
-    COMPOSITION_SECONDS,
-    DELIVERY_DEADLINE_SECONDS,
     RUN_DEADLINE_POLICY_VERSION,
-    TARGET_SECONDS,
     current_closeout_seconds,
     current_composition_seconds,
     current_delivery_deadline_seconds,
     current_target_seconds,
 )
 
-# Re-export policy symbols for existing importers (workflows / stores / tests).
+# 只导出策略版本与观察原语。**没有 import 期常量**：一份在 import 时定格的窗口值
+# 会在配置改动之后继续被相信，而它读起来和当前配置一模一样。
 __all__ = [
-    "TARGET_SECONDS",
-    "CLOSEOUT_SECONDS",
-    "COMPOSITION_SECONDS",
-    "DELIVERY_DEADLINE_SECONDS",
     "RUN_DEADLINE_POLICY_VERSION",
     "DeadlineObservation",
     "DeadlinePhase",
@@ -153,8 +146,8 @@ def observe_run_deadline(
 ) -> Tuple[RunDeadlineSnapshot, DeadlineObservation]:
     """Advance, but never reset or shorten, a persisted deadline observation.
 
-    Phase boundaries use the seconds embedded on ``snapshot`` so a process that
-    later changes STA_DEADLINE_* env vars cannot reclassify an older run.
+    Phase boundaries use the seconds embedded on ``snapshot``, so a later change
+    to the ``run_deadline`` config cannot reclassify an older run.
     """
     observed_at = _as_utc(now or utc_now())
     authorization = _as_utc(snapshot.planning_authorized_at)

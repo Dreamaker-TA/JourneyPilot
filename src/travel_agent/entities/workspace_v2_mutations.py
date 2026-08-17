@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Annotated, Literal, Mapping, Optional, Union
+from typing import Annotated, Literal, Optional, Union
 
 from pydantic import Field, model_validator
 

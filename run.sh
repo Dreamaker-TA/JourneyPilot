@@ -20,23 +20,13 @@ BACKEND_PID=""
 FRONTEND_PID=""
 SPINNER_PID=""
 
-# Run-deadline windows (entities/run_deadline_policy.py reads these at import,
-# so they have to be set before the backend starts — that is why they live here
-# and not in config.yaml).  The 300/360/450/480 defaults were measured against a
-# direct DeepSeek endpoint, where a whole run took 143-373s.  The same models
-# reached through a proxy generate 2-4x slower per token (measured: 82 tok/s
-# direct vs 19 tok/s proxied, same deepseek-v4-pro), which put an ordinary
-# two-destination trip at 499s and pushed anything needing an extra research
-# round past the 480s hard stop with nothing delivered.
+# 这个脚本**不定义任何策略**。Deadline 窗口、预算、超时、端口默认值都在
+# `config.yaml` / Pydantic 默认里（`journeypilot config show` 能报出每个值的来源）。
+# 脚本在这里 export 一份、Compose 里另一份、代码里第三份，是「同一条策略有三个
+# owner」的标准形态：改了一处之后另外两处继续生效，而没有一处读数能解释为什么。
 #
-# These raise every window by 25%, keeping the shape: closeout still reserves
-# 150s behind the delivery bound for composition, and composition still leaves
-# 30s for projection and the atomic Bundle write.  Override per shell to test a
-# tighter or wider environment.
-export STA_DEADLINE_TARGET_SECONDS="${STA_DEADLINE_TARGET_SECONDS:-375}"
-export STA_DEADLINE_CLOSEOUT_SECONDS="${STA_DEADLINE_CLOSEOUT_SECONDS:-450}"
-export STA_DEADLINE_COMPOSITION_SECONDS="${STA_DEADLINE_COMPOSITION_SECONDS:-570}"
-export STA_DEADLINE_DELIVERY_SECONDS="${STA_DEADLINE_DELIVERY_SECONDS:-600}"
+# 要临时试更紧或更宽的窗口，用环境变量覆盖同一个 schema：
+#   JOURNEYPILOT_RUN_DEADLINE__DELIVERY_SECONDS=900 ./run.sh start
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Colors & Icons  (disabled when stdout is not a terminal)
@@ -689,7 +679,7 @@ step_start_backend() {
 
   (
     cd "$ROOT_DIR"
-    SERVER_PORT="$BACKEND_PORT" uv run python -c "
+    JOURNEYPILOT_SERVER__PORT="$BACKEND_PORT" uv run python -c "
 import sys
 sys.path.insert(0, r'$ROOT_DIR/src')
 sys.path.insert(0, r'$ROOT_DIR')

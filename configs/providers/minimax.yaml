@@ -1,0 +1,18 @@
+id: minimax
+label: MiniMax
+base_url: https://api.minimaxi.com/v1
+last_verified_at: "2026-07-03"
+hostnames:
+  - api.minimaxi.com
+models:
+  primary: MiniMax-M2.7
+  fast: MiniMax-M2.7
+capabilities:
+  supports_json_schema: true
+  supports_json_object: true
+  supports_stream_usage: true
+  reasoning_control: all_dialects
+  token_limit_field: both
+notes: >
+  M2.7 有显式缓存写入费；本仓的成本公式按读折扣计，写入费只登记不计入
+  （见 config/pricing.py）。

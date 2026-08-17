@@ -1,9 +1,31 @@
 # JourneyPilot example config
-# Copy this file to config.yaml and fill in your own values.
+#
+#   cp config.example.yaml config.yaml
+#   journeypilot configure --provider deepseek      # 写好模型段（不写 API Key）
+#   export JOURNEYPILOT_PRIMARY_MODEL__API_KEY=...  # Key 走环境变量或 .env
+#   journeypilot config show                        # 每个值 + 它的来源
+#   journeypilot config validate                    # 只校验不启动
+#
+# 未知字段会被**拒绝**（每一段都是 extra="forbid"）：一个拼错的字段名静默什么都不做，
+# 是「我改了 YAML 为什么没生效」的唯一来源。完整字段表见 docs/configuration.md
+# （由 `journeypilot config docs` 生成）。
+#
+# 每个字段都能用 JOURNEYPILOT_<段>__<字段> 覆盖，例如
+# JOURNEYPILOT_DATABASE__PORT=55433。全部合法变量名：journeypilot config env。
+
+# 这份 YAML 的结构版本。加载器按它迁移旧结构；缺失按 1 处理。
+config_version: 2
 
 env: development
 debug: false
 
+# API Key **不要写在这里**。这份文件会被复制、被提交、被贴进 issue。
+# 用 JOURNEYPILOT_PRIMARY_MODEL__API_KEY / JOURNEYPILOT_FAST_MODEL__API_KEY，
+# 或者放进 .env（Compose 的 api 服务会读）。
+#
+# 模型段建议用 `journeypilot configure --provider <id>` 生成：
+# 连接模板与各家的 capability 声明在 configs/providers/*.yaml，
+# 那里也记着每份 preset 上次被真实调用验证的日期。
 primary_model:
   api_key: ""
   model_name: "deepseek-v4-pro"
@@ -171,8 +193,18 @@ ingest:
   parse_cpu_seconds: 60             # 0 = 不设（非 POSIX 平台自动跳过）
   parse_address_space_bytes: 2147483648
 
+# 一次 Deep Run 的四段时间窗（秒），必须递增。**全仓唯一定义处** ——
+# 启动脚本与 Compose 都不再自己定义一份。默认值来自实测：直连 DeepSeek 一次完整 Run
+# 143–373 秒，同样的模型经代理每 token 慢 2–4 倍。已开始的 Run 用它自己封存的快照，
+# 改这里不影响在跑的 Run。
+run_deadline:
+  target_seconds: 375       # 期望完成点
+  closeout_seconds: 450     # 过它之后不再发起任何研究调用
+  composition_seconds: 570  # 过它之后行程编排也停，只剩投影
+  delivery_seconds: 600     # 投影与原子 Bundle 写入的外界
+
 # 一次 Run 允许花掉多少（Run 被授权时封存快照，之后改这里不影响在跑的 Run）。
-# 墙钟不在这里：它由 RunDeadlineSnapshot 一处拥有（STA_DEADLINE_* 环境变量）。
+# 墙钟不在这里：它由上面的 run_deadline 一处拥有。
 run_budget:
   max_llm_calls: 100
   max_tool_calls: 150

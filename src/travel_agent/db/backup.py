@@ -11,7 +11,7 @@ backups/backup-20260817T101530Z-preupgrade/
   manifest.json            ← 唯一的元数据真相
   database.dump            ← pg_dump --format=custom
   schema_fingerprint.json  ← 恢复后可比对结构
-  config.redacted.yaml     ← 结构保留，Secret 只记「已配置/未配置」
+  config.redacted.yaml     ← 结构保留，Secret 只记 <set> / <unset>
   checksums.sha256         ← 常规工具（sha256sum -c）也能校验
 ```
 
@@ -50,7 +50,6 @@ CHECKSUMS_FILENAME = "checksums.sha256"
 #: 自动备份保留份数（§5.4）。手工备份永不自动删除。
 DEFAULT_KEEP_AUTOMATIC = 5
 
-_SECRET_KEY_HINTS = ("key", "token", "secret", "password", "credential")
 
 
 class BackupError(RuntimeError):
@@ -100,32 +99,22 @@ def _application_version() -> str:
         return "unknown"
 
 
-def redact(value: Any, *, key: str = "") -> Any:
-    """递归脱敏。Secret 只留「已配置 / 未配置」这一个比特。
-
-    判据是**键名**而不是值的样子：一个看起来像普通字符串的 api_key 仍然是 Secret，
-    而按值猜会漏。宁可多脱敏一个无害字段，也不要把一个 key 写进用户会随手分享的目录。
-    """
-
-    lowered = key.lower()
-    if isinstance(value, dict):
-        return {name: redact(item, key=name) for name, item in value.items()}
-    if isinstance(value, list):
-        return [redact(item, key=key) for item in value]
-    if any(hint in lowered for hint in _SECRET_KEY_HINTS):
-        return "<configured>" if value not in (None, "", 0) else "<not-configured>"
-    return value
-
-
 def _write_redacted_config(directory: Path) -> str | None:
-    from ..config import _find_config_yaml, _load_yaml_config  # 复用查找与解析逻辑
+    """把 config.yaml 结构保留、Secret 脱敏后存进备份目录。
+
+    脱敏规则用 `config/redaction.py` 那一份，不在这里再写一遍：同一件事两套写法会
+    给出两组不同的标记字符串（``<configured>`` 与 ``<set>``），而读的人无法判断
+    它们是不是同一个意思。
+    """
 
     import yaml
 
-    path = _find_config_yaml()
+    from ..config import find_config_yaml, load_yaml, redact
+
+    path = find_config_yaml()
     if path is None:
         return None
-    data = redact(_load_yaml_config(path))
+    data = redact(load_yaml(path))
     target = directory / REDACTED_CONFIG_FILENAME
     target.write_text(
         yaml.safe_dump(data, allow_unicode=True, sort_keys=True), encoding="utf-8"

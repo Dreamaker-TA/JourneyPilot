@@ -42,15 +42,11 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "duckduckgo-search>=4.0.0",
     "requests>=2.33.0",
+    # PDF 导出与文档导入都是核心承诺（导出报告、上传资料是产品的两个按钮），
+    # 所以它们留在 core。本地 embedding 与 cross encoder 不是，见 dependency-groups。
     "pypdf>=6.13.3",
     "reportlab>=4.4.0",
     "python-docx>=1.1.0",
-    # Embedding 推理链路（Qwen3-Embedding-0.6B ONNX 本地推理）
-    "onnxruntime>=1.20.0",
-    "tokenizers>=0.20.0",
-    "huggingface-hub>=0.26.0",
-    "numpy>=1.26.0",
-    "sentence-transformers>=5.5.1",
     "ddgs>=9.14.3",
     # Versioned schema migrations. The API process only *reads* schema state;
     # every DDL change lives in migrations/versions/ and runs through the
@@ -61,11 +57,38 @@ dependencies = [
 [tool.uv]
 package = false
 
+# 增强能力显式安装，核心能力默认可用（ADR-P1-05）。
+#
+# 上面的 `dependencies` 是 **core**：聊天、规划、PostgreSQL/pgvector、Redis、
+# MCP、PDF 导出、基础文档导入。下面每一组都是「用户选了才需要」的东西，未安装时
+# doctor/readiness 明确报降级，不让基础安装承担全部重量。
+#
+#   uv sync                                  core（约 300 MB）
+#   uv sync --group local-embedding          + 本地 Qwen Embedding（ONNX，约 +400 MB）
+#   uv sync --group cross-encoder            + BGE Reranker（torch stack，约 +2.5 GB）
+#   uv sync --group dev                      + 测试与 lint
+#
+# 只承诺少量官方组合并在 CI 建矩阵（core / core+local-embedding /
+# core+local-embedding+cross-encoder）。其余组合标记 advanced，不承诺每 PR 全测。
 [dependency-groups]
+# embedding.provider = "qwen3"（默认）需要这一组。未安装时 embedding 只能走
+# provider="openai"（远程）或 "hash"（零依赖、语义质量低）。
+local-embedding = [
+    "onnxruntime>=1.20.0",
+    "tokenizers>=0.20.0",
+    "huggingface-hub>=0.26.0",
+    "numpy>=1.26.0",
+]
+# rerank.provider = "cross_encoder" 才需要。默认 provider="llm" 复用已有模型，
+# 开箱即用且不拉 torch —— 2.5 GB 的差别不该由「默认能跑」来承担。
+cross-encoder = [
+    "sentence-transformers>=5.5.1",
+]
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.1.0",
+    "ruff>=0.14.0",
 ]
 
 [tool.pytest.ini_options]
@@ -78,7 +101,8 @@ markers = [
     "postgres: requires a reachable PostgreSQL instance (skipped when absent)",
 ]
 
-# Minimal lint gate (E/F only). Not a full style rewrite.
+# Lint gate: E/F only. Deliberately not a full style rewrite — a few hundred rules
+# turned on at once produces a diff nobody can review and hides the real findings.
 [tool.ruff]
 target-version = "py311"
 src = ["src"]
@@ -87,3 +111,8 @@ src = ["src"]
 select = ["E", "F"]
 # Line-length stylistic E5xx left out of the gate to keep diffs focused.
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 这些脚本必须先把 src/ 放进 sys.path 才能 import travel_agent：仓库不作为包安装
+# （`[tool.uv] package = false`）。E402 在这里不是疏忽，是唯一可行的顺序。
+"scripts/*.py" = ["E402"]

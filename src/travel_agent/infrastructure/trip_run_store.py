@@ -155,7 +155,7 @@ def _require_deep_completion_evidence(
     assert delivery_deadline_at is not None
     assert observed_at is not None
     # Validate against the seconds embedded in the completion audit (stamped when
-    # the Draft was sealed), not the current process STA_DEADLINE_* env.
+    # the Draft was sealed), not the current ``run_deadline`` config.
     try:
         target_seconds = int(deadline.get("target_seconds") or 0)
         closeout_seconds = int(deadline.get("closeout_seconds") or 0)

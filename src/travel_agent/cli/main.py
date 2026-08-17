@@ -658,6 +658,184 @@ def cmd_db_write_fingerprint(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 配置
+# --------------------------------------------------------------------------- #
+
+
+def cmd_config_show(args: argparse.Namespace) -> int:
+    """当前生效的配置，以及每个值的来源。
+
+    这一条直接回答「我改了 YAML 为什么没生效」：来源里写着 environment 的字段，
+    改 YAML 不会有任何效果。密钥一律脱敏成 ``<set>`` / ``<unset>``（`config/redaction.py`）。
+    """
+
+    from ..config import ConfigError, load_effective_config
+
+    try:
+        effective = load_effective_config()
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAILED
+
+    payload = {
+        "config_path": str(effective.config_path) if effective.config_path else None,
+        "migration_notes": effective.migration_notes,
+        "sources": effective.sources,
+        "effective": effective.redacted(),
+    }
+    lines = [
+        f"配置文件        {effective.config_path or '（未找到，全部使用默认值）'}",
+        "",
+        *effective.report_lines(),
+    ]
+    if effective.migration_notes:
+        lines.extend(["", "结构迁移（内存中生效，文件未改写）："])
+        lines.extend(f"  {note}" for note in effective.migration_notes)
+    _emit(payload, as_json=args.json, lines=lines)
+    return EXIT_OK
+
+
+def cmd_config_validate(args: argparse.Namespace) -> int:
+    """只校验，不启动。CI 与「改完配置先确认一下」共用这一条。"""
+
+    from ..config import ConfigError, load_effective_config
+
+    try:
+        effective = load_effective_config()
+    except ConfigError as exc:
+        _emit(
+            {"valid": False, "error": str(exc)},
+            as_json=args.json,
+            lines=[str(exc)],
+        )
+        return EXIT_FAILED
+    payload = {
+        "valid": True,
+        "config_path": str(effective.config_path) if effective.config_path else None,
+        "migration_notes": effective.migration_notes,
+    }
+    lines = [f"配置有效：{effective.config_path or '（默认值）'}"]
+    lines.extend(f"  迁移：{note}" for note in effective.migration_notes)
+    _emit(payload, as_json=args.json, lines=lines)
+    return EXIT_OK
+
+
+def cmd_config_env(args: argparse.Namespace) -> int:
+    """所有合法环境变量名 → 它覆盖的字段。认不出的前缀变量会让启动失败，所以要有清单。"""
+
+    from ..config import env_variable_reference
+
+    reference = env_variable_reference()
+    _emit(
+        {"variables": reference},
+        as_json=args.json,
+        lines=[f"{name:56s} → {path}" for name, path in sorted(reference.items())],
+    )
+    return EXIT_OK
+
+
+def cmd_config_docs(args: argparse.Namespace) -> int:
+    """生成配置字段参考与 JSON Schema。
+
+    ``--check`` 只比对不写：CI 用它保证「改了字段却没改文档」不能合入。
+    """
+
+    from ..config.schema_export import field_reference_markdown, json_schema_text
+
+    artifacts = {
+        _REPO_ROOT / "docs" / "configuration.md": field_reference_markdown(),
+        _REPO_ROOT / "docs" / "config.schema.json": json_schema_text(),
+    }
+    stale = [path for path, content in artifacts.items()
+             if not path.exists() or path.read_text(encoding="utf-8") != content]
+    if args.check:
+        payload = {"stale": [str(path.relative_to(_REPO_ROOT)) for path in stale]}
+        if stale:
+            lines = [
+                "这些生成物与当前 schema 不一致：",
+                *(f"  {path.relative_to(_REPO_ROOT)}" for path in stale),
+                "跑 `journeypilot config docs` 重新生成并提交。",
+            ]
+            _emit(payload, as_json=args.json, lines=lines)
+            return EXIT_FAILED
+        _emit(payload, as_json=args.json, lines=["配置文档与 schema 一致"])
+        return EXIT_OK
+
+    for path, content in artifacts.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    _emit(
+        {"written": [str(path.relative_to(_REPO_ROOT)) for path in artifacts]},
+        as_json=args.json,
+        lines=[f"已写入 {path.relative_to(_REPO_ROOT)}" for path in artifacts],
+    )
+    return EXIT_OK
+
+
+def cmd_configure(args: argparse.Namespace) -> int:
+    """按 provider preset 写好 config.yaml 的模型段。
+
+    **不写 api_key**：Key 走环境变量或 `.env`
+    （``JOURNEYPILOT_PRIMARY_MODEL__API_KEY``）。写进 config.yaml 就会跟着这份文件被
+    提交、被贴进 issue —— 而这条命令的输出正是用户接下来最可能贴出来的东西。
+    """
+
+    from ..config import available_presets, get_preset, preset_model_section, write_model_section
+
+    presets = available_presets()
+    if args.list or not args.provider:
+        lines = ["可用 provider preset："]
+        for preset in presets:
+            verified = preset.last_verified_at or "未验证"
+            lines.append(f"  {preset.id:12s} {preset.label:22s} {preset.base_url}  (last_verified {verified})")
+        lines.append("")
+        lines.append("用法：journeypilot configure --provider <id>")
+        _emit(
+            {"presets": [preset.model_dump(mode="json") for preset in presets]},
+            as_json=args.json,
+            lines=lines,
+        )
+        return EXIT_OK if args.list else EXIT_FAILED
+
+    preset = get_preset(args.provider)
+    if preset is None:
+        known = ", ".join(sorted(item.id for item in presets)) or "（无）"
+        print(f"没有名为 {args.provider!r} 的 preset。已知：{known}", file=sys.stderr)
+        return EXIT_FAILED
+
+    section = preset_model_section(preset)
+    if args.dry_run:
+        _emit(
+            {"provider": preset.id, "section": section},
+            as_json=args.json,
+            lines=[
+                f"将写入 config.yaml（{preset.label}）：",
+                json.dumps(section, ensure_ascii=False, indent=2),
+            ],
+        )
+        return EXIT_OK
+
+    try:
+        path = write_model_section(section)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAILED
+    lines = [
+        f"已按 {preset.label} 写好 {path} 的模型段。",
+        "",
+        "接下来设置 API Key（**不写进 config.yaml**）：",
+        "  export JOURNEYPILOT_PRIMARY_MODEL__API_KEY=...",
+        "  export JOURNEYPILOT_FAST_MODEL__API_KEY=...",
+        "",
+        f"这份 preset 上次被真实调用验证的日期：{preset.last_verified_at or '未验证'}",
+    ]
+    if preset.notes.strip():
+        lines.extend(["", preset.notes.strip()])
+    _emit({"provider": preset.id, "config_path": str(path)}, as_json=args.json, lines=lines)
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
 # 解析
 # --------------------------------------------------------------------------- #
 
@@ -736,6 +914,49 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--list-retained", action="store_true", help="列出恢复留档的旧库")
     restore.add_argument("--drop-retained", metavar="DBNAME", help="删除一个恢复留档库")
     restore.set_defaults(func=cmd_restore)
+
+    config = subparsers.add_parser("config", help="查看、校验与生成配置")
+    config_subparsers = config.add_subparsers(dest="config_command", required=True)
+
+    config_show = config_subparsers.add_parser(
+        "show", help="当前生效的配置与每个值的来源（密钥脱敏）"
+    )
+    config_show.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    config_show.add_argument(
+        "--effective", action="store_true",
+        help="保留给可读性：这条命令本来就只报生效值（默认值也在里面，来源写着 config default）",
+    )
+    config_show.add_argument(
+        "--redacted", action="store_true", help="保留给可读性：密钥一律脱敏，没有不脱敏的模式",
+    )
+    config_show.set_defaults(func=cmd_config_show)
+
+    config_validate = config_subparsers.add_parser("validate", help="只校验配置，不启动服务")
+    config_validate.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    config_validate.set_defaults(func=cmd_config_validate)
+
+    config_env = config_subparsers.add_parser("env", help="列出全部合法环境变量名")
+    config_env.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    config_env.set_defaults(func=cmd_config_env)
+
+    config_docs = config_subparsers.add_parser(
+        "docs", help="从 schema 生成配置参考文档与 JSON Schema"
+    )
+    config_docs.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    config_docs.add_argument(
+        "--check", action="store_true",
+        help="只比对不写：生成物与当前 schema 不一致时以 1 退出（CI 门禁）",
+    )
+    config_docs.set_defaults(func=cmd_config_docs)
+
+    configure = subparsers.add_parser(
+        "configure", help="按 provider preset 写好 config.yaml 的模型段（不写 API Key）"
+    )
+    configure.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    configure.add_argument("--provider", default="", help="preset id（见 --list）")
+    configure.add_argument("--list", action="store_true", help="列出可用 preset")
+    configure.add_argument("--dry-run", action="store_true", help="只打印将写入的内容")
+    configure.set_defaults(func=cmd_configure)
 
     db = subparsers.add_parser("db", help="开发者子命令")
     db_subparsers = db.add_subparsers(dest="db_command", required=True)

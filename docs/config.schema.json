@@ -1,0 +1,1156 @@
+{
+  "$defs": {
+    "BackgroundJobsConfig": {
+      "additionalProperties": false,
+      "description": "durable 后台任务 worker 的边界。",
+      "properties": {
+        "batch_size": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "completed_retention_days": {
+          "default": 30,
+          "minimum": 1,
+          "title": "Completed Retention Days",
+          "type": "integer"
+        },
+        "lease_seconds": {
+          "default": 60,
+          "exclusiveMinimum": 0,
+          "title": "Lease Seconds",
+          "type": "integer"
+        },
+        "poll_seconds": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "title": "Poll Seconds",
+          "type": "number"
+        }
+      },
+      "title": "BackgroundJobsConfig",
+      "type": "object"
+    },
+    "BlockingWorkConfig": {
+      "additionalProperties": false,
+      "description": "同步工作被赶出 Event Loop 之后的并发与排队上界。**全仓唯一定义处**。\n\n线程池不是无限资源：`services/blocking_work.py` 按通道分配，一个通道排满时\n调用方等 ``queue_wait_seconds``，不是无限排队。",
+      "properties": {
+        "cpu_projection": {
+          "default": 2,
+          "minimum": 1,
+          "title": "Cpu Projection",
+          "type": "integer"
+        },
+        "document_parse": {
+          "default": 2,
+          "minimum": 1,
+          "title": "Document Parse",
+          "type": "integer"
+        },
+        "local_embedding": {
+          "default": 2,
+          "minimum": 1,
+          "title": "Local Embedding",
+          "type": "integer"
+        },
+        "pdf_export": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Pdf Export",
+          "type": "integer"
+        },
+        "queue_wait_seconds": {
+          "default": 30.0,
+          "exclusiveMinimum": 0,
+          "title": "Queue Wait Seconds",
+          "type": "number"
+        }
+      },
+      "title": "BlockingWorkConfig",
+      "type": "object"
+    },
+    "CheckpointRetentionConfig": {
+      "additionalProperties": false,
+      "description": "LangGraph checkpoint retention policy.",
+      "properties": {
+        "batch_size": {
+          "default": 100,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "cancelled_days": {
+          "default": 30,
+          "title": "Cancelled Days",
+          "type": "integer"
+        },
+        "completed_days": {
+          "default": 30,
+          "title": "Completed Days",
+          "type": "integer"
+        },
+        "failed_interrupted_days": {
+          "default": 90,
+          "title": "Failed Interrupted Days",
+          "type": "integer"
+        },
+        "require_on_startup": {
+          "default": false,
+          "title": "Require On Startup",
+          "type": "boolean"
+        }
+      },
+      "title": "CheckpointRetentionConfig",
+      "type": "object"
+    },
+    "DataSnapshotsConfig": {
+      "additionalProperties": false,
+      "description": "Governance thresholds for upstream data committed into the repo.\n\n``station_max_age_days``: 90 days is a threshold, not a fact — 12306 publishes\nno version token, so age is the only proxy available and the number expresses\nhow long the repo is willing to answer station questions from a table nobody\nhas re-checked.  A configuration item rather than a constant because the\ntolerable staleness is an operating decision (a demo week and a quiet month are\nnot the same), and because a hardcoded 90 is one more hand-maintained number\nwith no way to change it in the field.",
+      "properties": {
+        "station_max_age_days": {
+          "default": 90,
+          "exclusiveMinimum": 0,
+          "title": "Station Max Age Days",
+          "type": "integer"
+        }
+      },
+      "title": "DataSnapshotsConfig",
+      "type": "object"
+    },
+    "DatabaseConfig": {
+      "additionalProperties": false,
+      "description": "PostgreSQL + pgvector 数据库配置",
+      "properties": {
+        "host": {
+          "default": "localhost",
+          "title": "Host",
+          "type": "string"
+        },
+        "max_overflow": {
+          "default": 20,
+          "title": "Max Overflow",
+          "type": "integer"
+        },
+        "name": {
+          "default": "travel_agent",
+          "title": "Name",
+          "type": "string"
+        },
+        "password": {
+          "default": "travel_agent_pwd",
+          "title": "Password",
+          "type": "string"
+        },
+        "pool_size": {
+          "default": 10,
+          "title": "Pool Size",
+          "type": "integer"
+        },
+        "port": {
+          "default": 5432,
+          "title": "Port",
+          "type": "integer"
+        },
+        "user": {
+          "default": "travel_agent",
+          "title": "User",
+          "type": "string"
+        }
+      },
+      "title": "DatabaseConfig",
+      "type": "object"
+    },
+    "EmbeddingConfig": {
+      "additionalProperties": false,
+      "description": "Embedding 模型配置（用于 RAG 向量化）\n\nprovider = \"qwen3\"  → 本地 Qwen3-Embedding-0.6B ONNX 推理（默认，首次启动从 HF 下载 ~1.2GB）\nprovider = \"openai\" → OpenAI 兼容 Embedding API（需 api_key + base_url）\nprovider = \"hash\"   → 内置确定性哈希向量（零依赖，仅供 RAG 链路跑通，语义质量低）",
+      "properties": {
+        "api_key": {
+          "default": "",
+          "title": "Api Key",
+          "type": "string"
+        },
+        "base_url": {
+          "default": "https://api.openai.com/v1",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "dimensions": {
+          "default": 1024,
+          "title": "Dimensions",
+          "type": "integer"
+        },
+        "model_name": {
+          "default": "n24q02m/Qwen3-Embedding-0.6B-ONNX",
+          "title": "Model Name",
+          "type": "string"
+        },
+        "provider": {
+          "default": "qwen3",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "title": "EmbeddingConfig",
+      "type": "object"
+    },
+    "FastModelConfig": {
+      "additionalProperties": false,
+      "description": "轻量 LLM 配置（用于简单问答、路由判断等低延迟任务）\n\n方案A（默认）: MiniMax-M2.7 @ api.minimaxi.com/v1\n方案B（可选）: 本地 Qwen，model_name=\"qwen3.5:4b\", base_url=\"http://localhost:11434/v1\"",
+      "properties": {
+        "api_key": {
+          "default": "",
+          "title": "Api Key",
+          "type": "string"
+        },
+        "base_url": {
+          "default": "https://api.minimaxi.com/v1",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "max_tokens": {
+          "default": 32768,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "model_name": {
+          "default": "MiniMax-M2.7",
+          "title": "Model Name",
+          "type": "string"
+        },
+        "temperature": {
+          "default": 0.5,
+          "title": "Temperature",
+          "type": "number"
+        },
+        "timeout": {
+          "default": 30,
+          "title": "Timeout",
+          "type": "integer"
+        }
+      },
+      "title": "FastModelConfig",
+      "type": "object"
+    },
+    "FileLogConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "path": {
+          "default": "logs/",
+          "title": "Path",
+          "type": "string"
+        },
+        "retention": {
+          "default": "7 days",
+          "title": "Retention",
+          "type": "string"
+        },
+        "rotation": {
+          "default": "1 day",
+          "title": "Rotation",
+          "type": "string"
+        }
+      },
+      "title": "FileLogConfig",
+      "type": "object"
+    },
+    "GeocodingConfig": {
+      "additionalProperties": false,
+      "description": "OSM 地点 provider（Nominatim / Overpass）访问配置。",
+      "properties": {
+        "min_interval_seconds": {
+          "default": 1.1,
+          "title": "Min Interval Seconds",
+          "type": "number"
+        },
+        "nominatim_base_url": {
+          "default": "https://nominatim.openstreetmap.org",
+          "title": "Nominatim Base Url",
+          "type": "string"
+        },
+        "search_cache_key_prefix": {
+          "default": "journeypilot:nominatim-search:v1",
+          "minLength": 1,
+          "title": "Search Cache Key Prefix",
+          "type": "string"
+        },
+        "search_cache_redis_timeout_seconds": {
+          "default": 0.25,
+          "exclusiveMinimum": 0,
+          "title": "Search Cache Redis Timeout Seconds",
+          "type": "number"
+        },
+        "search_cache_ttl_seconds": {
+          "default": 604800,
+          "exclusiveMinimum": 0,
+          "title": "Search Cache Ttl Seconds",
+          "type": "integer"
+        },
+        "search_timeout_seconds": {
+          "default": 3.4,
+          "exclusiveMinimum": 0,
+          "title": "Search Timeout Seconds",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 10.0,
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "user_agent": {
+          "default": "JourneyPilot/1.0 (travel itinerary geocoder; https://github.com/journeypilot)",
+          "title": "User Agent",
+          "type": "string"
+        }
+      },
+      "title": "GeocodingConfig",
+      "type": "object"
+    },
+    "IngestConfig": {
+      "additionalProperties": false,
+      "description": "上传与文档解析的硬输入边界。\n\n只限制原始字节不够：DOCX 是 ZIP，一份 200 KB 的上传展开后可以是几个 GB。\n每一项都必须在**读进内存之前或读进内存的过程中**可判，不能靠超时兜底 ——\n线程里的解析器杀不掉，超时只停止等待。",
+      "properties": {
+        "max_compression_ratio": {
+          "default": 100.0,
+          "exclusiveMinimum": 1,
+          "title": "Max Compression Ratio",
+          "type": "number"
+        },
+        "max_docx_entries": {
+          "default": 5000,
+          "minimum": 1,
+          "title": "Max Docx Entries",
+          "type": "integer"
+        },
+        "max_extracted_chars": {
+          "default": 2000000,
+          "minimum": 1024,
+          "title": "Max Extracted Chars",
+          "type": "integer"
+        },
+        "max_pdf_pages": {
+          "default": 500,
+          "minimum": 1,
+          "title": "Max Pdf Pages",
+          "type": "integer"
+        },
+        "max_uncompressed_bytes": {
+          "default": 104857600,
+          "minimum": 1024,
+          "title": "Max Uncompressed Bytes",
+          "type": "integer"
+        },
+        "max_upload_bytes": {
+          "default": 10485760,
+          "minimum": 1024,
+          "title": "Max Upload Bytes",
+          "type": "integer"
+        },
+        "parse_address_space_bytes": {
+          "default": 2147483648,
+          "minimum": 0,
+          "title": "Parse Address Space Bytes",
+          "type": "integer"
+        },
+        "parse_cpu_seconds": {
+          "default": 60,
+          "minimum": 0,
+          "title": "Parse Cpu Seconds",
+          "type": "integer"
+        },
+        "parse_timeout_seconds": {
+          "default": 60.0,
+          "exclusiveMinimum": 0,
+          "title": "Parse Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "IngestConfig",
+      "type": "object"
+    },
+    "LoggingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/FileLogConfig"
+        },
+        "level": {
+          "default": "info",
+          "title": "Level",
+          "type": "string"
+        }
+      },
+      "title": "LoggingConfig",
+      "type": "object"
+    },
+    "MCPServerItem": {
+      "additionalProperties": false,
+      "description": "单个 MCP 服务器配置",
+      "properties": {
+        "args": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Args"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "disabled": {
+          "default": false,
+          "title": "Disabled",
+          "type": "boolean"
+        },
+        "env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Env"
+        },
+        "min_interval_seconds": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Min Interval Seconds",
+          "type": "number"
+        },
+        "required_env": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Env",
+          "type": "array"
+        },
+        "sse_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sse Url"
+        }
+      },
+      "title": "MCPServerItem",
+      "type": "object"
+    },
+    "MaintenanceConfig": {
+      "additionalProperties": false,
+      "description": "备份 / 迁移 / 恢复这类维护动作的配置。\n\n只被 `journeypilot` CLI 与启动编排器读取，API 进程不用它 —— 那条边界是\nADR-P0-03（API 进程不改 Schema、不改物理数据库）。",
+      "properties": {
+        "backup_dir": {
+          "default": "backups",
+          "title": "Backup Dir",
+          "type": "string"
+        },
+        "keep_automatic_backups": {
+          "default": 5,
+          "minimum": 1,
+          "title": "Keep Automatic Backups",
+          "type": "integer"
+        },
+        "migration_lock_timeout_seconds": {
+          "default": 30.0,
+          "exclusiveMinimum": 0,
+          "title": "Migration Lock Timeout Seconds",
+          "type": "number"
+        },
+        "postgres_container": {
+          "default": "",
+          "title": "Postgres Container",
+          "type": "string"
+        }
+      },
+      "title": "MaintenanceConfig",
+      "type": "object"
+    },
+    "ModelPricingItem": {
+      "additionalProperties": false,
+      "description": "单条模型定价（USD / 1M tokens，读折扣型缓存计费）。\n\n台账层按 (model_request, provider) 前缀匹配到一条价格，写入时快照计算\ncost_usd。价格随时变动——`effective_from` 记录抓取日期，`source_url` 记录来源，用户\n可在 config.yaml 覆盖或追加档位。",
+      "properties": {
+        "cache_write_per_1m": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Write Per 1M"
+        },
+        "cached_input_per_1m": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cached Input Per 1M"
+        },
+        "currency": {
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "effective_from": {
+          "default": "",
+          "title": "Effective From",
+          "type": "string"
+        },
+        "input_per_1m": {
+          "default": 0.0,
+          "title": "Input Per 1M",
+          "type": "number"
+        },
+        "output_per_1m": {
+          "default": 0.0,
+          "title": "Output Per 1M",
+          "type": "number"
+        },
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "provider": {
+          "default": "",
+          "title": "Provider",
+          "type": "string"
+        },
+        "source_url": {
+          "default": "",
+          "title": "Source Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "title": "ModelPricingItem",
+      "type": "object"
+    },
+    "PrimaryModelConfig": {
+      "additionalProperties": false,
+      "description": "主力 LLM 配置（用于复杂规划等高推理任务）\n默认: MiniMax-M2.7 @ api.minimaxi.com/v1",
+      "properties": {
+        "api_key": {
+          "default": "",
+          "title": "Api Key",
+          "type": "string"
+        },
+        "base_url": {
+          "default": "https://api.minimaxi.com/v1",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "max_tokens": {
+          "default": 32768,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "model_name": {
+          "default": "MiniMax-M2.7",
+          "title": "Model Name",
+          "type": "string"
+        },
+        "temperature": {
+          "default": 0.7,
+          "title": "Temperature",
+          "type": "number"
+        },
+        "timeout": {
+          "default": 120,
+          "title": "Timeout",
+          "type": "integer"
+        }
+      },
+      "title": "PrimaryModelConfig",
+      "type": "object"
+    },
+    "ProviderChannelConfig": {
+      "additionalProperties": false,
+      "description": "按上游通道分配的同时在飞条数。**连接池容量不是产品预算。**\n\n底层 httpx 连接池上限 1000 不代表允许一次入库发 1000 条模型调用。速率闸\n（`utils/rate_gate.py`）管两次请求之间的间隔，这里管同时在飞的条数，两件事。",
+      "properties": {
+        "embedding": {
+          "default": 4,
+          "minimum": 1,
+          "title": "Embedding",
+          "type": "integer"
+        },
+        "ingest_contextual_llm": {
+          "default": 4,
+          "minimum": 1,
+          "title": "Ingest Contextual Llm",
+          "type": "integer"
+        },
+        "online_fast_llm": {
+          "default": 8,
+          "minimum": 1,
+          "title": "Online Fast Llm",
+          "type": "integer"
+        },
+        "primary_research_llm": {
+          "default": 6,
+          "minimum": 1,
+          "title": "Primary Research Llm",
+          "type": "integer"
+        }
+      },
+      "title": "ProviderChannelConfig",
+      "type": "object"
+    },
+    "ProviderSnapshotCacheConfig": {
+      "additionalProperties": false,
+      "description": "Strict Redis policy for reusable, evidence-eligible Provider snapshots.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "place_identity_ttl_seconds": {
+          "default": 604800,
+          "exclusiveMinimum": 0,
+          "title": "Place Identity Ttl Seconds",
+          "type": "integer"
+        },
+        "redis_key_prefix": {
+          "default": "journeypilot:provider-snapshot:v1",
+          "minLength": 1,
+          "title": "Redis Key Prefix",
+          "type": "string"
+        },
+        "redis_timeout_seconds": {
+          "default": 0.25,
+          "exclusiveMinimum": 0,
+          "title": "Redis Timeout Seconds",
+          "type": "number"
+        },
+        "route_ttl_seconds": {
+          "default": 300,
+          "exclusiveMinimum": 0,
+          "title": "Route Ttl Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "ProviderSnapshotCacheConfig",
+      "type": "object"
+    },
+    "RAGConfig": {
+      "additionalProperties": false,
+      "description": "RAG 检索配置",
+      "properties": {
+        "chunk_overlap": {
+          "default": 50,
+          "title": "Chunk Overlap",
+          "type": "integer"
+        },
+        "chunk_size": {
+          "default": 500,
+          "title": "Chunk Size",
+          "type": "integer"
+        },
+        "chunker_type": {
+          "default": "contextual",
+          "title": "Chunker Type",
+          "type": "string"
+        },
+        "contextual_failure_threshold": {
+          "default": 8,
+          "minimum": 1,
+          "title": "Contextual Failure Threshold",
+          "type": "integer"
+        },
+        "model_chunking_max_chars": {
+          "default": 60000,
+          "minimum": 1,
+          "title": "Model Chunking Max Chars",
+          "type": "integer"
+        },
+        "score_threshold": {
+          "default": 0.3,
+          "title": "Score Threshold",
+          "type": "number"
+        },
+        "semantic_split_threshold": {
+          "default": 0.5,
+          "title": "Semantic Split Threshold",
+          "type": "number"
+        },
+        "top_k": {
+          "default": 5,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "title": "RAGConfig",
+      "type": "object"
+    },
+    "RedisConfig": {
+      "additionalProperties": false,
+      "description": "Redis 缓存配置",
+      "properties": {
+        "db": {
+          "default": 0,
+          "title": "Db",
+          "type": "integer"
+        },
+        "host": {
+          "default": "localhost",
+          "title": "Host",
+          "type": "string"
+        },
+        "password": {
+          "default": "",
+          "title": "Password",
+          "type": "string"
+        },
+        "port": {
+          "default": 6379,
+          "title": "Port",
+          "type": "integer"
+        }
+      },
+      "title": "RedisConfig",
+      "type": "object"
+    },
+    "RerankConfig": {
+      "additionalProperties": false,
+      "description": "Reranking 精排配置（Step 4: 二阶段精排）\n\nprovider = \"cross_encoder\" → BGE-Reranker-v2-m3（需要 pip install sentence-transformers）\nprovider = \"llm\"           → 复用现有 LLM 做相关性评分（开箱即用，推荐）",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "final_top_k": {
+          "default": 5,
+          "title": "Final Top K",
+          "type": "integer"
+        },
+        "initial_top_k": {
+          "default": 20,
+          "title": "Initial Top K",
+          "type": "integer"
+        },
+        "model_name": {
+          "default": "BAAI/bge-reranker-v2-m3",
+          "title": "Model Name",
+          "type": "string"
+        },
+        "provider": {
+          "default": "llm",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "title": "RerankConfig",
+      "type": "object"
+    },
+    "RoutingConfig": {
+      "additionalProperties": false,
+      "description": "Street/public-transit routing provider configuration.\n\nTwo upstreams behind one tool, split by geography rather than by preference:\namap answers inside the China coordinate box, Transitous/MOTIS answers the\nrest of the world. That is not a taste —     MOTIS carries no mainland-China\ntransit feed at all (measured: zero routes visited for a 7.9 km\nShenzhen hop), and amap covers nowhere else.",
+      "properties": {
+        "amap_base_url": {
+          "default": "https://restapi.amap.com",
+          "title": "Amap Base Url",
+          "type": "string"
+        },
+        "min_interval_seconds": {
+          "default": 1.0,
+          "title": "Min Interval Seconds",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 20.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "transitous_base_url": {
+          "default": "https://api.transitous.org",
+          "title": "Transitous Base Url",
+          "type": "string"
+        },
+        "user_agent": {
+          "default": "JourneyPilot/2.0 (https://github.com/journeypilot)",
+          "title": "User Agent",
+          "type": "string"
+        }
+      },
+      "title": "RoutingConfig",
+      "type": "object"
+    },
+    "RunBudgetConfig": {
+      "additionalProperties": false,
+      "description": "一次 Run 允许花掉多少。\n\nRun 被授权时按这些值封存一份快照（``entities/run_budget.py``），之后改配置\n不影响在跑的 Run —— 与 Deadline 同一条规矩。墙钟**不在这里**：它由\n``RunDeadlineSnapshot`` 一处拥有，在这里再写一个 max_wall_seconds 就是让\n同一件事有两个 owner。",
+      "properties": {
+        "max_cost_usd": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "title": "Max Cost Usd",
+          "type": "number"
+        },
+        "max_input_tokens": {
+          "default": 1000000,
+          "minimum": 1,
+          "title": "Max Input Tokens",
+          "type": "integer"
+        },
+        "max_llm_calls": {
+          "default": 100,
+          "minimum": 1,
+          "title": "Max Llm Calls",
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "default": 100000,
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "max_tool_calls": {
+          "default": 150,
+          "minimum": 1,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "max_tool_retries_per_target": {
+          "default": 2,
+          "minimum": 0,
+          "title": "Max Tool Retries Per Target",
+          "type": "integer"
+        }
+      },
+      "title": "RunBudgetConfig",
+      "type": "object"
+    },
+    "RunControlConfig": {
+      "additionalProperties": false,
+      "description": "JourneyPilot run-control feature flags and execution lease bounds.",
+      "properties": {
+        "command_poll_seconds": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "title": "Command Poll Seconds",
+          "type": "number"
+        },
+        "lease_heartbeat_failure_threshold": {
+          "default": 3,
+          "exclusiveMinimum": 0,
+          "title": "Lease Heartbeat Failure Threshold",
+          "type": "integer"
+        },
+        "lease_heartbeat_seconds": {
+          "default": 10,
+          "exclusiveMinimum": 0,
+          "title": "Lease Heartbeat Seconds",
+          "type": "integer"
+        },
+        "lease_seconds": {
+          "default": 45,
+          "exclusiveMinimum": 0,
+          "title": "Lease Seconds",
+          "type": "integer"
+        },
+        "plan_gate_enabled": {
+          "default": true,
+          "title": "Plan Gate Enabled",
+          "type": "boolean"
+        },
+        "recovery_sweep_seconds": {
+          "default": 60,
+          "exclusiveMinimum": 0,
+          "title": "Recovery Sweep Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "RunControlConfig",
+      "type": "object"
+    },
+    "RunDeadlineConfig": {
+      "additionalProperties": false,
+      "description": "一次 Deep Run 的四段时间窗（秒）。**全仓唯一定义处**。\n\n每个模型调用恰好属于其中一段。``target`` 是期望完成点；``closeout`` 关研究\n（过它之后没有 worker、门修复或 Provider 补扫可以再发调用）；``composition``\n关行程编排（它拿到的是研究窗已经用完之后的那一段）；``delivery`` 是投影与持久化\n的外界，它比 ``composition`` 多出的 30 秒就是一次原子 Bundle 写入的开销。\n\n这些数**不许由启动脚本定义**：run.sh 里 export 一份、Compose 里另一份、代码里\n第三份，是「同一条策略有三个 owner」的标准形态。已经开始的 Run 用它自己封存的\n快照（`entities/run_deadline_policy.py` 只在**新建**快照时读这里），所以改这里\n既不会让一个在跑的 Run 越过它被审计的 closeout，也不会截短一个快照还在供着它的 Run。\n\n默认值 375/450/570/600 来自实测：直连 DeepSeek 一次完整 Run 143–373 秒；同样的\n模型经代理每 token 慢 2–4 倍（实测 82 tok/s 直连 vs 19 tok/s 经代理），把一次两\n目的地的普通行程推到 499 秒。窗口按更慢的那一档设。",
+      "properties": {
+        "closeout_seconds": {
+          "default": 450,
+          "exclusiveMinimum": 0,
+          "title": "Closeout Seconds",
+          "type": "integer"
+        },
+        "composition_seconds": {
+          "default": 570,
+          "exclusiveMinimum": 0,
+          "title": "Composition Seconds",
+          "type": "integer"
+        },
+        "delivery_seconds": {
+          "default": 600,
+          "exclusiveMinimum": 0,
+          "title": "Delivery Seconds",
+          "type": "integer"
+        },
+        "target_seconds": {
+          "default": 375,
+          "exclusiveMinimum": 0,
+          "title": "Target Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "RunDeadlineConfig",
+      "type": "object"
+    },
+    "ServerConfig": {
+      "additionalProperties": false,
+      "description": "FastAPI 服务器配置",
+      "properties": {
+        "allow_runtime_model_config": {
+          "default": false,
+          "title": "Allow Runtime Model Config",
+          "type": "boolean"
+        },
+        "cors_origins": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cors Origins",
+          "type": "array"
+        },
+        "host": {
+          "default": "0.0.0.0",
+          "title": "Host",
+          "type": "string"
+        },
+        "log_level": {
+          "default": "info",
+          "title": "Log Level",
+          "type": "string"
+        },
+        "port": {
+          "default": 8001,
+          "title": "Port",
+          "type": "integer"
+        },
+        "reload": {
+          "default": true,
+          "title": "Reload",
+          "type": "boolean"
+        }
+      },
+      "title": "ServerConfig",
+      "type": "object"
+    },
+    "StreamingConfig": {
+      "additionalProperties": false,
+      "description": "SSE 缓冲的内存预算。**全仓唯一定义处**，`api/sse_buffer.py` 读它。",
+      "properties": {
+        "critical_queue_size": {
+          "default": 128,
+          "minimum": 1,
+          "title": "Critical Queue Size",
+          "type": "integer"
+        },
+        "heartbeat_seconds": {
+          "default": 15.0,
+          "exclusiveMinimum": 0,
+          "title": "Heartbeat Seconds",
+          "type": "number"
+        },
+        "max_coalesced_chunk_chars": {
+          "default": 2048,
+          "minimum": 1,
+          "title": "Max Coalesced Chunk Chars",
+          "type": "integer"
+        },
+        "max_pending_text_chars": {
+          "default": 65536,
+          "minimum": 1024,
+          "title": "Max Pending Text Chars",
+          "type": "integer"
+        },
+        "stalled_consumer_seconds": {
+          "default": 30.0,
+          "exclusiveMinimum": 0,
+          "title": "Stalled Consumer Seconds",
+          "type": "number"
+        }
+      },
+      "title": "StreamingConfig",
+      "type": "object"
+    },
+    "ToolExposureConfig": {
+      "additionalProperties": false,
+      "description": "Tool Search 按需工具曝光策略。\n\n默认 ``deferred``：worker agent 不再全量注入工具 schema，只带压缩目录（名称+一行\n描述）进 system prompt，由 ``search_tools`` 元工具按需激活完整 schema。\n\n- ``mode``: ``deferred`` 走按需曝光；``full`` 一键回退到全量注入（出问题时兜底）。\n- ``worker_only``: 仅对 worker agent（destination/transport/accommodation/itinerary）\n  启用；scope/orchestrator 等治理节点不动。\n- ``min_tools_threshold``: 该 agent 可用工具数 ``>=`` 阈值才 defer；阈值以下工具少、\n  多一跳 search 得不偿失，自动回落 full。",
+      "properties": {
+        "min_tools_threshold": {
+          "default": 8,
+          "title": "Min Tools Threshold",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "deferred",
+          "title": "Mode",
+          "type": "string"
+        },
+        "worker_only": {
+          "default": true,
+          "title": "Worker Only",
+          "type": "boolean"
+        }
+      },
+      "title": "ToolExposureConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "全局设置。优先级：环境变量 > config.yaml > 这里的默认值。\n\n默认值的原则：**安全、稳定、不产生意外费用**。api_key 默认为空，provider 必须由\n用户选（`configs/providers/*.yaml` 帮他填），监听 localhost，运行时改模型默认关，\n重型增强默认关，预算与 Deadline 都是明确的有限值。",
+  "properties": {
+    "background_jobs": {
+      "$ref": "#/$defs/BackgroundJobsConfig"
+    },
+    "blocking_work": {
+      "$ref": "#/$defs/BlockingWorkConfig"
+    },
+    "checkpoint_retention": {
+      "$ref": "#/$defs/CheckpointRetentionConfig"
+    },
+    "data_snapshots": {
+      "$ref": "#/$defs/DataSnapshotsConfig"
+    },
+    "database": {
+      "$ref": "#/$defs/DatabaseConfig"
+    },
+    "debug": {
+      "default": false,
+      "title": "Debug",
+      "type": "boolean"
+    },
+    "embedding": {
+      "$ref": "#/$defs/EmbeddingConfig"
+    },
+    "env": {
+      "default": "development",
+      "title": "Env",
+      "type": "string"
+    },
+    "fast_model": {
+      "$ref": "#/$defs/FastModelConfig"
+    },
+    "geocoding": {
+      "$ref": "#/$defs/GeocodingConfig"
+    },
+    "ingest": {
+      "$ref": "#/$defs/IngestConfig"
+    },
+    "logging": {
+      "$ref": "#/$defs/LoggingConfig"
+    },
+    "maintenance": {
+      "$ref": "#/$defs/MaintenanceConfig"
+    },
+    "mcp_servers": {
+      "additionalProperties": {
+        "$ref": "#/$defs/MCPServerItem"
+      },
+      "title": "Mcp Servers",
+      "type": "object"
+    },
+    "model_pricing": {
+      "items": {
+        "$ref": "#/$defs/ModelPricingItem"
+      },
+      "title": "Model Pricing",
+      "type": "array"
+    },
+    "primary_model": {
+      "$ref": "#/$defs/PrimaryModelConfig"
+    },
+    "provider_channels": {
+      "$ref": "#/$defs/ProviderChannelConfig"
+    },
+    "provider_snapshot_cache": {
+      "$ref": "#/$defs/ProviderSnapshotCacheConfig"
+    },
+    "rag": {
+      "$ref": "#/$defs/RAGConfig"
+    },
+    "redis": {
+      "$ref": "#/$defs/RedisConfig"
+    },
+    "rerank": {
+      "$ref": "#/$defs/RerankConfig"
+    },
+    "routing": {
+      "$ref": "#/$defs/RoutingConfig"
+    },
+    "run_budget": {
+      "$ref": "#/$defs/RunBudgetConfig"
+    },
+    "run_control": {
+      "$ref": "#/$defs/RunControlConfig"
+    },
+    "run_deadline": {
+      "$ref": "#/$defs/RunDeadlineConfig"
+    },
+    "server": {
+      "$ref": "#/$defs/ServerConfig"
+    },
+    "streaming": {
+      "$ref": "#/$defs/StreamingConfig"
+    },
+    "tool_exposure": {
+      "$ref": "#/$defs/ToolExposureConfig"
+    }
+  },
+  "title": "Settings",
+  "type": "object"
+}

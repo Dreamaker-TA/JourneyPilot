@@ -14,10 +14,8 @@ result says which upstream answered, and the caller does not choose.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import math
-import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
 
@@ -25,7 +23,7 @@ import httpx
 
 from ..config import get_settings
 from ..utils.coordinates import within_china_coordinate_box
-from ..utils.rate_gate import RateGate, rate_gate_for
+from ..utils.rate_gate import rate_gate_for
 from .amap_route_search import AmapRouteSearchError, amap_route_search
 
 

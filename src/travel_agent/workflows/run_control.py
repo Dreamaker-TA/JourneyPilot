@@ -377,7 +377,7 @@ def remaining_model_seconds(operation: str) -> Optional[float]:
     The *seconds* come from the run's own sealed snapshot, never from this
     process's policy defaults.  The snapshot is the cross-process source of
     truth, so how much budget a call gets must be decided by the same numbers
-    that decide which phase the run is in: a later STA_DEADLINE_* change may
+    that decide which phase the run is in: a later ``run_deadline`` change may
     neither fund an in-flight run past the closeout it was audited against nor
     cut short one whose snapshot still funds it.
     """

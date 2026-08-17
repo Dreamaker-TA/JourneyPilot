@@ -9,10 +9,9 @@ import logging
 import math
 import os
 import re
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, Literal, Optional
 
 import httpx
 

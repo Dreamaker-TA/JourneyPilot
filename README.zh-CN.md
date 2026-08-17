@@ -113,19 +113,20 @@ cd JourneyPilot
 cp config.example.yaml config.yaml
 ```
 
-打开 `config.yaml`，填入模型服务信息：
+按 provider preset 填好模型段，API Key 走环境变量。**Key 不要写进 `config.yaml`** ——
+这份文件会被复制、被提交、被贴进 issue：
 
-```yaml
-primary_model:
-  api_key: "your-api-key"
-  model_name: "your-model"
-  base_url: "https://your-openai-compatible-endpoint/v1"
+```bash
+uv run python journeypilot.py configure --list              # 可用 preset
+uv run python journeypilot.py configure --provider deepseek # 写好模型段
+export JOURNEYPILOT_PRIMARY_MODEL__API_KEY="your-api-key"
+export JOURNEYPILOT_FAST_MODEL__API_KEY="your-api-key"
 ```
 
 使用仓库自带的 Docker Compose 数据库和 Redis 端口启动：
 
 ```bash
-DB_PORT=55433 REDIS_PORT=16379 ./run.sh
+JOURNEYPILOT_DATABASE__PORT=55433 JOURNEYPILOT_REDIS__PORT=16379 ./run.sh
 ```
 
 第一次启动会安装前后端依赖，并依次拉起 PostgreSQL、Redis、API 和网页端。默认的本地向量模型会在首次使用时下载。
@@ -146,6 +147,28 @@ DB_PORT=55433 REDIS_PORT=16379 ./run.sh
 ```
 
 如果一直使用仓库自带的 Compose 服务，可以把 `database.port: 55433` 和 `redis.port: 16379` 写入 `config.yaml`，之后直接运行 `./run.sh`。
+
+### 可选增强能力
+
+默认安装带的是核心产品：聊天、规划、PostgreSQL/pgvector、Redis、MCP 工具、PDF 导出与
+基础文档导入。重型增强显式安装；配置选了某个增强但依赖没装时，程序**拒绝启动**，
+而不是等到第一次真正调用才抛 ImportError：
+
+```bash
+uv sync                            # core
+uv sync --group local-embedding    # 本地 Qwen3 ONNX 向量（embedding.provider=qwen3）
+uv sync --group cross-encoder      # BGE 重排（rerank.provider=cross_encoder，会拉 torch）
+```
+
+默认的 Compose 数据库用官方 `pgvector` 镜像，不编译任何东西。中文分词增强（zhparser）
+是可选 profile，它构建失败不影响默认档：
+
+```bash
+docker compose --profile zhparser up -d --build postgres-zhparser redis api
+```
+
+两个 profile 共用同一个卷和同一个端口，所以必须显式点名服务，切换后要重建词法索引。
+`journeypilot doctor` 会报出当前实际生效的 lexical config。
 
 ## 工作方式
 
@@ -173,7 +196,21 @@ JourneyPilot 的后端使用 LangGraph 和 FastAPI，数据保存在 PostgreSQL 
 
 ## 配置
 
-JourneyPilot 会先读取内置默认值和 `config.yaml`，环境变量拥有最高优先级。所有可配置项都写在带注释的 [`config.example.yaml`](config.example.yaml) 中。
+JourneyPilot 会先读取内置默认值和 `config.yaml`，环境变量拥有最高优先级。**未知字段会被
+拒绝**而不是忽略：一个拼错的字段名静默什么都不做，是「我改了配置为什么没生效」的唯一来源。
+
+- [`config.example.yaml`](config.example.yaml) —— 带注释的起点
+- [`docs/configuration.md`](docs/configuration.md) —— 每个字段的类型、默认值、取值范围与
+  环境变量名（由 schema 生成，`journeypilot config docs`）
+
+```bash
+uv run python journeypilot.py config show      # 生效值 + 每个值的来源
+uv run python journeypilot.py config validate  # 只校验，不启动服务
+uv run python journeypilot.py config env       # 全部合法环境变量名
+```
+
+每个字段都能用 `JOURNEYPILOT_<段>__<字段>` 覆盖，例如 `JOURNEYPILOT_DATABASE__PORT=55433`。
+认不出的 `JOURNEYPILOT_*` 变量会让启动失败 —— 拼错一个字母不该静默无效。
 
 | 配置 | 作用 |
 |---|---|
@@ -182,6 +219,10 @@ JourneyPilot 会先读取内置默认值和 `config.yaml`，环境变量拥有�
 | `embedding.*` | 默认使用本地 Qwen3 ONNX 向量模型，也可以连接 OpenAI 兼容的向量服务。 |
 | `run_control.plan_gate_enabled` | 完整调研开始前是否暂停，等待确认研究计划。 |
 | `rerank.*` | 知识库检索的第二阶段排序。 |
+| `run_deadline.*` | 一次完整调研可以花掉的四段时间窗。 |
+| `run_budget.*` | Run 被授权时封存的调用数 / token / 费用上限。 |
+| `provider_channels.*` | 各上游通道的并发配额，避免一次入库把在线请求排到队尾。 |
+| `ingest.*` | 上传与文档解析的边界（体积、页数、压缩包展开量、超时）。 |
 | `mcp.servers.*` | 外部数据服务的密钥与连接设置。 |
 
 ### 数据来源
@@ -248,7 +289,7 @@ npm run dev
 ```bash
 # 后端
 uv run ruff check src
-DB_PORT=55433 uv run pytest    # 迁移/备份测试建临时库；没有 PostgreSQL 时自动跳过
+JOURNEYPILOT_DATABASE__PORT=55433 uv run pytest   # 迁移/备份测试建临时库；没有 PostgreSQL 时自动跳过
 
 # 前端
 cd frontend
@@ -266,7 +307,7 @@ npm run build
 | API | FastAPI、Uvicorn、Server-Sent Events |
 | Agent 工作流 | LangGraph 与 PostgreSQL 检查点 |
 | 模型 | 通过 `langchain-openai` 接入 OpenAI 兼容模型 |
-| 数据 | PostgreSQL、pgvector、zhparser、Redis |
+| 数据 | PostgreSQL、pgvector、Redis（zhparser 可选） |
 | 检索 | 向量检索、PostgreSQL 全文检索、RRF、重排 |
 | 工具 | 基于 stdio 的 Model Context Protocol |
 | 包管理与运行 | uv、npm、Docker Compose |
