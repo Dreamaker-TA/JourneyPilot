@@ -205,6 +205,30 @@ uv run python scripts/check_mcp.py
 
 The optional local knowledge corpus is intentionally not included in this public repository. If you maintain a local seed, keep it under `data/corpus/seed/`; the `data/` directory is ignored by Git. Without a local seed, provider-backed research still works and the knowledge corpus is reported as a non-blocking degraded component.
 
+## Database, backups, and upgrades
+
+Schema changes are versioned migrations under [`migrations/versions/`](migrations/versions/), not something the API process performs on startup. The `journeypilot` command is the maintenance entry point:
+
+```bash
+uv run python journeypilot.py doctor          # database, migration revision, schema, extensions, backups
+uv run python journeypilot.py migrate         # run pending migrations (holds a lock; backs up first)
+uv run python journeypilot.py backup          # verified backup: dump + manifest + SHA-256 checksums
+uv run python journeypilot.py restore <dir>   # restore into a new database, verify, then switch
+```
+
+Every command accepts `--json` for CI use.
+
+What the safeguards actually do:
+
+- **A non-empty database is backed up before any migration**, and the backup is verified (non-empty file, `pg_restore --list` parses, checksums recorded). If the backup fails, the migration does not run.
+- **A database whose structure does not match a known revision is refused, never stamped.** `doctor` prints the exact columns, constraints, and indexes that differ.
+- **Migrations that delete data require `--allow-destructive`.** A first install on an empty database does not, because there is nothing to lose.
+- **Restore never overwrites the current database in place.** It restores into a new database, checks the schema fingerprint and row counts against the manifest, and only then switches. The previous database is kept as `<name>_prerestore_<timestamp>` until you delete it.
+
+`maintenance.*` in `config.yaml` controls the backup directory, retention, and the lock timeout. Backups are written outside version control.
+
+In this release the API process still creates its own tables on startup, and reports what it found read-only under `database_schema` in `GET /api/health/ready`. Moving table creation out of the API entirely is the next step.
+
 ## Development
 
 Run the frontend against the local API:
@@ -220,7 +244,7 @@ Before opening a pull request, run the relevant checks:
 ```bash
 # Backend
 uv run ruff check src
-uv run pytest
+DB_PORT=55433 uv run pytest    # migration/backup tests use temporary databases; skipped without PostgreSQL
 
 # Frontend
 cd frontend

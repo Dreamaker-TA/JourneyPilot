@@ -52,6 +52,27 @@ database:
   pool_size: 10
   max_overflow: 20
 
+# Backup / migration / restore. Only the `journeypilot` CLI reads this section —
+# the API process never modifies the schema or the physical database.
+maintenance:
+  # Backup root. A relative path resolves against the repository root, not the
+  # current working directory: which directory you type the command from must not
+  # change where backups land.
+  backup_dir: "backups"
+  # How many *automatic* (pre-upgrade) backups to keep. Manual backups made with
+  # `journeypilot backup` are never deleted automatically.
+  keep_automatic_backups: 5
+  # Container that runs pg_dump / pg_restore. Empty = auto-detect by "who publishes
+  # the database port". Set it explicitly when several PostgreSQL containers share
+  # a port mapping on one machine.
+  # Why this exists: pg_dump refuses to dump a server newer than itself, and the
+  # host client is often older than the server in Compose. Backups run with a
+  # version-matched client or not at all.
+  postgres_container: ""
+  # Seconds to wait for the migration advisory lock. On timeout the command fails —
+  # it never proceeds without the lock.
+  migration_lock_timeout_seconds: 30
+
 redis:
   host: "localhost"
   port: 6379

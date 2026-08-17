@@ -205,6 +205,30 @@ uv run python scripts/check_mcp.py
 
 可选的本地知识库没有随这个公开仓库发布。如果你维护本地种子文件，请放在 `data/corpus/seed/` 下；整个 `data/` 目录都已被 Git 忽略。没有本地种子时，基于 Provider 的调研仍可运行，知识库只会在就绪检查中作为非阻塞降级项报告。
 
+## 数据库、备份与升级
+
+结构变更是 [`migrations/versions/`](migrations/versions/) 下的版本化迁移，不是 API 进程启动时顺手做的事。`journeypilot` 是维护入口：
+
+```bash
+uv run python journeypilot.py doctor          # 体检：数据库、迁移版本、结构、扩展、备份现状
+uv run python journeypilot.py migrate         # 执行待迁移（持锁；非空库先自动备份）
+uv run python journeypilot.py backup          # 生成经过校验的备份：转储 + manifest + SHA-256
+uv run python journeypilot.py restore <目录>   # 恢复到新库、验证通过后再切换
+```
+
+每个命令都支持 `--json`，供 CI 使用。
+
+这几道保护具体做了什么：
+
+- **非空数据库在任何迁移之前必定先备份**，而且备份要通过校验（文件非空、`pg_restore --list` 能解析、checksum 已记录）。备份失败就不迁移。
+- **结构与任何已知 revision 都不匹配的数据库会被拒绝，绝不会被标记成最新版本。** `doctor` 会逐条列出差异的列、约束和索引。
+- **会删数据的迁移需要 `--allow-destructive`。** 空库首次安装不需要 —— 那里没有数据可丢。
+- **恢复绝不原地覆盖当前数据库。** 它先恢复到一个新库，比对结构指纹和行数，通过之后才切换；恢复前的数据库保留为 `<库名>_prerestore_<时间戳>`，直到你自己删除。
+
+`config.yaml` 里的 `maintenance.*` 控制备份目录、保留份数和锁超时。备份目录不进版本控制。
+
+这个版本里 API 进程仍会在启动时自建表，并在 `GET /api/health/ready` 的 `database_schema` 下**只读**报告它看到的结构状态。把建表彻底移出 API 进程是下一步。
+
 ## 参与开发
 
 让前端连接本地 API：
@@ -220,7 +244,7 @@ npm run dev
 ```bash
 # 后端
 uv run ruff check src
-uv run pytest
+DB_PORT=55433 uv run pytest    # 迁移/备份测试建临时库；没有 PostgreSQL 时自动跳过
 
 # 前端
 cd frontend

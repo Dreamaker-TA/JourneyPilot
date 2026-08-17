@@ -108,6 +108,25 @@ class DatabaseConfig(BaseModel):
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
 
 
+class MaintenanceConfig(BaseModel):
+    """备份 / 迁移 / 恢复这类维护动作的配置。
+
+    只被 `journeypilot` CLI 与启动编排器读取，API 进程不用它 —— 那条边界是
+    ADR-P0-03（API 进程不改 Schema、不改物理数据库）。
+    """
+
+    #: 备份根目录。相对路径按仓库根解析（不是当前工作目录 —— 从哪个目录敲命令
+    #: 不该改变备份落在哪里）。
+    backup_dir: str = "backups"
+    #: 自动备份保留份数。手工备份永不自动删除。
+    keep_automatic_backups: int = Field(default=5, ge=1)
+    #: 跑 pg_dump / pg_restore 的容器名。空 = 按「谁发布了数据库端口」自动探测。
+    #: 需要显式指定的场合：一台机器上跑着多个 PostgreSQL 容器共用端口映射。
+    postgres_container: str = ""
+    #: 迁移锁最长等待秒数。超时报错，绝不无锁继续。
+    migration_lock_timeout_seconds: float = Field(default=30.0, gt=0)
+
+
 class RedisConfig(BaseModel):
     """Redis 缓存配置"""
     host: str = "localhost"
@@ -553,6 +572,7 @@ class Settings(BaseModel):
     fast_model: FastModelConfig = Field(default_factory=FastModelConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
@@ -745,6 +765,10 @@ def _build_settings_from_yaml(data: Dict[str, Any]) -> Settings:
     db_data = data.get("database", {})
     if db_data:
         settings.database = DatabaseConfig(**db_data)
+
+    mt_data = data.get("maintenance", {})
+    if mt_data:
+        settings.maintenance = MaintenanceConfig(**mt_data)
 
     rd_data = data.get("redis", {})
     if rd_data:

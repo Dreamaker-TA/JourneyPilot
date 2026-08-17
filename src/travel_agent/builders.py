@@ -49,6 +49,12 @@ class AppComponents:
     db_available: bool = False
     db_init_error: Optional[str] = None
 
+    # P0-A：只读 schema 报告（migration revision、结构指纹、缺表、可选能力）。
+    # **只读** —— API 进程不再是「谁改 Schema」这个问题的答案之一（ADR-P0-03）。
+    # 这一阶段它不参与 readiness 门禁（理由见 db/report.py 的 docstring），
+    # 但它是那道门禁将来站的位置，也是现在运营者能看到的唯一一份结构真相。
+    schema_report: Optional[Any] = None
+
     # Models
     model_router: ModelRouter = field(default_factory=get_model_router)
 
@@ -148,6 +154,24 @@ class AppBuilder:
                 e,
             )
 
+        # 只读 schema 报告。放在 init_db 之后：这一阶段 init_db 仍然是建表的人，
+        # 报告的职责是**把它建出来的东西如实说出来**（版本号、指纹、缺表、可选能力），
+        # 而不是替它决定能不能启动。
+        schema_report = None
+        if db_available:
+            try:
+                from .db.report import build_schema_report
+                from .infrastructure.database import get_engine
+
+                schema_report = await build_schema_report(
+                    get_engine(), embedding_dimensions=self.settings.embedding.dimensions
+                )
+                schema_report.log_summary()
+            except Exception as e:
+                # 报告自己崩了不该拦启动 —— 它是观察手段，不是运行依赖。
+                # 但要留一条 ERROR：静默失败等于运营者以为「没消息就是结构没问题」。
+                logger.error("只读 schema 报告生成失败（不影响启动，但结构状态未知）: %s", e)
+
         checkpointer = None
         checkpointer_pool = None
         checkpointer_available = False
@@ -199,6 +223,7 @@ class AppBuilder:
         return AppComponents(
             db_available=db_available,
             db_init_error=db_init_error,
+            schema_report=schema_report,
             model_router=get_model_router(),
             usage_recorder=get_usage_recorder(),
             cost_ledger_store=get_cost_ledger_store(),

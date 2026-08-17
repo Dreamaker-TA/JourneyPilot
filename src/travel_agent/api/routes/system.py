@@ -126,7 +126,16 @@ async def get_status():
 # ``mcp`` covers optional paid integrations, ``data_snapshots`` covers staleness
 # that degrades an answer rather than preventing one.  Anything not named here
 # blocks readiness — the default is the strict one.
-_NON_BLOCKING_COMPONENTS = frozenset({"mcp", "data_snapshots", "knowledge_corpus"})
+#
+# ``database_schema`` 报告 migration revision、结构指纹和缺表，但在 P0-A 这一阶段
+# **不阻塞**：`init_db()` 仍然是建表的人，而它不写 `alembic_version` —— 于是每一个
+# 现有部署在被 `journeypilot migrate` 纳管之前都处于「结构对、版本号空」的状态。
+# 现在就让它 503，等于用一条诊断信息换掉所有人的可用性。它进入门禁的时点是
+# PR-P0-02（`init_db()` → `verify_database_contract()`，迁移移交启动编排器）。
+# 判据与 `db/report.py::GATES_READINESS` 逐字同源，两处分叉就会一处报警一处放行。
+_NON_BLOCKING_COMPONENTS = frozenset(
+    {"mcp", "data_snapshots", "knowledge_corpus", "database_schema"}
+)
 
 
 async def _probe_knowledge_corpus() -> Dict[str, Any]:
@@ -222,6 +231,28 @@ def _probe_data_snapshots(settings: Any) -> Dict[str, Any]:
     }
 
 
+def _probe_schema_report(components: Any) -> Dict[str, Any]:
+    """把启动时生成的只读 schema 报告原样端出来。
+
+    **不在这里重新体检**：报告是启动那一刻的事实，而 readiness 每 30 秒被探针调用一次。
+    每次都重跑五条 introspection 查询，只为得到一个几乎不会在运行期变化的答案，
+    是把一个观察手段变成一份持续开销。结构在运行期变了 —— 那正是这一整个 P0 项
+    要消灭的事 —— 会在下一次启动时被报出来。
+    """
+
+    from ...db.report import GATES_READINESS
+
+    report = getattr(components, "schema_report", None)
+    if report is None:
+        return {
+            "ready": True,
+            "gates_readiness": GATES_READINESS,
+            "available": False,
+            "message": "启动时未能生成只读 schema 报告（详见启动日志）",
+        }
+    return {"ready": True, "available": True, **report.to_dict()}
+
+
 @router.get("/health/ready")
 async def readiness() -> JSONResponse:
     """生产就绪探针：核心依赖不可用时返回 503。"""
@@ -281,6 +312,10 @@ async def readiness() -> JSONResponse:
         # An empty knowledge base makes grounding worse, it does not stop the service
         # answering; 503-ing on it would hold a working deployment behind a seed file.
         "knowledge_corpus": await _probe_knowledge_corpus(),
+        # 只读 schema 报告（P0-A）。`ready` 恒为 True，理由见
+        # `_NON_BLOCKING_COMPONENTS` 上方那段注释。运营者要读的是 `problems` 和
+        # `next_action` —— 它们给出的是一条可以直接敲的命令，不是「结构不对」四个字。
+        "database_schema": _probe_schema_report(components),
     }
     ready = all(
         component["ready"]

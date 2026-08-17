@@ -52,6 +52,10 @@ dependencies = [
     "numpy>=1.26.0",
     "sentence-transformers>=5.5.1",
     "ddgs>=9.14.3",
+    # Versioned schema migrations. The API process only *reads* schema state;
+    # every DDL change lives in migrations/versions/ and runs through the
+    # journeypilot CLI before the API starts (see dev docs P0-A / ADR-P0-03).
+    "alembic>=1.14",
 ]
 
 [tool.uv]
@@ -62,6 +66,16 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+# `pythonpath` mirrors main.py's sys.path bootstrap: this repo is not installed
+# as a package (`[tool.uv] package = false`), so tests import from src/ directly.
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "postgres: requires a reachable PostgreSQL instance (skipped when absent)",
 ]
 
 # Minimal lint gate (E/F only). Not a full style rewrite.

@@ -399,3 +399,9 @@ static/
 cookies.json
 
 landing_page/resource/
+
+dev_docs/
+
+# 数据库备份（journeypilot backup 的默认输出）。里面是用户的完整业务数据，
+# 绝不进版本控制。目录位置由 config.yaml 的 maintenance.backup_dir 决定。
+backups/
