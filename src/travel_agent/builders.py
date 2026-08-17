@@ -11,6 +11,10 @@ from typing import Any, Optional
 
 from .config import Settings, get_settings
 from .db.report import SchemaReport, verify_database_contract
+from .infrastructure.background_job_store import (
+    BackgroundJobStore,
+    get_background_job_store,
+)
 from .infrastructure.cost_ledger_store import CostLedgerStore, get_cost_ledger_store
 from .infrastructure.delivery_bundle_store import DeliveryBundleStore
 from .infrastructure.memory_lifecycle_store import (
@@ -43,6 +47,7 @@ from .rag.indexer import KnowledgeIndexer
 from .rag.retriever import HybridRetriever
 from .tools.mcp_manager import MCPManager, get_mcp_manager
 from .tools.registry import ToolRegistry, get_tool_registry
+from .services.background_jobs import BackgroundJobWorker, build_job_handlers
 from .services.run_lease import release_all_leases
 from .services.run_recovery import RunRecoveryService
 from .services.weather_context_builder import WeatherContextBuilder
@@ -112,6 +117,10 @@ class AppComponents:
     # 运行控制命令（cancel / supplement）的最终事实。
     run_command_store: RunCommandStore = field(default_factory=get_run_command_store)
     run_recovery_service: Optional[RunRecoveryService] = None
+
+    # 后台任务（记忆抽取等）的最终事实与本地 worker。
+    background_job_store: BackgroundJobStore = field(default_factory=get_background_job_store)
+    background_job_worker: Optional[BackgroundJobWorker] = None
 
     # JourneyPilot v2 immutable delivery snapshots + current-bundle CAS.
     delivery_bundle_store: DeliveryBundleStore = field(default_factory=DeliveryBundleStore)
@@ -218,7 +227,8 @@ class AppBuilder:
             checkpoint_probe=travel_workflow.has_checkpoint if checkpointer_available else None,
             sweep_seconds=self.settings.run_control.recovery_sweep_seconds,
         )
-        return AppComponents(
+        background_job_store = get_background_job_store()
+        components = AppComponents(
             schema_report=schema_report,
             model_router=get_model_router(),
             usage_recorder=get_usage_recorder(),
@@ -243,11 +253,22 @@ class AppBuilder:
             run_execution_store=run_execution_store,
             run_command_store=run_command_store,
             run_recovery_service=run_recovery_service,
+            background_job_store=background_job_store,
             delivery_bundle_store=delivery_bundle_store,
             weather_context_builder=weather_context_builder,
             tool_audit_store=get_tool_audit_store(),
             memory_lifecycle_store=get_memory_lifecycle_store(),
         )
+        # worker 的 handler 需要已经装配好的组件，所以在容器建好之后再挂上去。
+        components.background_job_worker = BackgroundJobWorker(
+            background_job_store,
+            build_job_handlers(components),
+            poll_seconds=self.settings.background_jobs.poll_seconds,
+            lease_seconds=self.settings.background_jobs.lease_seconds,
+            batch_size=self.settings.background_jobs.batch_size,
+            completed_retention_days=self.settings.background_jobs.completed_retention_days,
+        )
+        return components
 
     async def teardown(self) -> None:
         """清理资源。
@@ -256,6 +277,8 @@ class AppBuilder:
         否则「交还租约」会变成一条关不掉的连接错误，而下一次启动要白等一个租约周期。
         """
         components = _components
+        if components and components.background_job_worker is not None:
+            await components.background_job_worker.stop()
         if components and components.run_recovery_service is not None:
             await components.run_recovery_service.stop()
         try:

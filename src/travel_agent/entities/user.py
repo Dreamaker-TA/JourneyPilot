@@ -218,3 +218,6 @@ class UserProfile(BaseModel):
     # 系统自动推理的画像快照（从知识图谱聚合，参考级）
     auto_portrait: str = ""
 
+    # 每次写入前进一格。后台任务用它固定入队那一刻的画像基线。
+    revision: int = 0
+

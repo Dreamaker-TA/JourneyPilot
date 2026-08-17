@@ -3,7 +3,7 @@ Memory Extractor (Application Layer)
 
 推理式记忆提取管线，替代 PreferenceLearner + EpisodicMemory。
 
-每轮对话结束后异步触发，单次 fast model 调用同时产出：
+由 `background_jobs` 的 memory_extraction 任务调用，单次 fast model 调用同时产出：
   - facts[]   : 结构化转述的具体事实（保留关键参数，短期可用）
   - portrait[]: 抽象推理的画像特征（归纳持久特征，长期积累）
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError
@@ -319,10 +320,27 @@ def _admit_extraction_result(
 # MemoryExtractor
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class MemoryExtractionOutcome:
+    """一次抽取的结果。调用方是 durable job，所以失败要抛，不要压成 False。"""
+
+    facts_written: int = 0
+    portraits_written: int = 0
+    rejections: Dict[str, int] = field(default_factory=dict)
+
+    @property
+    def wrote_anything(self) -> bool:
+        return self.facts_written > 0 or self.portraits_written > 0
+
+
+class MemoryExtractionFailed(RuntimeError):
+    """抽取本身没跑成（模型调用或解析失败）。可重试。"""
+
+
 class MemoryExtractor:
     """
     推理式记忆提取器。
-    每轮对话后异步调用，写入 memory_facts 和知识图谱。
+    由 `background_jobs` 的 memory_extraction 任务调用，写入 memory_facts 和知识图谱。
     """
 
     async def extract_from_turn(
@@ -331,26 +349,28 @@ class MemoryExtractor:
         session_id: str,
         user_msg: str,
         existing_portrait: str = "",
-    ) -> bool:
-        """
-        从一轮对话中提取事实和画像，异步写入存储。
-        非关键路径，失败时不抛出异常；但成败均计入 stats 并按 INFO/WARNING 分级记录（CB-05）。
+        source_message_id: str = "",
+    ) -> MemoryExtractionOutcome:
+        """从一轮对话中提取事实和画像并写入存储。
 
-        Returns:
-            True=有提取并写入，False=无内容或失败
+        `source_message_id` 是事实的幂等键来源：同一条来源消息抽出的同一句事实重复
+        执行只入库一次。失败一律抛出，由 job 层决定重试还是死信。
         """
         if not user_msg:
-            return False
+            return MemoryExtractionOutcome()
 
         stats = get_memory_extraction_stats()
         stats.record_attempt()
         try:
             result = await self._call_llm(user_msg, existing_portrait)
-            if result is None:
-                # LLM 调用或 JSON 解析失败（_call_llm 已记 warning）——如实计入失败，绝不静默。
-                stats.record_failure("llm_call_or_parse")
-                return False
+        except Exception as exc:
+            stats.record_failure(exc.__class__.__name__)
+            raise MemoryExtractionFailed(str(exc)) from exc
+        if result is None:
+            stats.record_failure("llm_call_or_parse")
+            raise MemoryExtractionFailed("记忆抽取模型调用或解析失败")
 
+        try:
             facts, portrait, rejections = _admit_extraction_result(
                 result,
                 user_message=user_msg[:_USER_MSG_TRUNCATE],
@@ -359,23 +379,22 @@ class MemoryExtractor:
             facts_written = 0
             portraits_written = 0
 
-            # 写入原子事实
             if facts:
                 from .memory_store import MemoryStore
                 store = MemoryStore()
                 for fact in facts:
-                    # save_fact 交回它写的那一行的 fact_id，写失败才是 None。
                     fact_id = await store.save_fact(
                         user_id=user_id,
                         session_id=session_id,
                         content=fact.content.strip(),
                         category=fact.category,
                         importance=fact.importance,
+                        source_message_id=source_message_id,
                     )
                     if fact_id is not None:
                         facts_written += 1
 
-            # 写入知识图谱 + 更新 auto_portrait
+            # 图谱 upsert 与画像聚合都是可重算的：重复执行不会长出第二份画像。
             if portrait:
                 from .memory_graph import MemoryGraph
                 graph = MemoryGraph()
@@ -392,39 +411,42 @@ class MemoryExtractor:
             if facts_written and not portraits_written:
                 from .user_profile import UserProfileMemory
                 await UserProfileMemory().ensure_profile_for_write(user_id)
-
-            stats.record_success(facts=facts_written, portraits=portraits_written)
-            wrote_anything = facts_written > 0 or portraits_written > 0
-            if wrote_anything:
-                logger.info(
-                    f"记忆抽取入库 user={user_id} session={session_id} "
-                    f"facts={facts_written} portrait={portraits_written}"
-                )
-            elif rejections:
-                # The model produced candidates and admission kept none.  This is
-                # not "nothing worth remembering this turn" — that case leaves
-                # ``rejections`` empty — so it gets its own counter and INFO line
-                # with the reasons attached.  A rejection streak is the shape a
-                # broken admission rule takes, and it has to be visible here.
-                reasons = ",".join(
-                    f"{reason}={count}" for reason, count in sorted(rejections.items())
-                )
-                stats.record_rejected_all(reasons)
-                logger.info(
-                    f"记忆抽取候选全部被拒 user={user_id} session={session_id} {reasons}"
-                )
-            else:
-                logger.debug(
-                    f"记忆抽取本轮无值可写 user={user_id} session={session_id}"
-                )
-            return wrote_anything
-
-        except Exception as e:
-            stats.record_failure(e.__class__.__name__)
+        except Exception as exc:
+            stats.record_failure(exc.__class__.__name__)
             logger.warning(
-                f"记忆抽取失败 user={user_id} session={session_id}: {e}", exc_info=True
+                f"记忆抽取写入失败 user={user_id} session={session_id}: {exc}", exc_info=True
             )
-            return False
+            raise
+
+        stats.record_success(facts=facts_written, portraits=portraits_written)
+        outcome = MemoryExtractionOutcome(
+            facts_written=facts_written,
+            portraits_written=portraits_written,
+            rejections=dict(rejections),
+        )
+        if outcome.wrote_anything:
+            logger.info(
+                f"记忆抽取入库 user={user_id} session={session_id} "
+                f"facts={facts_written} portrait={portraits_written}"
+            )
+        elif rejections:
+            # The model produced candidates and admission kept none.  This is
+            # not "nothing worth remembering this turn" — that case leaves
+            # ``rejections`` empty — so it gets its own counter and INFO line
+            # with the reasons attached.  A rejection streak is the shape a
+            # broken admission rule takes, and it has to be visible here.
+            reasons = ",".join(
+                f"{reason}={count}" for reason, count in sorted(rejections.items())
+            )
+            stats.record_rejected_all(reasons)
+            logger.info(
+                f"记忆抽取候选全部被拒 user={user_id} session={session_id} {reasons}"
+            )
+        else:
+            logger.debug(
+                f"记忆抽取本轮无值可写 user={user_id} session={session_id}"
+            )
+        return outcome
 
     # -----------------------------------------------------------------------
     # 内部实现
@@ -435,28 +457,26 @@ class MemoryExtractor:
         user_msg: str,
         existing_portrait: str,
     ) -> Optional[Dict[str, Any]]:
-        """调用 fast model 提取事实和画像，返回解析后的字典。"""
-        try:
-            from ..models.router import get_model_router
-            router = get_model_router()
-            llm = router.get_fast()
+        """调用 fast model 提取事实和画像，返回解析后的字典（解析不出返回 None）。
 
-            # 截断过长内容，控制 token 消耗
-            user_truncated = user_msg[:_USER_MSG_TRUNCATE]
-            portrait_truncated = existing_portrait[:_PORTRAIT_TRUNCATE] if existing_portrait else _PORTRAIT_FALLBACK
+        调用异常原样抛出：job 层要凭它区分「Provider 超时」与「答非所问」。
+        """
+        from ..models.router import get_model_router
+        router = get_model_router()
+        llm = router.get_fast()
 
-            prompt = _EXTRACTION_PROMPT.format(
-                user_message=user_truncated,
-                existing_portrait=portrait_truncated,
-            )
+        # 截断过长内容，控制 token 消耗
+        user_truncated = user_msg[:_USER_MSG_TRUNCATE]
+        portrait_truncated = existing_portrait[:_PORTRAIT_TRUNCATE] if existing_portrait else _PORTRAIT_FALLBACK
 
-            response = await llm.ainvoke([{"role": "user", "content": prompt}])
-            parsed = safe_parse_json(response)
-            if parsed is not None:
-                parsed.setdefault("facts", [])
-                parsed.setdefault("portrait", [])
-            return parsed
+        prompt = _EXTRACTION_PROMPT.format(
+            user_message=user_truncated,
+            existing_portrait=portrait_truncated,
+        )
 
-        except Exception as e:
-            logger.warning(f"记忆抽取 LLM 调用失败: {e}")
-            return None
+        response = await llm.ainvoke([{"role": "user", "content": prompt}])
+        parsed = safe_parse_json(response)
+        if parsed is not None:
+            parsed.setdefault("facts", [])
+            parsed.setdefault("portrait", [])
+        return parsed

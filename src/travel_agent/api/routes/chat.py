@@ -25,12 +25,12 @@ from ..schemas import ChatRequest
 from ..streaming import strip_non_display_blocks
 from .chat_helpers import (
     check_input_guard,
+    enqueue_memory_extraction,
     load_session_history,
     load_preset_context,
     load_user_profile,
     sse_event as _encode_sse_event,
     strip_thinking_text,
-    trigger_memory_extraction,
 )
 from ...services.public_delivery import (
     public_delivery_bundle,
@@ -1177,10 +1177,15 @@ async def chat_stream(
             )
             persisted = True
 
-            trigger_memory_extraction(
-                components.memory_extractor, LOCAL_USER_ID, session_id,
-                user_message,
-                _stream_profile.auto_portrait if _stream_profile else "",
+            await enqueue_memory_extraction(
+                user_id=LOCAL_USER_ID,
+                session_id=session_id,
+                user_message=user_message,
+                user_message_id=user_message_id,
+                assistant_message_id=message_id,
+                profile_revision=_stream_profile.revision if _stream_profile else 0,
+                portrait_baseline=_stream_profile.auto_portrait if _stream_profile else "",
+                background_job_worker=components.background_job_worker,
             )
 
             current_bundle = None

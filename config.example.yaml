@@ -133,6 +133,14 @@ run_control:
   # 取消 / 追加要求先落 trip_run_commands，执行器按这个间隔轮询（同进程会被立即唤醒）。
   command_poll_seconds: 2.0
 
+# 后台任务 worker（记忆抽取等，落 background_jobs）。
+background_jobs:
+  poll_seconds: 5.0
+  lease_seconds: 60
+  batch_size: 1
+  # 已完成任务的保留天数；dead 任务不清理，留到用户确认。
+  completed_retention_days: 30
+
 # Hybrid RAG second-stage rerank (Settings.rerank). llm needs no extra install.
 rerank:
   enabled: true

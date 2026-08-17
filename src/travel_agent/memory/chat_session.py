@@ -321,6 +321,32 @@ class ChatSessionMemory:
         collected.reverse()
         return collected
 
+    async def get_message_content(
+        self, *, session_id: str, message_id: str
+    ) -> Optional[str]:
+        """按消息 id 读回正文。会话或消息不在了返回 None。
+
+        后台抽取任务只带引用，正文永远从这里读 —— payload 里复制一份原文就会有两份
+        会各自漂移的真相。
+        """
+        if not session_id or not message_id:
+            return None
+        async with get_db_session() as session:
+            result = await session.execute(
+                text("""
+                    SELECT payload ->> 'content' AS content
+                    FROM chat_session_events
+                    WHERE session_id = :sid
+                      AND event_type IN ('message.user', 'message.assistant')
+                      AND payload ->> 'message_id' = :mid
+                    ORDER BY event_order ASC
+                    LIMIT 1
+                """),
+                {"sid": session_id, "mid": message_id},
+            )
+            row = result.mappings().first()
+        return str(row["content"]) if row and row["content"] is not None else None
+
     async def save_turn(
         self,
         *,
@@ -831,6 +857,10 @@ class ChatSessionMemory:
         return messages
 
     async def delete_session(self, user_id: str, session_id: str) -> bool:
+        """删除会话，并取消引用它的未完成后台任务。
+
+        留着那些任务只会让 worker 反复领到一条读不到源消息的活。
+        """
         async with get_db_session() as session:
             result = await session.execute(
                 text("SELECT user_id FROM chat_sessions WHERE session_id = :sid"),
@@ -846,7 +876,11 @@ class ChatSessionMemory:
                 text("DELETE FROM chat_sessions WHERE session_id = :sid"),
                 {"sid": session_id},
             )
-            return True
+
+        from ..infrastructure.background_job_store import get_background_job_store
+
+        await get_background_job_store().cancel_for_session(session_id)
+        return True
 
     async def update_session_title(
         self, user_id: str, session_id: str, new_title: str

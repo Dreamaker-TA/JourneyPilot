@@ -97,7 +97,7 @@ async def get_status():
     # 检查 Redis 连接
     redis_ok, _ = await _probe_redis()
 
-    # 记忆抽取管线累计计数（CB-05）：让 fire-and-forget 抽取链路的健康可观测。
+    # 记忆抽取管线累计计数：抽取本身的成败；任务积压在 /health/ready 的 background_jobs。
     from ...memory.extraction_stats import get_memory_extraction_stats
 
     return SystemStatus(
@@ -118,7 +118,7 @@ async def get_status():
 # ``database_schema`` 刻意不在这份名单里 —— 它拦门禁，判据与
 # ``db/report.py::GATES_READINESS`` 同源。
 _NON_BLOCKING_COMPONENTS = frozenset(
-    {"mcp", "data_snapshots", "knowledge_corpus", "run_execution"}
+    {"mcp", "data_snapshots", "knowledge_corpus", "run_execution", "background_jobs"}
 )
 
 
@@ -149,6 +149,25 @@ async def _probe_run_execution(components: Any) -> Dict[str, Any]:
     except Exception as exc:
         payload["pending_commands"] = None
         payload["command_message"] = f"控制命令计数失败: {exc}"
+    return payload
+
+
+async def _probe_background_jobs(components: Any) -> Dict[str, Any]:
+    """后台任务的积压、死信与最老的待处理任务。**报出来，不拦门禁**。
+
+    记忆抽取失败不影响回答问题，但「有几条记忆没抽出来、有没有卡住」必须有一处能看见。
+    """
+
+    worker = components.background_job_worker
+    payload: Dict[str, Any] = {"ready": True, "worker_running": worker is not None}
+    try:
+        payload["counts"] = await components.background_job_store.counts_by_type_status()
+        payload["oldest_pending_seconds"] = (
+            await components.background_job_store.oldest_pending_seconds()
+        )
+    except Exception as exc:
+        payload["counts"] = None
+        payload["message"] = f"后台任务计数失败: {exc}"
     return payload
 
 
@@ -319,6 +338,8 @@ async def readiness() -> JSONResponse:
         "database_schema": _probe_schema_report(components),
         # 执行租约与启动恢复：报出来不拦门禁，理由见 `_probe_run_execution`。
         "run_execution": await _probe_run_execution(components),
+        # 后台任务积压：同样报出来不拦门禁，理由见 `_probe_background_jobs`。
+        "background_jobs": await _probe_background_jobs(components),
     }
     ready = all(
         component["ready"]

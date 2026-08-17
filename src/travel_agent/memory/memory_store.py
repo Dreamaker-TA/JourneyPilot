@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
+from ..entities.background_job import memory_fact_digest
 from ..entities.memory_lifecycle import MemoryRetentionPolicy, MemoryRetentionStatus
 from ..infrastructure.database import get_db_session
 
@@ -101,6 +102,7 @@ class MemoryStore:
         category: str = "preference",
         importance: int = 5,
         retention_policy: Optional[MemoryRetentionPolicy] = None,
+        source_message_id: str = "",
     ) -> Optional[int]:
         """
         计算 embedding 并将事实写入 memory_facts 表，**交回这一行的 ``fact_id``**。
@@ -108,6 +110,9 @@ class MemoryStore:
         写入必须自己说清楚它写的是哪一条：调用方要知道
         「刚建的是哪一条」只能拿内容去全量回读里猜。失败时返回 ``None``
         —— 非关键路径，仍然不抛。
+
+        给出 ``source_message_id`` 时按 (user, 来源消息, 正文) 摘要去重：抽取任务是
+        at-least-once 的，重复消费不得让同一句事实在库里出现两遍。
         """
         if not content or not user_id:
             return None
@@ -118,6 +123,11 @@ class MemoryStore:
             policy = retention_policy or MemoryRetentionPolicy()
             expires_at = policy.expires_at_for(category, importance)
             policy_metadata = policy.to_metadata(category, importance)
+            digest = (
+                memory_fact_digest(user_id, source_message_id, content)
+                if source_message_id
+                else None
+            )
             embedding = await self._compute_embedding(content)
             vec_str = f"[{','.join(str(v) for v in embedding)}]"
 
@@ -126,10 +136,14 @@ class MemoryStore:
                     text("""
                         INSERT INTO memory_facts
                             (user_id, session_id, content, category, importance, embedding,
-                             expires_at, retention_category, retention_policy, created_at)
+                             expires_at, retention_category, retention_policy,
+                             source_message_id, fact_digest, created_at)
                         VALUES
                             (:uid, :sid, :content, :cat, :imp, CAST(:emb AS vector),
-                             :expires_at, :retention_category, CAST(:retention_policy AS jsonb), NOW())
+                             :expires_at, :retention_category, CAST(:retention_policy AS jsonb),
+                             :source_message_id, :fact_digest, NOW())
+                        ON CONFLICT (user_id, fact_digest) WHERE fact_digest IS NOT NULL
+                        DO NOTHING
                         RETURNING fact_id
                     """),
                     {
@@ -142,9 +156,21 @@ class MemoryStore:
                         "expires_at": expires_at,
                         "retention_category": category or "standard",
                         "retention_policy": _json.dumps(policy_metadata, ensure_ascii=False),
+                        "source_message_id": source_message_id,
+                        "fact_digest": digest,
                     },
                 )
                 fact_id = result.scalar_one_or_none()
+                if fact_id is None and digest is not None:
+                    # 这一句已经在库里 —— 重复消费，交回原来那一行。
+                    existing = await session.execute(
+                        text(
+                            "SELECT fact_id FROM memory_facts "
+                            "WHERE user_id = :uid AND fact_digest = :digest"
+                        ),
+                        {"uid": user_id, "digest": digest},
+                    )
+                    fact_id = existing.scalar_one_or_none()
             if fact_id is None:
                 logger.warning(f"记忆事实写入没有交回 fact_id user={user_id} category={category}")
                 return None
@@ -513,13 +539,23 @@ class InMemoryMemoryStore(MemoryStore):
         category: str = "preference",
         importance: int = 5,
         retention_policy: Optional[MemoryRetentionPolicy] = None,
+        source_message_id: str = "",
     ) -> Optional[int]:
-        # 与 SQL 那一半同一个合同：写入交回它写的那一行的 fact_id。
+        # 与 SQL 那一半同一个合同：写入交回它写的那一行的 fact_id，摘要相同不写第二行。
         if not content or not user_id:
             return None
         importance = max(_IMPORTANCE_MIN, min(_IMPORTANCE_MAX, int(importance)))
         policy = retention_policy or self._policy
         created_at = datetime.now(timezone.utc)
+        digest = (
+            memory_fact_digest(user_id, source_message_id, content)
+            if source_message_id
+            else None
+        )
+        if digest is not None:
+            for existing in self._facts:
+                if existing.get("fact_digest") == digest and existing["user_id"] == user_id:
+                    return int(existing["fact_id"])
         fact_id = self._next_id
         self._facts.append({
             "fact_id": fact_id,
@@ -529,6 +565,8 @@ class InMemoryMemoryStore(MemoryStore):
             "category": category,
             "importance": importance,
             "created_at": created_at,
+            "source_message_id": source_message_id,
+            "fact_digest": digest,
             "expires_at": policy.expires_at_for(category, importance, created_at=created_at),
             "retention_policy": policy.to_metadata(category, importance),
         })

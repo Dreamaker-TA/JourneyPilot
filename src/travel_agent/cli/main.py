@@ -124,6 +124,27 @@ def _plan_lines(plan: Any) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _background_job_backlog(conn: Any) -> dict[str, Any]:
+    """后台任务的积压与死信。表还没建出来时如实说读不到，不算作 0。"""
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, count(*) FROM background_jobs GROUP BY status")
+            counts = {str(status): int(total) for status, total in cur.fetchall()}
+    except Exception as exc:
+        conn.rollback()
+        first_line = str(exc).splitlines()[0] if str(exc) else ""
+        return {"readable": False, "problem": f"{type(exc).__name__}: {first_line}"}
+    return {
+        "readable": True,
+        "pending": counts.get("pending", 0),
+        "retry_wait": counts.get("retry_wait", 0),
+        "running": counts.get("running", 0),
+        "dead": counts.get("dead", 0),
+        "completed": counts.get("completed", 0),
+    }
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from ..db.backup import list_backups
     from ..db.checkpoint_schema import missing_checkpoint_tables
@@ -145,6 +166,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 allow_destructive=False,
             )
             missing_checkpoints = missing_checkpoint_tables(conn)
+            job_backlog = _background_job_backlog(conn)
             # 「现在有人在迁移吗」：拿到锁就立刻还回去，doctor 不持锁。
             lock_free = try_acquire(conn)
             if lock_free:
@@ -184,6 +206,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "next_action": "journeypilot migrate" if missing_checkpoints else "",
     }
 
+    payload["background_jobs"] = job_backlog
+
     backup_root = _backup_root(settings, args.backup_dir)
     backups = list_backups(backup_root)
     payload["backups"] = {"root": str(backup_root), "count": len(backups), "entries": backups[:5]}
@@ -208,6 +232,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         lines.append(
             "checkpoint 表   "
             + ("就绪" if not missing_checkpoints else f"缺 {'、'.join(missing_checkpoints)} —— journeypilot migrate")
+        )
+        lines.append(
+            "后台任务        "
+            + (
+                f"待处理 {job_backlog['pending']}、重试等待 {job_backlog['retry_wait']}、"
+                f"死信 {job_backlog['dead']}"
+                if job_backlog.get("readable")
+                else f"读不到：{job_backlog.get('problem')}"
+            )
         )
         lines.append(f"迁移锁          {'空闲' if lock_free else '被占用（另一个 migrate 在跑）'}")
         lines.append(f"备份目录        {backup_root}（{len(backups)} 份）")

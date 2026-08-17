@@ -108,6 +108,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 except Exception as e:
                     logger.error("启动恢复普查失败: %s", e, exc_info=True)
                     degraded.append(f"启动恢复普查失败（{e}）")
+            # 上一个进程留下的后台任务在这里被重新领走：它们的最终事实在 background_jobs，
+            # 不在任何一个已经退出的 Event Loop 里。
+            worker = components.background_job_worker
+            if worker is not None:
+                try:
+                    await worker.cleanup()
+                except Exception as e:
+                    logger.warning("后台任务清理失败: %s", e)
+                worker.start()
         # checkpointer 的判据必须与 readiness 逐字同源（system.py::readiness 的
         # `bool(components.checkpointer) or not gates_enabled`）：门关掉时没有
         # checkpointer 是合法配置，不是降级。两处分叉就会一处报警一处放行。

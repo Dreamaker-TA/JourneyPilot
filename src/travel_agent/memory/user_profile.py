@@ -55,8 +55,17 @@ class UserProfileMemory:
             await self.save_user_profile(profile)
         return profile
 
+    async def get_revision(self, user_id: str) -> int:
+        """画像版本号。延迟执行的后台任务用它固定「入队时看到的是哪一版画像」。"""
+        async with get_db_session() as session:
+            result = await session.execute(
+                text("SELECT revision FROM user_profiles WHERE user_id = :uid"),
+                {"uid": user_id},
+            )
+            return int(result.scalar() or 0)
+
     async def save_user_profile(self, profile: UserProfile) -> None:
-        """保存或更新用户画像（upsert）"""
+        """保存或更新用户画像（upsert）。每次写入 revision 前进一格。"""
         now = datetime.now(timezone.utc).isoformat()
         profile.updated_at = now
         if not profile.created_at:
@@ -66,13 +75,15 @@ class UserProfileMemory:
             await session.execute(
                 text("""
                     INSERT INTO user_profiles
-                        (user_id, display_name, preferences, auto_portrait, created_at, updated_at)
+                        (user_id, display_name, preferences, auto_portrait, revision,
+                         created_at, updated_at)
                     VALUES
-                        (:uid, :name, CAST(:prefs AS jsonb), :portrait, :created, :updated)
+                        (:uid, :name, CAST(:prefs AS jsonb), :portrait, 1, :created, :updated)
                     ON CONFLICT (user_id) DO UPDATE SET
                         display_name = EXCLUDED.display_name,
                         preferences = EXCLUDED.preferences,
                         auto_portrait = EXCLUDED.auto_portrait,
+                        revision = user_profiles.revision + 1,
                         updated_at = EXCLUDED.updated_at
                 """),
                 {
@@ -137,6 +148,7 @@ class UserProfileMemory:
             display_name=row.get("display_name") or "",
             preferences=TravelPreference(**prefs_data),
             auto_portrait=row.get("auto_portrait") or "",
+            revision=int(row.get("revision") or 0),
             created_at=str(row.get("created_at", "")),
             updated_at=str(row.get("updated_at", "")),
         )

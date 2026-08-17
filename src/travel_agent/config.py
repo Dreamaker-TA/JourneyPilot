@@ -254,6 +254,19 @@ class RunControlConfig(BaseModel):
         return self
 
 
+class BackgroundJobsConfig(BaseModel):
+    """durable 后台任务 worker 的边界。"""
+
+    #: 队列空闲时的轮询间隔。入队方会直接唤醒 worker，所以这是通知丢失时的上界延迟。
+    poll_seconds: float = Field(default=5.0, gt=0)
+    #: 任务租约。执行中每 1/3 租约续一次；进程崩溃后租约过期，任务重新可领取。
+    lease_seconds: int = Field(default=60, gt=0)
+    #: 一次领取几条。单机产品不需要并行消费，默认一条一条来。
+    batch_size: int = Field(default=1, ge=1)
+    #: 已完成任务的保留天数。dead 任务不参与清理，留到用户确认。
+    completed_retention_days: int = Field(default=30, ge=1)
+
+
 class GeocodingConfig(BaseModel):
     """OSM 地点 provider（Nominatim / Overpass）访问配置。"""
 
@@ -601,6 +614,7 @@ class Settings(BaseModel):
     checkpoint_retention: CheckpointRetentionConfig = Field(default_factory=CheckpointRetentionConfig)
     data_snapshots: DataSnapshotsConfig = Field(default_factory=DataSnapshotsConfig)
     run_control: RunControlConfig = Field(default_factory=RunControlConfig)
+    background_jobs: BackgroundJobsConfig = Field(default_factory=BackgroundJobsConfig)
     geocoding: GeocodingConfig = Field(default_factory=GeocodingConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     provider_snapshot_cache: ProviderSnapshotCacheConfig = Field(default_factory=ProviderSnapshotCacheConfig)

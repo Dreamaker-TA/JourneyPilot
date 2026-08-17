@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -156,36 +155,48 @@ async def load_session_history(
         raise HTTPException(status_code=500, detail="会话历史服务不可用")
 
 
-def _memory_extraction_done(task: "asyncio.Task") -> None:
-    """fire-and-forget 抽取任务收尾（CB-05）：抽取内部已 catch 并计入 stats，
-    这里兜住任务级异常（取消除外），避免 asyncio 把未预期错误静默吞掉。"""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.warning(f"记忆抽取任务异常终止: {exc}")
-
-
-def trigger_memory_extraction(
-    memory_extractor,
+async def enqueue_memory_extraction(
+    *,
     user_id: str,
     session_id: str,
-    user_msg: str,
-    existing_portrait: str,
+    user_message: str,
+    user_message_id: str,
+    assistant_message_id: str,
+    profile_revision: int,
+    portrait_baseline: str,
+    background_job_worker=None,
 ) -> None:
-    """触发异步记忆提取（fire-and-forget）。"""
-    if not user_msg:
+    """把这一轮的记忆抽取排进 `background_jobs`。
+
+    在聊天保存事务之后调用：任务只带引用，正文由 worker 从会话记录读回。画像基线随
+    payload 固定，延迟几小时才执行的抽取不会改用另一版画像去判「这条已经知道了」。
+    """
+    if not user_message or not user_message_id:
         return
+    from ...entities.background_job import (
+        BackgroundJobType,
+        memory_extraction_dedupe_key,
+    )
+    from ...infrastructure.background_job_store import get_background_job_store
+
     try:
-        task = asyncio.ensure_future(memory_extractor.extract_from_turn(
-            user_id=user_id,
-            session_id=session_id,
-            user_msg=user_msg,
-            existing_portrait=existing_portrait,
-        ))
-        task.add_done_callback(_memory_extraction_done)
+        await get_background_job_store().enqueue(
+            BackgroundJobType.MEMORY_EXTRACTION,
+            memory_extraction_dedupe_key(session_id, assistant_message_id),
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "user_message_id": user_message_id,
+                "assistant_message_id": assistant_message_id,
+                "profile_revision": profile_revision,
+                "portrait_baseline": portrait_baseline,
+            },
+        )
     except Exception as e:
-        logger.warning(f"记忆提取调度失败: {e}")
+        logger.warning(f"记忆抽取入队失败: {e}")
+        return
+    if background_job_worker is not None:
+        background_job_worker.notify()
 
 
 # ---------------------------------------------------------------------------
