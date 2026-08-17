@@ -20,6 +20,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Type
 
 from langgraph.errors import GraphInterrupt
 
+from ..entities.run_budget import RunBudgetSnapshot
+from .run_budget import RunBudgetLedger, ledger_for, peek_ledger, seed_run_budget
 from .run_deadline import (
     DeadlineObservation,
     clear_process_deadline_anchor,
@@ -60,6 +62,14 @@ node_lifecycle_sink: contextvars.ContextVar[Optional[NodeLifecycleSink]] = conte
 # every graph boundary writes the observed value back into state/checkpoint.
 current_run_deadline: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
     "current_run_deadline",
+    default=None,
+)
+
+# 同上，但计的是调用数 / token / 费用。快照来自 state（随 checkpoint 走），账本在
+# `workflows/run_budget.py`（进程内，按 run_id 索引）。低层调用点拿不到
+# ``TravelAgentState``，所以它们从这里取。
+current_run_budget: contextvars.ContextVar[Optional[RunBudgetSnapshot]] = contextvars.ContextVar(
+    "current_run_budget",
     default=None,
 )
 
@@ -389,6 +399,67 @@ def remaining_model_seconds(operation: str) -> Optional[float]:
     return remaining
 
 
+def current_budget_ledger() -> Optional[RunBudgetLedger]:
+    """这个执行上下文的预算账本；没有封存过预算的 Run 返回 ``None``。
+
+    ``None`` 是合法状态而不是错误：快问快答与授权之前的阶段不封预算，那些路径本来就
+    受 Deadline 约束，给它们凭空造一份预算等于给一个没有 owner 的数字下判断。
+    """
+
+    snapshot = current_run_budget.get()
+    run_id = current_run_id.get()
+    if snapshot is None or not run_id:
+        return peek_ledger(run_id)
+    return ledger_for(run_id, snapshot)
+
+
+async def ensure_budget_baseline() -> Optional[RunBudgetLedger]:
+    """让这个 Run 在本进程的账本带上台账里已花的量，只做一次。
+
+    在**第一个节点边界**做而不是在图入口：预算快照只有在 Draft 被授权之后才存在，
+    而入口那一刻还不知道这个 Run 有没有预算。
+    """
+
+    snapshot = current_run_budget.get()
+    run_id = current_run_id.get()
+    if snapshot is None or not run_id:
+        return None
+    ledger = ledger_for(run_id, snapshot)
+    if ledger.seeded:
+        return ledger
+    from ..infrastructure.cost_ledger_store import get_cost_ledger_store
+
+    return await seed_run_budget(
+        run_id, snapshot, cost_ledger_store=get_cost_ledger_store()
+    )
+
+
+def guard_run_budget(
+    operation: str,
+    *,
+    llm_calls: int = 0,
+    tool_calls: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> None:
+    """在发起一次新调用之前判预算。超出即抛 `RunBudgetExhausted`。
+
+    参数是**本次最坏开销**的预估。调用之后再记账拦不住超支，所以这一跳必须发生在
+    调用之前。
+    """
+
+    ledger = current_budget_ledger()
+    if ledger is None:
+        return
+    ledger.guard(
+        operation,
+        llm_calls=llm_calls,
+        tool_calls=tool_calls,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
 def remaining_delivery_seconds(operation: str) -> Optional[float]:
     """Return the shared finalization budget, or reject post-deadline work.
 
@@ -555,6 +626,9 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
         token_node = current_node.set(node_name)
         token_agent = current_agent.set(node_name)
         token_deadline = current_run_deadline.set(None)
+        # 预算快照是 Run 的属性、不随节点变化，所以在这里绑一次，节点里调到的每一层
+        # 助手函数都免费继承它。
+        token_budget = current_run_budget.set(getattr(state, "run_budget", None))
         # The window a node's model calls draw on is a property of the node, so
         # it is bound here with the other run attribution rather than inside each
         # node body — helper functions the node calls inherit it for free.
@@ -565,6 +639,7 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
         ts_ms = run_ts_ms()
         try:
             check_cancel_requested(node_name)
+            await ensure_budget_baseline()
             deadline = getattr(state, "run_deadline", None)
             observation: Optional[DeadlineObservation] = None
             if deadline is not None and hasattr(state, "model_copy"):
@@ -696,6 +771,7 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
             current_node.reset(token_node)
             current_run_id.reset(token_run)
             current_run_deadline.reset(token_deadline)
+            current_run_budget.reset(token_budget)
             current_model_window.reset(token_window)
 
     return _wrapped

@@ -44,6 +44,7 @@ from ...infrastructure.cost_ledger_store import cost_event_summary
 from ...tools.exposure_ledger import get_tool_exposure_ledger
 from ...workflows.delivery_finalizer import DeliveryFinalizationError
 from ...workflows.travel_planning import CheckpointContractError
+from ...workflows.run_budget import peek_ledger, release_ledger
 from ...workflows.run_control import (
     RunCancelled,
     node_timing_registry,
@@ -632,6 +633,12 @@ async def chat_stream(
             except Exception as exc:
                 logger.debug(f"tool_context_saving 汇总失败（不影响主流）: {exc}")
             summary["record_failed"] = record_failed
+            # 预算读数随成本汇总一起下发：花了多少和还能花多少是同一个问题的两半，
+            # 分两个通道送会让界面有机会只显示其中一半。账本不在时不塞占位值 ——
+            # 没封过预算的 Run（快问快答）本来就没有这个数。
+            budget_ledger = peek_ledger(trip_run.run_id)
+            if budget_ledger is not None:
+                summary["run_budget"] = budget_ledger.report()
             if terminal:
                 if record_failed:
                     event_type = "run.cost_record_failed"
@@ -844,6 +851,9 @@ async def chat_stream(
             get_tool_exposure_ledger().clear(trip_run.run_id)
             # 回收本 run 未被 trace 读走的节点计时（interrupt 的门节点等；进程内瞬态）。
             node_timing_registry.clear(trip_run.run_id)
+            # 回收预算账本。消耗量的最终事实在 `run_llm_calls`，下一次接管这个 run 的
+            # 进程会从那里读回基线，所以这里丢掉进程内的那份是安全的。
+            release_ledger(trip_run.run_id)
 
         def finish_detached_workflow(task: asyncio.Task) -> None:
             try:

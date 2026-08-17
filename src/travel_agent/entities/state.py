@@ -37,6 +37,7 @@ from .delivery_bundle import (
     RunDeadlineSnapshot,
     TerminalAttribution,
 )
+from .run_budget import RunBudgetSnapshot
 from .weather_planning import DestinationGeoPoint
 from .itinerary_composition_v2 import ItineraryCompositionDraft, LocalConnectorGap
 from .provider_evidence import (
@@ -255,6 +256,11 @@ class TravelAgentState(BaseModel):
     run_deadline: Annotated[
         Optional[RunDeadlineSnapshot], _merge_run_deadline_allow_clear
     ] = None
+    # 与 run_deadline 同一代：Draft 被授权时封存，被清除时一起清。整值替换 —— 上限
+    # 不会在 fan-in 里「合并」出一个新的上限。
+    run_budget: Annotated[
+        Optional[RunBudgetSnapshot], _take_latest_value_allow_clear
+    ] = None
     gate_failure_attributions: Annotated[
         Dict[str, GateFailureAttribution], _merge_gate_failure_attributions_allow_clear
     ] = Field(default_factory=dict)
@@ -428,6 +434,7 @@ class TravelAgentState(BaseModel):
         draft = self.minimum_delivery_draft
         dependent_values = (
             self.run_deadline,
+            self.run_budget,
             self.terminal_attribution,
         )
         if draft is None:
@@ -456,6 +463,10 @@ class TravelAgentState(BaseModel):
                 raise ValueError("run deadline belongs to another minimum delivery draft")
             if self.run_deadline.planning_authorized_at != draft.planning_authorized_at:
                 raise ValueError("run deadline authorization time differs from minimum delivery draft")
+        # 预算与 Deadline 同进同出：一个封了预算却没有 Deadline 的 Run 说明有一条
+        # 路径只封了一半，而那条路径上的另一半不受任何上限约束。
+        if (self.run_budget is None) != (self.run_deadline is None):
+            raise ValueError("run budget and run deadline must be sealed together")
         if self.terminal_attribution is not None and self.terminal_attribution.draft_id != draft.draft_id:
             raise ValueError("terminal attribution belongs to another minimum delivery draft")
         for attribution in self.gate_failure_attributions.values():

@@ -45,6 +45,7 @@ from ...services.run_completion_metrics import (
     RunCompletionMetrics,
     recompute_completion_metrics,
 )
+from ...services.blocking_work import BlockingWorkBusy, run_blocking
 from ...services.pdf_export import (
     PdfFontUnavailable,
     ReportOutOfDateError,
@@ -647,7 +648,11 @@ async def export_current_trip_report_pdf(
             },
         )
     try:
-        artifact = render_trip_report_pdf(
+        # ReportLab 是同步的、吃满一个核，而这条路上还有别人的 SSE 保活帧要发。
+        # 线程里接到的是一份 immutable Bundle 的完整快照，不读也不改任何共享状态。
+        artifact = await run_blocking(
+            "pdf_export",
+            render_trip_report_pdf,
             current,
             exported_at=datetime.now(timezone.utc),
         )
@@ -662,6 +667,15 @@ async def export_current_trip_report_pdf(
             detail={
                 "code": "pdf_temporarily_unavailable",
                 "message": "PDF 暂时无法生成，请稍后重试。",
+            },
+        ) from exc
+    except BlockingWorkBusy as exc:
+        # 渲染通道排满不是这份报告的问题，也不改 Run/Bundle 状态：等一会儿再导。
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "pdf_export_busy",
+                "message": "正在导出的报告太多，稍后再试。",
             },
         ) from exc
     return Response(

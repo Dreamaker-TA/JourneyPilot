@@ -46,10 +46,13 @@ from ..tools.registry import (
     get_tool_registry,
     search_tool_items,
 )
+from ..workflows.run_budget import RunBudgetExhausted
 from ..workflows.run_control import (
     ModelWindowClosed,
     await_model_operation,
     check_cancel_requested,
+    current_budget_ledger,
+    guard_run_budget,
     remaining_model_seconds,
     run_ts_ms,
 )
@@ -630,6 +633,38 @@ async def execute_tool(
         )
         envelope["metadata"]["research_window_closed"] = True
         return envelope
+    # 预算和 Deadline 在这里是同一类边界，收口方式也一样：返回一个普通的 failed
+    # envelope，让 Worker 把这条内容缺口交给 Candidate Gate。把「钱用完了」抛成异常
+    # 会变成一次 Run 失败，而它其实是一次可解释的降级。
+    try:
+        guard_run_budget(f"tool.{tool_name}", tool_calls=1)
+    except RunBudgetExhausted as exc:
+        envelope = build_tool_execution_envelope(
+            tool_name=tool_name,
+            arguments=arguments,
+            status=ToolExecutionStatus.FAILED.value,
+            error=exc.reason_code,
+            source=str(main_meta.get("source") or "unknown"),
+            server_name=main_meta.get("server_name"),
+            category=str(main_meta.get("category") or "other"),
+            activation_source=activation_source,
+        )
+        envelope["metadata"]["run_budget_exhausted"] = exc.dimension
+        return envelope
+    ledger = current_budget_ledger()
+    if ledger is not None and ledger.tool_retries_exhausted(tool_name):
+        envelope = build_tool_execution_envelope(
+            tool_name=tool_name,
+            arguments=arguments,
+            status=ToolExecutionStatus.FAILED.value,
+            error="tool_retries_exhausted",
+            source=str(main_meta.get("source") or "unknown"),
+            server_name=main_meta.get("server_name"),
+            category=str(main_meta.get("category") or "other"),
+            activation_source=activation_source,
+        )
+        envelope["metadata"]["tool_retries_exhausted"] = tool_name
+        return envelope
     gateway = tool_gateway or get_tool_gateway()
     before = await gateway.before_call(
         tool_name=tool_name,
@@ -751,6 +786,9 @@ async def execute_tool(
     for attempt in range(max_retries + 1):
         try:
             remaining_model_seconds(f"tool.{tool_name}.attempt_{attempt + 1}")
+            # 每一次尝试都算一次调用：重试也花配额，也一样能变成无限循环。
+            if ledger is not None:
+                ledger.record_tool_call(tool_name)
             result = await await_model_operation(
                 registry.execute(tool_name, **arguments),
                 operation=f"tool.{tool_name}.attempt_{attempt + 1}",
@@ -894,6 +932,9 @@ async def execute_tool(
                     )
                     if fallback_before.envelope is not None:
                         return fallback_before.envelope
+                    # 降级也是一次真实的 Provider 调用，记在备用工具自己的名下。
+                    if ledger is not None:
+                        ledger.record_tool_call(fallback_name)
                     fallback_result = await await_model_operation(
                         registry.execute(fallback_name, **fallback_args),
                         operation=f"tool.{fallback_name}.fallback",

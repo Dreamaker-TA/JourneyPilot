@@ -277,6 +277,7 @@ async def plan_gate_node(state: TravelAgentState, config: Optional[RunnableConfi
                 "plan_gate_revision_count": revision_count + 1,
                 "minimum_delivery_draft": None,
                 "run_deadline": None,
+                "run_budget": None,
                 "gate_failure_attributions": {},
                 "candidate_research_gaps": [],
                 "candidate_gate_attempts": {},

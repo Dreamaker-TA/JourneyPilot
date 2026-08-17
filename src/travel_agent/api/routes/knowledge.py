@@ -8,15 +8,20 @@
 
 from __future__ import annotations
 
-import io
 import logging
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 
 from ...builders import get_components
+from ...config import get_settings
 from ...local_profile import LOCAL_USER_ID
 from ...rag.collections import canonical_logical_collection, user_scoped_collection
+from ...rag.sources.document_parse import (
+    SUPPORTED_SUFFIXES,
+    DocumentRejected,
+    parse_upload,
+)
 from ...utils.user_text import content_length
 from ..schemas import (
     KnowledgeCollectionStatsResponse,
@@ -32,9 +37,6 @@ from ..schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
-_SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
-# Hard upload size limit (bytes).
-_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # 一份「进得去」的资料至少要有这么多非空白字符。**这个数只在这里写一次**：
 # 它必须对四种格式一视同仁 —— 否则一个空 .md 上传成功、回执写着「已成功索引 0 个
 # 文本块」，而「成功」与「0 个」在同一句话里。同一个入口对四种格式给两种答案，
@@ -50,11 +52,25 @@ _MIN_INDEXABLE_CHARS = 8
 # `message` 里**不许**出现被 catch 到的异常原文：它是给这台机器看的（已经进
 # `logger.warning`），发出去只会变成一句没人能照着做的话。
 
-# 「太大了」在这条路上判两次（先看 content-length，再看真读进来多少），
-# 而它是**同一种失败**，所以这份 detail 只写一次。
-_TOO_LARGE_DETAIL = {
-    "code": "file_too_large",
-    "message": f"文件超过大小上限（{_MAX_UPLOAD_BYTES} 字节）",
+# 每一种 code 对应的 HTTP 状态码与那句给日志的话。上限值从 `IngestConfig` 读，
+# 不在这里再写一遍。
+_REJECTION_STATUS = {
+    "unsupported_file_type": 400,
+    "file_too_large": 413,
+    "document_unreadable": 422,
+    "document_too_complex": 422,
+    "document_parse_timeout": 422,
+    "no_indexable_text": 422,
+    "ingest_busy": 503,
+}
+_REJECTION_MESSAGE = {
+    "unsupported_file_type": "这个文件格式不在支持范围内",
+    "file_too_large": "文件超过大小上限",
+    "document_unreadable": "这份文档打不开，文件内容可能已损坏或不是它声称的格式",
+    "document_too_complex": "这份文档超出了解析上限（页数、条目数或展开后的体积）",
+    "document_parse_timeout": "这份文档在解析上限内没能读完",
+    "no_indexable_text": "没有可索引的正文（可能是空文件或扫描版 PDF）",
+    "ingest_busy": "正在解析的文档太多，稍后再试",
 }
 
 
@@ -106,56 +122,23 @@ def _require_indexable_text(text: str) -> str:
     return text
 
 
-def _document_unreadable(kind: str, filename: str, error: Exception) -> HTTPException:
-    """一份打不开的文档：说清是哪一种失败，**不转发解析器的原话**。
+def _rejection_to_http(rejection: DocumentRejected) -> HTTPException:
+    """把解析边界的判决投影到 HTTP，**不转发解析器的原话**。
 
     界面那一侧按 code 分辨失败种类，读不到就只能按状态码回落到「请求的信息不完整，
     请刷新页面后重试」，而请求是完整的、刷新也不会让一份损坏的 PDF 变好。解析器那句
-    原话（`Stream has ended unexpectedly` / `File is not a zip file`）留在日志里，
-    那是它该待的地方。
+    原话（`Stream has ended unexpectedly` / `File is not a zip file`）已经进了
+    `document_parse` 的日志，那是它该待的地方。
     """
 
-    logger.warning("%s 解析失败 [%s]: %s", kind, filename, error)
+    code = rejection.code
     return HTTPException(
-        status_code=422,
+        status_code=_REJECTION_STATUS.get(code, 422),
         detail={
-            "code": "document_unreadable",
-            "message": "这份文档打不开，文件内容可能已损坏或不是它声称的格式",
+            "code": code,
+            "message": _REJECTION_MESSAGE.get(code, "这份文档没能进入资料库"),
         },
     )
-
-
-def _extract_file_text(raw: bytes, suffix: str, filename: str) -> str:
-    """从原始字节中提取纯文本，按后缀分派。
-
-    这里只负责「取得正文」；「正文够不够」归 ``_require_indexable_text``，
-    调用方在拿到结果之后统一问一次。**两种失败要分开**：打不开（这一函数，
-    `document_unreadable`）与打开了但里面没字（那一函数，`no_indexable_text`）——
-    前者换一份文件，后者把文件转成文字，不是同一件事。
-    """
-    if suffix in {".txt", ".md"}:
-        return raw.decode("utf-8", errors="replace")
-
-    if suffix == ".pdf":
-        try:
-            from pypdf import PdfReader
-
-            reader = PdfReader(io.BytesIO(raw))
-            pages = [page.extract_text() or "" for page in reader.pages]
-            return "\n\n".join(p for p in pages if p.strip())
-        except Exception as e:
-            raise _document_unreadable("PDF", filename, e) from e
-
-    if suffix == ".docx":
-        try:
-            from docx import Document
-
-            doc = Document(io.BytesIO(raw))
-            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        except Exception as e:
-            raise _document_unreadable("DOCX", filename, e) from e
-
-    return raw.decode("utf-8", errors="replace")
 
 
 @router.post("/index", response_model=KnowledgeUploadResponse)
@@ -189,34 +172,51 @@ async def upload_file(
     collection: str = Form("default"),
     source: str = Form(""),
 ):
-    """上传文件并索引到知识库（支持 .txt / .md / .pdf / .docx；上限 10MB）。"""
+    """上传文件并索引到知识库（支持 .txt / .md / .pdf / .docx）。
+
+    所有输入边界（类型、字节数、页数、ZIP 展开量与压缩比、解析超时）都在
+    `rag/sources/document_parse.py` 一处判定，这条路只负责把判决投影成 HTTP。
+    """
+    ingest = get_settings().ingest
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in _SUPPORTED_EXTENSIONS:
+    if suffix not in SUPPORTED_SUFFIXES:
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "unsupported_file_type",
-                "message": "这个文件格式不在支持范围内",
+                "message": _REJECTION_MESSAGE["unsupported_file_type"],
             },
         )
 
-    # Enforce size before reading whole body into memory when possible.
+    # 先看 content-length 再看真读进来多少：前者能在读进内存之前拒掉一份超限文件。
     # 413 必须带 code：界面那张按状态码说话的表没有 413 这一档时，一份超限文件
     # 只会换来「无法连接服务，请检查网络」。带上 code 之后它有自己的一句话。
-    content_length = file.headers.get("content-length") if file.headers else None
-    if content_length is not None:
+    declared = file.headers.get("content-length") if file.headers else None
+    if declared is not None:
         try:
-            if int(content_length) > _MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail=_TOO_LARGE_DETAIL)
+            if int(declared) > ingest.max_upload_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "code": "file_too_large",
+                        "message": _REJECTION_MESSAGE["file_too_large"],
+                    },
+                )
         except ValueError:
             pass
 
-    raw = await file.read(_MAX_UPLOAD_BYTES + 1)
-    if len(raw) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=_TOO_LARGE_DETAIL)
-
-    extracted = _extract_file_text(raw, suffix, file.filename or "")
-    text = _require_indexable_text(extracted)
+    raw = await file.read(ingest.max_upload_bytes + 1)
+    try:
+        parsed = await parse_upload(raw, suffix)
+    except DocumentRejected as exc:
+        raise _rejection_to_http(exc) from exc
+    if parsed.truncated:
+        logger.warning(
+            "上传正文被截断 | file=%s limit=%d",
+            file.filename,
+            ingest.max_extracted_chars,
+        )
+    text = _require_indexable_text(parsed.text)
     source_name = source or file.filename or "uploaded_file"
     logical_collection = _logical_collection_name(collection)
     scoped = scope_collection(logical_collection)

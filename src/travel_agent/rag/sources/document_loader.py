@@ -1,6 +1,10 @@
 """
 结构化文档导入 (Application Layer)
 支持 Markdown / TXT / JSON / PDF / DOCX 格式的知识库数据导入。
+
+PDF/DOCX 走 `document_parse.py`：批量导入与上传共用同一组输入边界与同一个受限
+解析子进程。给批量那一路开一条没有上限的旁路，等于让「本地目录」成为绕过全部
+边界的入口。
 """
 
 from __future__ import annotations
@@ -9,6 +13,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
+
+from .document_parse import DocumentRejected, parse_file
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +52,7 @@ class DocumentLoader:
         failed = 0
         for file_path in files:
             try:
-                docs = self._load_file(file_path)
+                docs = await self._load_file(file_path)
                 count = await indexer.index_documents(docs, collection=collection)
                 indexed_total += count
                 logger.debug(f"已索引: {file_path.name} → {count} 个块")
@@ -66,7 +72,7 @@ class DocumentLoader:
         indexer = KnowledgeIndexer()
 
         path = Path(file_path)
-        docs = self._load_file(path)
+        docs = await self._load_file(path)
         return await indexer.index_documents(docs, collection=collection)
 
     async def load_structured_destinations(
@@ -108,7 +114,7 @@ class DocumentLoader:
     # 内部辅助
     # -----------------------------------------------------------------------
 
-    def _load_file(self, path: Path) -> List[Dict[str, Any]]:
+    async def _load_file(self, path: Path) -> List[Dict[str, Any]]:
         """将文件内容解析为文档列表"""
         suffix = path.suffix.lower()
         source = str(path)
@@ -129,37 +135,19 @@ class DocumentLoader:
             else:
                 return [{"content": json.dumps(data, ensure_ascii=False), "source": source}]
 
-        elif suffix == ".pdf":
-            try:
-                from pypdf import PdfReader
-
-                reader = PdfReader(path)
-                pages = [page.extract_text() or "" for page in reader.pages]
-                text = "\n\n".join(p for p in pages if p.strip())
-                if len(text.strip()) < 8:
-                    raise ValueError("未提取到足够的 PDF 文本")
-            except Exception as e:
-                logger.warning(f"PDF 解析失败 [{path}]: {e}")
-                raise ValueError(f"PDF 文本解析失败：{e}") from e
-            return [{"content": text, "source": source, "metadata": {"file": path.name}}]
-
-        elif suffix == ".docx":
-            try:
-                from docx import Document
-
-                doc = Document(str(path))
-                text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-                if len(text.strip()) < 8:
-                    raise ValueError("未提取到足够的 DOCX 文本")
-            except Exception as e:
-                logger.warning(f"DOCX 解析失败 [{path}]: {e}")
-                raise ValueError(f"DOCX 文本解析失败：{e}") from e
-            return [{"content": text, "source": source, "metadata": {"file": path.name}}]
-
-        else:
-            # .txt 和 .md
-            text = path.read_text(encoding="utf-8", errors="replace")
-            return [{"content": text, "source": source, "metadata": {"file": path.name}}]
+        try:
+            parsed = await parse_file(path)
+        except DocumentRejected as exc:
+            raise ValueError(f"文档解析被拒（{exc.code}）：{path.name}") from exc
+        if parsed.truncated:
+            logger.warning("批量导入正文被截断 [%s]", path)
+        return [
+            {
+                "content": parsed.text,
+                "source": source,
+                "metadata": {"file": path.name},
+            }
+        ]
 
     def _dict_to_text(self, d: Dict[str, Any]) -> str:
         """将字典转换为自然语言文本"""

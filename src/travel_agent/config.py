@@ -172,17 +172,16 @@ class RAGConfig(BaseModel):
     # 人的模型调用排到队尾**，实测服务不可达 7 分半并需重启。
     #
     # 重试与退避**不在这里**：那是 transport 的事（openai SDK 指数退避 +
-    # max_retries=2，实测在跑）。这三个数管的是 transport 管不到的那一半 ——
-    # 「一次入库允许发多少条、同时几条、失败几条就不再发」。
+    # max_retries=2，实测在跑）。这两个数管的是 transport 管不到的那一半 ——
+    # 「一次入库允许发多少条、失败几条就不再发」。同时在飞的条数归
+    # ``ProviderChannelConfig.ingest_contextual_llm``：并发是**通道**的属性，
+    # 而入库与在线 fast 请求共用一个上游。
     #
     # ``model_chunking_max_chars``：超过它的正文一次模型都不调，直接按固定窗口
     # 分块。这个数必须在**花掉任何一次调用之前**可判，所以它的单位是字符而不是段数。
     # 60000 的来处：出厂语料里最大的一篇（travel_tips/voyage-zh-青岛）约 25000 字符
     # / 197 段，取两倍余量；再往上是「入库很慢」换「检索前缀更好」，不划算。
     model_chunking_max_chars: int = Field(default=60_000, ge=1)
-    # 同时在飞的逐段 LLM 调用条数上限。它是「上传不许饿死别人」这句话的那个数：
-    # fast 档连接池上限 1000，留 4 条给入库、其余留给在线请求。
-    contextual_max_concurrency: int = Field(default=4, ge=1)
     # 本篇累计失败多少条就熔断（其余段不再调 LLM，保留原文入库）。上游在限流时
     # 继续发等于替它放大，而一篇资料少几条上下文前缀只是检索差一点。
     contextual_failure_threshold: int = Field(default=8, ge=1)
@@ -267,6 +266,86 @@ class StreamingConfig(BaseModel):
     heartbeat_seconds: float = Field(default=15.0, gt=0)
     #: 生产者等消费者腾位置的上限。超过即判定消费者卡住，结束传输交给 durable 恢复。
     stalled_consumer_seconds: float = Field(default=30.0, gt=0)
+
+
+class BlockingWorkConfig(BaseModel):
+    """同步工作被赶出 Event Loop 之后的并发与排队上界。**全仓唯一定义处**。
+
+    线程池不是无限资源：`services/blocking_work.py` 按通道分配，一个通道排满时
+    调用方等 ``queue_wait_seconds``，不是无限排队。
+    """
+
+    #: 同时渲染几份 PDF。1：ReportLab 吃满一个核，而导出是可以等的。
+    pdf_export: int = Field(default=1, ge=1)
+    #: 同时解析几份上传文档。子进程各自还有自己的 CPU / 地址空间上限。
+    document_parse: int = Field(default=2, ge=1)
+    #: 本地 ONNX embedding 的同时推理批数。
+    local_embedding: int = Field(default=2, ge=1)
+    #: 大 JSON canonical hash、报告投影这类纯 CPU 折算。
+    cpu_projection: int = Field(default=2, ge=1)
+    #: 等一个通道腾出位置的上限。超时的含义是「现在太忙」，不是「这件事做不成」。
+    queue_wait_seconds: float = Field(default=30.0, gt=0)
+
+
+class IngestConfig(BaseModel):
+    """上传与文档解析的硬输入边界。
+
+    只限制原始字节不够：DOCX 是 ZIP，一份 200 KB 的上传展开后可以是几个 GB。
+    每一项都必须在**读进内存之前或读进内存的过程中**可判，不能靠超时兜底 ——
+    线程里的解析器杀不掉，超时只停止等待。
+    """
+
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
+    max_pdf_pages: int = Field(default=500, ge=1)
+    max_docx_entries: int = Field(default=5000, ge=1)
+    #: ZIP 全部条目解压后的字节总量上限。
+    max_uncompressed_bytes: int = Field(default=100 * 1024 * 1024, ge=1024)
+    #: 解压后 / 压缩前的比值上限。zip bomb 的判据是比值，不是大小。
+    max_compression_ratio: float = Field(default=100.0, gt=1)
+    #: 提取出的正文字符上限。超过即截断并在回执里说明。
+    max_extracted_chars: int = Field(default=2_000_000, ge=1024)
+    #: 解析子进程的墙钟上限，超时杀进程树。
+    parse_timeout_seconds: float = Field(default=60.0, gt=0)
+    #: 子进程自己的 CPU 时间上限（秒）。0 = 不设（平台不支持 RLIMIT 时也自动跳过）。
+    parse_cpu_seconds: int = Field(default=60, ge=0)
+    #: 子进程地址空间上限（字节）。0 = 不设。
+    parse_address_space_bytes: int = Field(default=2 * 1024**3, ge=0)
+
+
+class RunBudgetConfig(BaseModel):
+    """一次 Run 允许花掉多少。
+
+    Run 被授权时按这些值封存一份快照（``entities/run_budget.py``），之后改配置
+    不影响在跑的 Run —— 与 Deadline 同一条规矩。墙钟**不在这里**：它由
+    ``RunDeadlineSnapshot`` 一处拥有，在这里再写一个 max_wall_seconds 就是让
+    同一件事有两个 owner。
+    """
+
+    max_llm_calls: int = Field(default=100, ge=1)
+    max_tool_calls: int = Field(default=150, ge=1)
+    max_input_tokens: int = Field(default=1_000_000, ge=1)
+    max_output_tokens: int = Field(default=100_000, ge=1)
+    max_cost_usd: float = Field(default=5.0, gt=0)
+    #: 同一个工具在一次 Run 里允许重试多少轮。
+    max_tool_retries_per_target: int = Field(default=2, ge=0)
+
+
+class ProviderChannelConfig(BaseModel):
+    """按上游通道分配的同时在飞条数。**连接池容量不是产品预算。**
+
+    底层 httpx 连接池上限 1000 不代表允许一次入库发 1000 条模型调用。速率闸
+    （`utils/rate_gate.py`）管两次请求之间的间隔，这里管同时在飞的条数，两件事。
+    """
+
+    #: primary 档（调研与编排）。
+    primary_research_llm: int = Field(default=6, ge=1)
+    #: fast 档的在线请求（快问快答、标题、约束归一）。
+    online_fast_llm: int = Field(default=8, ge=1)
+    #: 资料入库的逐段上下文前缀。与 online_fast_llm 走同一个上游，所以要独立配额，
+    #: 否则一次上传把所有在线请求排到队尾。
+    ingest_contextual_llm: int = Field(default=4, ge=1)
+    #: 远程 embedding 服务的同时请求数（本地 ONNX 推理走 BlockingWorkConfig）。
+    embedding: int = Field(default=4, ge=1)
 
 
 class BackgroundJobsConfig(BaseModel):
@@ -629,8 +708,12 @@ class Settings(BaseModel):
     checkpoint_retention: CheckpointRetentionConfig = Field(default_factory=CheckpointRetentionConfig)
     data_snapshots: DataSnapshotsConfig = Field(default_factory=DataSnapshotsConfig)
     run_control: RunControlConfig = Field(default_factory=RunControlConfig)
+    run_budget: RunBudgetConfig = Field(default_factory=RunBudgetConfig)
     background_jobs: BackgroundJobsConfig = Field(default_factory=BackgroundJobsConfig)
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
+    blocking_work: BlockingWorkConfig = Field(default_factory=BlockingWorkConfig)
+    ingest: IngestConfig = Field(default_factory=IngestConfig)
+    provider_channels: ProviderChannelConfig = Field(default_factory=ProviderChannelConfig)
     geocoding: GeocodingConfig = Field(default_factory=GeocodingConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     provider_snapshot_cache: ProviderSnapshotCacheConfig = Field(default_factory=ProviderSnapshotCacheConfig)

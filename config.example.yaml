@@ -107,12 +107,10 @@ rag:
   semantic_split_threshold: 0.5
   # Bounds on model-calling chunking. semantic/contextual spend one
   # embedding per sentence and one fast-model call per chunk, so the call count
-  # scales with the uploaded document — and those calls share the fast-tier
-  # httpx pool with every online request. Retry/backoff is NOT here: that is the
-  # transport's job (openai SDK, exponential, max_retries=2). These three bound
-  # how many calls one ingest may make, how many at once, and when to stop.
+  # scales with the uploaded document. Retry/backoff is NOT here: that is the
+  # transport's job (openai SDK, exponential, max_retries=2). Concurrency is not
+  # here either — it belongs to provider_channels.ingest_contextual_llm below.
   model_chunking_max_chars: 60000   # above this: zero model calls, fixed-window chunking
-  contextual_max_concurrency: 4     # in-flight per-chunk LLM calls per ingest
   contextual_failure_threshold: 8   # failures in one document before the rest skip the LLM
 
 # Tool Search: deferred workers get a compact tool catalog + search_tools;
@@ -149,6 +147,48 @@ background_jobs:
   batch_size: 1
   # 已完成任务的保留天数；dead 任务不清理，留到用户确认。
   completed_retention_days: 30
+
+# 同步工作被赶出 Event Loop 之后的并发上限（services/blocking_work.py）。
+# 排满时调用方等 queue_wait_seconds，然后收到「现在太忙」而不是无限排队。
+blocking_work:
+  pdf_export: 1
+  document_parse: 2
+  local_embedding: 2
+  cpu_projection: 2
+  queue_wait_seconds: 30.0
+
+# 上传与文档解析的硬输入边界（rag/sources/document_parse.py）。
+# DOCX 是 ZIP：只限制上传字节挡不住一份展开后有几个 GB 的文件，所以要判展开量与压缩比。
+ingest:
+  max_upload_bytes: 10485760        # 10 MB
+  max_pdf_pages: 500
+  max_docx_entries: 5000
+  max_uncompressed_bytes: 104857600 # 100 MB，ZIP 全部条目解压后的总量
+  max_compression_ratio: 100.0      # zip bomb 的判据是比值
+  max_extracted_chars: 2000000      # 超过即截断并在回执里说明
+  # 解析走受限子进程：线程里的解析器杀不掉，超时只停止等待。
+  parse_timeout_seconds: 60.0
+  parse_cpu_seconds: 60             # 0 = 不设（非 POSIX 平台自动跳过）
+  parse_address_space_bytes: 2147483648
+
+# 一次 Run 允许花掉多少（Run 被授权时封存快照，之后改这里不影响在跑的 Run）。
+# 墙钟不在这里：它由 RunDeadlineSnapshot 一处拥有（STA_DEADLINE_* 环境变量）。
+run_budget:
+  max_llm_calls: 100
+  max_tool_calls: 150
+  max_input_tokens: 1000000
+  max_output_tokens: 100000
+  max_cost_usd: 5.0
+  max_tool_retries_per_target: 2
+
+# 按上游通道分配的同时在飞条数。连接池容量不是产品预算：
+# ingest_contextual_llm 与 online_fast_llm 走同一个 fast 上游，配额必须分开，
+# 否则一次资料上传就能把在线请求排到队尾。
+provider_channels:
+  primary_research_llm: 6
+  online_fast_llm: 8
+  ingest_contextual_llm: 4
+  embedding: 4
 
 # Hybrid RAG second-stage rerank (Settings.rerank). llm needs no extra install.
 rerank:

@@ -104,11 +104,18 @@ class OpenAICompatibleEmbedder(BaseEmbedder):
     def dimensions(self) -> int:
         return self._dimensions
 
+    def _channel(self):
+        from ..config import get_settings
+        from ..utils.concurrency import channel_gate
+
+        return channel_gate("embedding", int(get_settings().provider_channels.embedding))
+
     async def embed(self, text: str) -> List[float]:
         kwargs: Dict[str, Any] = {"model": self._model_name, "input": text}
         if self._dimensions:
             kwargs["dimensions"] = self._dimensions
-        response = await self._client.embeddings.create(**kwargs)
+        async with self._channel().hold(wait_seconds=None):
+            response = await self._client.embeddings.create(**kwargs)
         return self._validate_vector(list(response.data[0].embedding))
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
@@ -117,7 +124,8 @@ class OpenAICompatibleEmbedder(BaseEmbedder):
         kwargs: Dict[str, Any] = {"model": self._model_name, "input": texts}
         if self._dimensions:
             kwargs["dimensions"] = self._dimensions
-        response = await self._client.embeddings.create(**kwargs)
+        async with self._channel().hold(wait_seconds=None):
+            response = await self._client.embeddings.create(**kwargs)
         return [self._validate_vector(list(item.embedding)) for item in response.data]
 
     def _validate_vector(self, vector: List[float]) -> List[float]:
@@ -199,13 +207,17 @@ class Qwen3OnnxEmbedder(BaseEmbedder):
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
+        # ONNX 推理是同步的、吃满一个核，所以它走受限通道而不是裸线程：一次入库能
+        # 排出上千批推理，而这个进程还要给在线请求留核。
+        from ..services.blocking_work import run_blocking
+
         if len(texts) <= self._EMBED_MICRO_BATCH:
-            return await asyncio.to_thread(self._embed_sync, texts)
+            return await run_blocking("local_embedding", self._embed_sync, texts)
         # 大 batch 拆分为 micro-batch 串行调用
         results: List[List[float]] = []
         for i in range(0, len(texts), self._EMBED_MICRO_BATCH):
             chunk = texts[i : i + self._EMBED_MICRO_BATCH]
-            partial = await asyncio.to_thread(self._embed_sync, chunk)
+            partial = await run_blocking("local_embedding", self._embed_sync, chunk)
             results.extend(partial)
         return results
 

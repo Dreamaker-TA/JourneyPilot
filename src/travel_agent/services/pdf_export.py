@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from io import BytesIO
@@ -226,6 +227,29 @@ def probe_pdf_renderer() -> str:
     if not buffer.getvalue().startswith(b"%PDF"):
         raise RuntimeError("PDF renderer did not produce a PDF document")
     return font
+
+
+@dataclass(frozen=True)
+class PdfRendererProbe:
+    """开机那一次渲染预检的结论。运行期结构不再变化，所以不复检。"""
+
+    available: bool
+    font: str | None = None
+    problem: str | None = None
+
+
+_last_probe: PdfRendererProbe | None = None
+
+
+def record_pdf_probe(probe: PdfRendererProbe) -> None:
+    global _last_probe
+    _last_probe = probe
+
+
+def last_pdf_probe() -> PdfRendererProbe | None:
+    """readiness 读它。``None`` = 启动时没跑过预检。"""
+
+    return _last_probe
 
 
 def _styles():

@@ -16,6 +16,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
+from ..models.router import llm_channel
 
 logger = logging.getLogger(__name__)
 
@@ -407,17 +408,17 @@ class ContextualChunker:
     关键取舍：embedding 和 lexical full-text 都使用带前缀的 content，original_content 仅
     供展示；成本控制上复用已有 fast_model 而非专用模型。
 
-    **这一步的模型调用条数由文档大小决定，所以它自己带界**，三道，各自的数在
-    ``config.RAGConfig``：
+    **这一步的模型调用条数由文档大小决定，所以它自己带界**，三道：
 
-    1. 规模 —— 正文超过 ``model_chunking_max_chars`` 就一次模型都不调（见
-       ``_exceeded_model_chunking_budget``）；
-    2. 并发 —— 同时在飞的调用不超过 ``contextual_max_concurrency``。这一档共用的是
+    1. 规模 —— 正文超过 ``RAGConfig.model_chunking_max_chars`` 就一次模型都不调
+       （见 ``_exceeded_model_chunking_budget``）；
+    2. 并发 —— 走 ``ingest_contextual_llm`` 通道
+       （``ProviderChannelConfig``，`models/router.llm_channel`）。这一档共用的是
        **全站 fast 档那一个 httpx 连接池**（``langchain_openai`` 按
        (base_url, timeout) lru_cache 一个 AsyncClient），所以「一次入库排出上万条
        并发请求」的后果不是这次入库慢，是**所有人的模型调用排到队尾**；
-    3. 失败 —— 本篇累计失败到 ``contextual_failure_threshold`` 条就熔断，其余段直接
-       留原文。上游在限流时继续发等于替它放大。
+    3. 失败 —— 本篇累计失败到 ``RAGConfig.contextual_failure_threshold`` 条就熔断，
+       其余段直接留原文。上游在限流时继续发等于替它放大。
 
     **重试与退避不在这里**：那是 transport 的事（openai SDK 指数退避 +
     ``max_retries``），而 transport 管不了「一次上传发几千条请求」。在这里再加一层
@@ -483,54 +484,51 @@ class ContextualChunker:
         doc_beginning = text[:300].strip()
         llm = self._get_llm()
 
-        max_concurrency = int(settings.contextual_max_concurrency)
         failure_threshold = int(settings.contextual_failure_threshold)
-        gate = asyncio.Semaphore(max_concurrency)
         failures = 0
         tripped = False
 
         async def _add_context(chunk: Dict[str, Any]) -> Dict[str, Any]:
             nonlocal failures, tripped
-            # 熔断后进来的段直接留原文，**不进闸门**：排在闸门后面等一个已经决定不
-            # 发的调用，等于把熔断变成「慢一点的重试风暴」。
+            # 熔断后进来的段直接留原文，**不排队**：排在通道后面等一个已经决定不发的
+            # 调用，等于把熔断变成「慢一点的重试风暴」。
             if tripped:
                 return _chunk_without_prefix(chunk)
             original_content = chunk["content"]
-            async with gate:
-                if tripped:
-                    return _chunk_without_prefix(chunk)
-                try:
-                    prompt = _CONTEXTUAL_PROMPT.format(
-                        title=title,
-                        doc_beginning=doc_beginning,
-                        chunk=original_content,
-                    )
-                    context_prefix = await llm.ainvoke([{"role": "user", "content": prompt}])
-                    # 剥离 thinking 模型（MiniMax-M2.7 / Qwen3 等）输出的 <think>...</think>
-                    from ..utils.json_helpers import strip_think_blocks
-                    context_prefix = strip_think_blocks(context_prefix).strip()
+            try:
+                prompt = _CONTEXTUAL_PROMPT.format(
+                    title=title,
+                    doc_beginning=doc_beginning,
+                    chunk=original_content,
+                )
+                # 并发上限由通道持有：`llm.ainvoke` 自己会占一个位置。
+                context_prefix = await llm.ainvoke([{"role": "user", "content": prompt}])
+                # 剥离 thinking 模型（MiniMax-M2.7 / Qwen3 等）输出的 <think>...</think>
+                from ..utils.json_helpers import strip_think_blocks
+                context_prefix = strip_think_blocks(context_prefix).strip()
 
-                    new_chunk = dict(chunk)
-                    new_chunk["original_content"] = original_content
-                    if context_prefix:
-                        new_chunk["content"] = f"{context_prefix}\n\n{original_content}"
-                    return new_chunk
-                except Exception as e:
-                    failures += 1
-                    logger.debug(
-                        f"ContextualChunker: LLM 上下文生成失败（降级保留原始内容）: {e}"
+                new_chunk = dict(chunk)
+                new_chunk["original_content"] = original_content
+                if context_prefix:
+                    new_chunk["content"] = f"{context_prefix}\n\n{original_content}"
+                return new_chunk
+            except Exception as e:
+                failures += 1
+                logger.debug(
+                    f"ContextualChunker: LLM 上下文生成失败（降级保留原始内容）: {e}"
+                )
+                if failures >= failure_threshold and not tripped:
+                    tripped = True
+                    logger.warning(
+                        "ContextualChunker: [%s] 上下文前缀调用累计失败 %d 条，"
+                        "已熔断，本篇其余段留原文入库",
+                        source[:40],
+                        failures,
                     )
-                    if failures >= failure_threshold and not tripped:
-                        tripped = True
-                        logger.warning(
-                            "ContextualChunker: [%s] 上下文前缀调用累计失败 %d 条，"
-                            "已熔断，本篇其余段留原文入库",
-                            source[:40],
-                            failures,
-                        )
-                    return _chunk_without_prefix(chunk)
+                return _chunk_without_prefix(chunk)
 
-        results = await asyncio.gather(*[_add_context(c) for c in base_chunks])
+        with llm_channel("ingest_contextual_llm"):
+            results = await asyncio.gather(*[_add_context(c) for c in base_chunks])
         prefixed = sum(
             1 for c in results if c["content"] != c.get("original_content")
         )

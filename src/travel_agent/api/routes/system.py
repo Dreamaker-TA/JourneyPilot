@@ -118,7 +118,15 @@ async def get_status():
 # ``database_schema`` 刻意不在这份名单里 —— 它拦门禁，判据与
 # ``db/report.py::GATES_READINESS`` 同源。
 _NON_BLOCKING_COMPONENTS = frozenset(
-    {"mcp", "data_snapshots", "knowledge_corpus", "run_execution", "background_jobs"}
+    {
+        "mcp",
+        "data_snapshots",
+        "knowledge_corpus",
+        "run_execution",
+        "background_jobs",
+        "resource_limits",
+        "pdf_export",
+    }
 )
 
 
@@ -169,6 +177,56 @@ async def _probe_background_jobs(components: Any) -> Dict[str, Any]:
         payload["counts"] = None
         payload["message"] = f"后台任务计数失败: {exc}"
     return payload
+
+
+def _probe_resource_limits(settings: Any) -> Dict[str, Any]:
+    """当前的资源边界与它们的积压。**报出来，不拦门禁**。
+
+    「排队多久、拒了几次、预算还剩多少」是运营者唯一能看见系统在限制什么的地方。
+    一个排满的解析通道不代表这台服务不能接活，但它必须能被看见 —— 否则用户只感觉
+    「上传变慢了」，而没有一处读数解释为什么。
+    """
+
+    from ...services.blocking_work import blocking_work_metrics
+    from ...utils.concurrency import channel_metrics
+
+    channels = channel_metrics()
+    return {
+        "ready": True,
+        "blocking_work": blocking_work_metrics(),
+        "provider_channels": {
+            name.removeprefix("llm."): metrics
+            for name, metrics in channels.items()
+            if not name.startswith("blocking.")
+        },
+        "run_budget": settings.run_budget.model_dump(mode="json"),
+        "ingest": settings.ingest.model_dump(mode="json"),
+    }
+
+
+def _probe_pdf_export() -> Dict[str, Any]:
+    """开机那一次渲染预检的结论。**报出来，不拦门禁**。
+
+    缺可嵌入 CJK 字体降级的是导出，不是规划与问答，所以它不该让一台能服务的机器
+    卡在 503。但它必须有一处能看见 —— 否则用户是在按下「导出」并等完一次渲染之后
+    才知道这件事的。
+    """
+
+    from ...services.pdf_export import last_pdf_probe
+
+    probe = last_pdf_probe()
+    if probe is None:
+        return {
+            "ready": True,
+            "available": False,
+            "message": "启动时未执行 PDF 渲染预检（详见启动日志）",
+        }
+    return {
+        "ready": True,
+        "available": probe.available,
+        "font": probe.font,
+        "message": probe.problem or "ok",
+    }
 
 
 async def _probe_knowledge_corpus() -> Dict[str, Any]:
@@ -340,6 +398,10 @@ async def readiness() -> JSONResponse:
         "run_execution": await _probe_run_execution(components),
         # 后台任务积压：同样报出来不拦门禁，理由见 `_probe_background_jobs`。
         "background_jobs": await _probe_background_jobs(components),
+        # 资源边界与积压：报出来不拦门禁，理由见 `_probe_resource_limits`。
+        "resource_limits": _probe_resource_limits(settings),
+        # PDF 导出可用性：报出来不拦门禁，理由见 `_probe_pdf_export`。
+        "pdf_export": _probe_pdf_export(),
     }
     ready = all(
         component["ready"]

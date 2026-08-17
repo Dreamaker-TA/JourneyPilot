@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +57,39 @@ async def _bootstrap_factory_corpus() -> list[str]:
     elif not report.problems:
         logger.info("出厂语料就位：%s", report.present)
     return list(report.problems)
+
+
+async def _probe_pdf_font() -> Optional[str]:
+    """开机确认这台机器能排出中文 PDF，返回问题（None = 没问题）。
+
+    字体探测放在启动而不是首次导出：一台缺可嵌入 CJK 字体的机器上，用户是在按下
+    「导出」并等完一次渲染之后才知道这件事的。探测本身也走渲染通道，因为它就是
+    一次真实渲染（一页、内存里、不产出任何产物）。
+
+    不阻塞启动：缺字体降级的是导出，不是规划与问答。它自己有一条 ERROR，并在
+    readiness 的 `pdf_export` 里能看见。
+    """
+
+    from ..services.blocking_work import run_blocking
+    from ..services.pdf_export import (
+        PdfFontUnavailable,
+        PdfRendererProbe,
+        probe_pdf_renderer,
+        record_pdf_probe,
+    )
+
+    try:
+        font = await run_blocking("pdf_export", probe_pdf_renderer)
+    except PdfFontUnavailable as exc:
+        record_pdf_probe(PdfRendererProbe(available=False, problem=str(exc)))
+        return str(exc)
+    except Exception as exc:  # 渲染器本身坏了也是「导不出 PDF」
+        problem = f"PDF 渲染预检失败（{exc}）"
+        record_pdf_probe(PdfRendererProbe(available=False, problem=problem))
+        return problem
+    record_pdf_probe(PdfRendererProbe(available=True, font=font))
+    logger.info("PDF 渲染预检通过 | 字体: %s", font)
+    return None
 
 
 @asynccontextmanager
@@ -117,6 +150,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 except Exception as e:
                     logger.warning("后台任务清理失败: %s", e)
                 worker.start()
+        # 字体探测与库无关，所以不等合同校验：一台缺字体的机器在两种情况下都导不出报告。
+        pdf_problem = await _probe_pdf_font()
+        if pdf_problem:
+            logger.error(
+                "PDF 导出不可用，规划与问答不受影响"
+                "（详见 GET /api/health/ready 的 pdf_export）| %s",
+                pdf_problem,
+            )
         # checkpointer 的判据必须与 readiness 逐字同源（system.py::readiness 的
         # `bool(components.checkpointer) or not gates_enabled`）：门关掉时没有
         # checkpointer 是合法配置，不是降级。两处分叉就会一处报警一处放行。

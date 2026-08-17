@@ -18,6 +18,7 @@ from ..entities.delivery_bundle import (
     UserInputAnchor,
 )
 from ..entities.trip_input import ControlledTripIdentity
+from .run_budget import build_run_budget_snapshot
 from .run_deadline import build_run_deadline_snapshot, utc_now
 
 
@@ -241,6 +242,7 @@ def build_minimum_delivery_draft(
 def _clear_completion_generation() -> Dict[str, Any]:
     return {
         "run_deadline": None,
+        "run_budget": None,
         "gate_failure_attributions": {},
         "candidate_research_gaps": [],
         "candidate_gate_attempts": {},
@@ -287,17 +289,20 @@ def seal_minimum_delivery_draft(
 ) -> Dict[str, Any]:
     """Seal the current Draft after an explicit user approval.
 
-    A replay of an already sealed state retains its original timestamp and
-    deadline.  It never grants a new budget window.
+    A replay of an already sealed state retains its original timestamp, deadline
+    and resource budget.  It never grants a new window and never refills the
+    call/token/cost allowance.
     """
     draft = getattr(state, "minimum_delivery_draft", None)
     if draft is None:
         raise ValueError("cannot authorize a run without a minimum delivery draft")
     if draft.planning_authorized:
         deadline = getattr(state, "run_deadline", None) or build_run_deadline_snapshot(draft)
+        budget = getattr(state, "run_budget", None) or build_run_budget_snapshot()
         return {
             "minimum_delivery_draft": draft,
             "run_deadline": deadline,
+            "run_budget": budget,
         }
 
     authorization = authorized_at or utc_now()
@@ -324,5 +329,6 @@ def seal_minimum_delivery_draft(
     return {
         "minimum_delivery_draft": sealed,
         "run_deadline": build_run_deadline_snapshot(sealed),
+        "run_budget": build_run_budget_snapshot(),
         "terminal_attribution": None,
     }

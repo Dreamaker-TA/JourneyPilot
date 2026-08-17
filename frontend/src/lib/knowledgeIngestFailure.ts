@@ -18,6 +18,9 @@ export const KNOWLEDGE_FAILURE_CODES = [
   'unsupported_file_type',
   'file_too_large',
   'document_unreadable',
+  'document_too_complex',
+  'document_parse_timeout',
+  'ingest_busy',
   'no_indexable_text',
   'document_text_unavailable',
   'unknown_source',
@@ -31,8 +34,10 @@ export type KnowledgeFailureCode = (typeof KNOWLEDGE_FAILURE_CODES)[number];
  * 句子由界面写（不许把后端原文印给旅行者，后端那份 `message`
  * 只进日志与别的客户端）。恢复动作和句子同源：
  *
- * - 文件本身的问题（格式不收、太大、打不开）→ `none`。重发同一份文件、刷新页面都
- *   不会改变结果，**要换的是那份文件**；给一个按了没用的键比不给键更不诚实。
+ * - 文件本身的问题（格式不收、太大、打不开、超出解析上限）→ `none`。重发同一份文件、
+ *   刷新页面都不会改变结果，**要换的是那份文件**；给一个按了没用的键比不给键更不诚实。
+ * - 服务器现在忙不过来（`ingest_busy`）→ `retry`。这一种**换文件没用**，等一会儿
+ *   同一份文件就能进去，和上面那几种正好相反。
  * - 寻址与归属的问题 → `reload`。这两种是界面自己的状态脏了，整页重来能拿到干净的。
  * - 这一篇不在了 → `reload`，重来一次拿到的是当前的列表。
  * - 正文没留存 → `none`，只能重新上传（**不给重试键**）。
@@ -56,6 +61,18 @@ const FAILURE_BY_CODE: Record<Exclude<KnowledgeFailureCode, 'no_indexable_text'>
   document_unreadable: {
     message: '这份文件打不开，可能已经损坏或者后缀名和真实格式不符；重新导出一份再上传。',
     recovery: 'none',
+  },
+  document_too_complex: {
+    message: '这份文档太复杂了（页数太多或压缩包展开后太大），拆成几份再上传。',
+    recovery: 'none',
+  },
+  document_parse_timeout: {
+    message: '这份文档在限定时间内没能读完，换一份更简单的版本或拆开再上传。',
+    recovery: 'none',
+  },
+  ingest_busy: {
+    message: '正在处理的文档太多，稍等片刻再上传这一份。',
+    recovery: 'retry',
   },
   document_text_unavailable: {
     message:

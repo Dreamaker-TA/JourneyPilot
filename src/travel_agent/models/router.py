@@ -8,19 +8,35 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import time
 from enum import Enum
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Protocol, runtime_checkable
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 from urllib.parse import urlparse
 
-from ..config import FastModelConfig, PrimaryModelConfig, get_settings
+from ..config import FastModelConfig, PrimaryModelConfig, get_settings, resolve_price
 from ..entities.trip_run import utc_now_iso
+from ..utils.concurrency import channel_gate
 from ..workflows.run_control import (
     ModelWindowClosed,
     await_model_operation,
+    current_budget_ledger,
     current_model_window,
+    guard_run_budget,
     observe_current_run_deadline,
     remaining_model_seconds,
 )
@@ -75,6 +91,31 @@ except ImportError:  # pragma: no cover - langchain 未安装时降级（如纯�
 class ModelTier(str, Enum):
     PRIMARY = "primary"
     FAST = "fast"
+
+
+#: 档位默认对应的并发通道。名字与 `ProviderChannelConfig` 的字段一一对应。
+_TIER_CHANNELS = {
+    ModelTier.PRIMARY: "primary_research_llm",
+    ModelTier.FAST: "online_fast_llm",
+}
+
+# 一次调用属于哪个通道。默认按档位，但**入库**要走自己的配额：它和在线快问快答用
+# 同一个 fast 上游，不分开的话一次上传就能把在线请求排到队尾。
+current_llm_channel: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_llm_channel",
+    default=None,
+)
+
+
+@contextlib.contextmanager
+def llm_channel(name: str) -> Iterator[None]:
+    """把这一段里的模型调用记到 ``name`` 通道的配额上。"""
+
+    token = current_llm_channel.set(name)
+    try:
+        yield
+    finally:
+        current_llm_channel.reset(token)
 
 
 def _coerce_text(content: Any) -> str:
@@ -301,6 +342,8 @@ class OpenAICompatibleLLM(BaseLLM):
         self.base_url = base_url
         self.provider = infer_provider(base_url, model_name)
         self._usage_recorder = usage_recorder
+        # 预算守卫按「本次最坏输出」估账，而最坏输出就是这个上限。
+        self._max_tokens = int(max_tokens)
         # 本项目从不需要思维链，只需要答案：worker 的 ReAct 与结构化输出都不依赖它，
         # 而开着思维链时 DeepSeek 会 (1) 拒绝 response_format（400 "This response_format
         # type is unavailable now"）、(2) 在多轮工具调用里破坏 tool 消息顺序，推理 token
@@ -349,6 +392,42 @@ class OpenAICompatibleLLM(BaseLLM):
         if self._usage_recorder is not None:
             return self._usage_recorder
         return get_usage_recorder()
+
+    # --- 并发通道与预算守卫 --------------------------------------------- #
+
+    def _channel(self):
+        name = current_llm_channel.get() or _TIER_CHANNELS[self.tier]
+        limit = int(getattr(get_settings().provider_channels, name))
+        return channel_gate(f"llm.{name}", limit)
+
+    def _guard_budget(self, operation: str, messages: List[Dict[str, Any]]) -> None:
+        """在花掉这次调用之前判预算，按最坏开销估账。
+
+        输入侧按字符数粗估（供应商还没告诉我们真实 token），输出侧按配置上限 ——
+        这次调用最多能吐出来的就是那么多。
+        """
+
+        guard_run_budget(
+            operation,
+            llm_calls=1,
+            input_tokens=estimate_tokens(_messages_text(messages)),
+            output_tokens=self._max_tokens,
+        )
+
+    async def _in_channel(self, awaitable: Awaitable[Any], *, operation: str) -> Any:
+        """在通道配额内发起一次调用，并受 Run 的时间窗约束。
+
+        排队等在时间窗**里面**：等不到位置和调用本身太慢对一个 Run 是同一件事 ——
+        窗口关了。所以这里不给排队另设一个超时，由 `await_model_operation` 定界。
+        """
+
+        gate = self._channel()
+
+        async def _hold() -> Any:
+            async with gate.hold(wait_seconds=None):
+                return await awaitable
+
+        return await await_model_operation(_hold(), operation=operation)
 
     def _start_record(self, method: str, *, stream: bool) -> Optional[LLMCallRecord]:
         """无 run 上下文（离线 eval 等）→ 返回 None，静默跳过记账。"""
@@ -430,6 +509,35 @@ class OpenAICompatibleLLM(BaseLLM):
         )
 
         self._recorder().record(record)
+        self._charge_budget(record)
+
+    def _charge_budget(self, record: Optional[LLMCallRecord]) -> None:
+        """把这一次调用记进 Run 的预算账本。
+
+        费用用**同一个公式**（`cost_ledger_store.compute_cost_usd`）算：预算和台账
+        对同一次调用给两个价钱，就没有一个数字能当上限用。价格表没命中时账本记一次
+        未定价调用，而不是记 0 元。
+
+        失败的调用也计数：它一样占了配额、一样可能被无限循环重复。
+        """
+
+        ledger = current_budget_ledger()
+        if ledger is None or record is None:
+            return
+        # 延迟 import：台账层要经 `models.usage` 拿 LLMCallRecord，模块级引用会成环。
+        from ..infrastructure.cost_ledger_store import compute_cost_usd
+
+        price = resolve_price(record.model_request, record.provider)
+        ledger.record_llm_call(
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
+            cost_usd=compute_cost_usd(
+                price,
+                input_tokens=record.input_tokens,
+                output_tokens=record.output_tokens,
+                cached_input_tokens=record.cached_input_tokens,
+            ),
+        )
 
     async def ainvoke(self, messages: List[Dict[str, Any]], **kwargs: Any) -> str:
         dropped_schema = _downgraded_json_schema(
@@ -441,10 +549,11 @@ class OpenAICompatibleLLM(BaseLLM):
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
+        self._guard_budget("model.ainvoke", messages)
         record = self._start_record("ainvoke", stream=False)
         started = time.perf_counter()
         try:
-            response = await await_model_operation(
+            response = await self._in_channel(
                 self._client.ainvoke(_to_langchain_messages(messages), **kwargs),
                 operation="model.ainvoke",
             )
@@ -476,11 +585,12 @@ class OpenAICompatibleLLM(BaseLLM):
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
+        self._guard_budget("model.ainvoke_with_tools", messages)
         record = self._start_record("ainvoke_with_tools", stream=False)
         started = time.perf_counter()
         bound = self._client.bind_tools(tools)
         try:
-            response = await await_model_operation(
+            response = await self._in_channel(
                 bound.ainvoke(_to_langchain_messages(messages), **kwargs),
                 operation="model.ainvoke_with_tools",
             )
@@ -514,6 +624,7 @@ class OpenAICompatibleLLM(BaseLLM):
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
+        self._guard_budget("model.astream", messages)
         record = self._start_record("astream", stream=True)
         started = time.perf_counter()
         full: Any = None
@@ -523,20 +634,23 @@ class OpenAICompatibleLLM(BaseLLM):
         error: Optional[BaseException] = None
         try:
             remaining = remaining_model_seconds("model.astream")
+            gate = self._channel()
 
             async def consume_stream() -> AsyncIterator[str]:
                 nonlocal full, ttft_ms
-                async for chunk in self._client.astream(
-                    _to_langchain_messages(messages), **kwargs
-                ):
-                    # 逐 chunk 累加（add_usage 语义正确：全零/无 usage 的中间 chunk 相加不污染）
-                    full = chunk if full is None else full + chunk
-                    text = _coerce_text(getattr(chunk, "content", ""))
-                    if text:
-                        if ttft_ms is None:  # TTFT = 首个非空 delta 的时刻
-                            ttft_ms = (time.perf_counter() - started) * 1000.0
-                        collected.append(text)
-                        yield text
+                # 通道位置要占满整条流：一条在读的流一直占着上游的一条连接。
+                async with gate.hold(wait_seconds=None):
+                    async for chunk in self._client.astream(
+                        _to_langchain_messages(messages), **kwargs
+                    ):
+                        # 逐 chunk 累加（add_usage 语义正确：全零/无 usage 的中间 chunk 相加不污染）
+                        full = chunk if full is None else full + chunk
+                        text = _coerce_text(getattr(chunk, "content", ""))
+                        if text:
+                            if ttft_ms is None:  # TTFT = 首个非空 delta 的时刻
+                                ttft_ms = (time.perf_counter() - started) * 1000.0
+                            collected.append(text)
+                            yield text
 
             if remaining is None:
                 async for text in consume_stream():
