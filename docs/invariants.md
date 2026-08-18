@@ -71,6 +71,26 @@ Tests:
 - `db/test_run_execution_lease.py::*`
 - `test_run_execution_contract.py::*`
 
+### INV-RUN-004：同一个 Run 不会有两个执行器
+Owner: `infrastructure/run_execution_store.claim`、`services/run_lease.py`、
+`api/routes/chat.py` 的 `cleanup_stream_exit`
+Storage: `trip_run_executions.lease_token` / `lease_expires_at`
+Enforced by: 只接管没主的行（租约已释放或已过期），**不认 executor_id** —— 它是进程
+常量，认它等于让同进程的第二次 claim 无条件通过；租约在工作流真的停下之后才交还；
+失去租约时停的是自己那条流的 handle，registry 的注销与摘除都认身份
+Tests:
+- `db/test_run_execution_lease.py::test_the_same_executor_cannot_claim_its_own_live_lease`
+- `db/test_run_execution_lease.py::test_a_released_lease_can_be_reclaimed_by_the_same_executor`
+- `test_run_execution_contract.py::test_unregister_only_removes_its_own_handle`
+- `test_run_execution_contract.py::test_a_superseded_lease_keeper_does_not_evict_the_active_one`
+
+### INV-RUN-005：分窗表覆盖图上每一个 worker
+Owner: `workflows/run_control.py` 的分窗表、`workflows/travel_planning.WORKER_NODES`
+Enforced by: 表必须恰好覆盖 dispatcher 的扇出目标，每个 worker 恰好属于一个窗口 ——
+漏一个的后果是它静默落进 research 默认档，能在自己被审计的 closeout 之后发起调用
+Tests:
+- `test_run_execution_contract.py::test_the_node_window_table_covers_every_worker_the_graph_fans_out_to`
+
 ### INV-RUN-002：孤儿 Run 不会永久显示 running
 Owner: `services/run_recovery.py`
 Storage: `trip_runs.status` + `run_execution`
@@ -111,6 +131,33 @@ Enforced by: 用户取消→CANCELLED；失去租约/响应流退出→INTERRUPT
 Tests:
 - `test_run_command_contract.py::test_a_completed_run_does_not_pretend_the_cancel_was_carried_out`
 - `db/test_run_recovery.py::test_cancel_requested_converges_to_cancelled`
+
+### INV-CMD-004：没有命令停在 claimed 上出不来
+Owner: `services/run_commands.py`（协调器停下时归还未生效的 claim）、
+`infrastructure/run_command_store.claim_pending`（也取走上一个进程留下的 claimed 行）
+Storage: `trip_run_commands.status` / `claimed_by`
+Enforced by: claimed 的定义是「取走了但还没落到效果上」，所以它必须有回头路 ——
+Run 停在门上时终态收口按设计不跑，不归还就等于既不生效也不被拒绝，而用户已经被告知
+「已加入当前运行」
+Tests:
+- `db/test_run_commands.py::test_an_unapplied_claim_goes_back_to_pending`
+- `db/test_run_commands.py::test_release_does_not_reopen_a_settled_command`
+- `db/test_run_commands.py::test_a_claim_left_by_a_dead_process_is_redelivered`
+
+### INV-CMD-005：一条追加要求只进 state 一次
+Owner: `entities/state._merge_supplements`
+Enforced by: 按 `command_id` 去重的 reducer —— 并行 Send 扇出里每个 worker 拿到的是
+同一份入参 state，都会判定这条要求还没并入
+Tests:
+- `test_run_command_contract.py::test_parallel_workers_do_not_store_the_same_supplement_twice`
+- `test_run_command_contract.py::test_merging_supplements_keeps_order_and_distinct_commands`
+
+### INV-JOB-002：丢了租约的 worker 不写结果
+Owner: `services/background_jobs.py` 的 `_renew_lease`、
+`infrastructure/background_job_store.py` 的 `complete` / `fail`
+Enforced by: 续不上租约就取消处理器；写结果时认 `lease_owner`，丢了租约的那个写不进去
+Tests:
+- `db/test_background_jobs.py::*`
 
 ### INV-JOB-001：后台任务可重试、去重、恢复
 Owner: `services/background_jobs.py`、`infrastructure/background_job_store.py`
@@ -155,6 +202,24 @@ Tests:
 - `db/test_session_turns.py::test_a_turn_is_always_returned_whole`
 - `db/test_session_turns.py::test_a_new_turn_does_not_shift_an_open_cursor`
 - `db/test_session_turns.py::test_a_page_stops_at_the_event_budget`
+
+### INV-SESSION-003：翻页代价不随会话长度增长
+Owner: `memory/chat_session.list_turns`
+Enforced by: 先按 `(session_id, event_order)` 倒序取有界一窗再分组，不对整个会话
+GROUP BY —— 后者让「按 turn 分页」在一个上万条事件的会话里和分页之前一样慢
+（实测 20 万事件 65ms 全表 Seq Scan → 0.8ms 反向索引扫描）。窗口边界那个可能被截断的
+turn 单独处理，往回翻不许漏 turn
+Tests:
+- `db/test_session_turns.py::test_ten_thousand_events_still_page_in_one_screen`
+- `db/test_session_turns.py::test_paging_backwards_walks_the_whole_session`
+
+### INV-SESSION-004：「没什么可整理」与「正在整理」不是同一句话
+Owner: `memory/compaction.py` 的 `CompactionBusy`、`api/routes/sessions.py`
+Enforced by: 已有一次在跑或提交时被抢先 → 409；真的没有可压缩消息 → 400。合成一句
+的后果是一个有几千条未压缩消息的会话被告知「会话中无可整理的消息」
+Tests:
+- `db/test_session_turns.py::test_a_raced_commit_is_busy_not_nothing_to_compact`
+- `db/test_session_turns.py::test_nothing_to_compact_returns_none`
 
 ### INV-SESSION-002：压缩只读预算范围，boundary 精确
 Owner: `memory/compaction.py`（`commit_compaction` 是唯一写入方）
@@ -204,6 +269,21 @@ Tests:
 - `test_run_budget_boundaries.py::test_budget_and_deadline_must_be_sealed_together`
 - `test_run_budget_boundaries.py::test_a_replay_of_a_sealed_draft_never_refills_the_budget`
 
+### INV-BUDGET-004：判和记是一步，重试不能超支
+Owner: `workflows/run_budget.RunBudgetLedger.reserve_tool_call`
+Enforced by: 判一次记一次一步完成 —— 判和记分成两个可分别调用的函数时，漏掉判的那一半
+不会报错，只是让上限失效（入口判一次「还剩一次调用」，循环里能花掉四次）
+Tests:
+- `test_run_budget_boundaries.py::test_the_retry_loop_cannot_outspend_the_tool_call_budget`
+
+### INV-BUDGET-005：重试上限管的是重试轮数，不是调用次数
+Owner: `workflows/run_budget.py` 的 `tool_retries` / `record_tool_retry`
+Enforced by: 首发不计入 `max_tool_retries_per_target` —— 计入的后果是任何工具调满几次
+就永久短路成 FAILED，此后所有调研静默返回空证据，而 `max_tool_calls` 永远够不到
+Tests:
+- `test_run_budget.py::test_per_tool_retries_are_bounded`
+- `test_run_budget.py::test_a_tool_that_keeps_succeeding_never_runs_out_of_retries`
+
 ### INV-BUDGET-002：预算耗尽是可解释的降级，不是一次 Run 失败
 Owner: `agents/utils.execute_tool`、`workflows/run_budget.RunBudgetExhausted`
 Enforced by: 工具侧返回带 `run_budget_exhausted.<维度>` 的 failed envelope，
@@ -240,6 +320,20 @@ Tests:
 - `test_config_contract.py::test_an_unknown_field_is_rejected_with_its_path_and_value`
 - `test_config_contract.py::test_a_misspelled_env_variable_is_an_error_not_a_no_op`
 - `test_config_contract.py::test_a_wrong_typed_env_value_is_an_error_not_a_fallback`
+
+### INV-CFG-005：环境变量覆盖之后配置仍然合法
+Owner: `config/env.py` 的 `_revalidate`
+Enforced by: 覆盖是 `setattr`，它不触发 Field 约束与 `model_validator`，所以覆盖写完
+整体重校验一次（逐次赋值校验不行：四段 deadline 一起调高时中间那次必然乱序）
+Tests:
+- `test_config_contract.py::*`
+
+### INV-CFG-006：CI 与 compose 跑同一个数据库镜像
+Owner: `docker-compose.yml`、`.github/workflows/*.yml`
+Enforced by: `services:` 块里用不了 env 上下文，所以那个 digest 必须多处各写一份 ——
+由测试钉住它们一致，改一处漏三处会红而不是让某次 nightly 对着旧镜像报绿
+Tests:
+- `test_invariants_doc.py::test_ci_and_compose_pin_the_same_database_image`
 
 ### INV-CFG-002：每个生效值都能说出它从哪来
 Owner: `config/loader.EffectiveConfig`
@@ -283,6 +377,14 @@ ADR: [ADR-0007](adr/ADR-0007-core-default-enhancements-optional.md)
 Tests:
 - `test_capabilities.py::*`
 - CI：`core-install` 作业验证 core 安装不需要 cross encoder
+
+### INV-UI-002：翻回来的历史不被 setup 投影切掉
+Owner: `frontend/src/lib/conversationFlow.ts` 的 `projectVisibleMessages`
+Enforced by: 翻页取回的消息带 `isEarlierHistory`，投影不切它 —— setup 边界要隐藏的只是
+本次运行开始之前的来回。不分开的话边界落在同一条「开始调研」上，前插进来的整页历史被
+一并切掉：按钮点了，请求发了，屏幕上什么也没变
+Tests:
+- `frontend/src/lib/conversationFlow.test.ts`
 
 ### INV-UI-001：后端能发的每一个失败 code，界面都有自己的一句话
 Owner: `api/routes/knowledge.py` 与 `frontend/src/lib/knowledgeIngestFailure.ts`
