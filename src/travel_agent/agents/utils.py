@@ -783,14 +783,16 @@ async def execute_tool(
     # 指数退避重试
     last_error: Optional[str] = None
     research_window_closed = False
+    budget_exhausted: Optional[str] = None
     for attempt in range(max_retries + 1):
         try:
             remaining_model_seconds(f"tool.{tool_name}.attempt_{attempt + 1}")
-            # 每一次尝试都算一次调用：重试也花配额，也一样能变成无限循环。
+            # 每一次尝试都判一次、记一次：重试也花配额。只在入口判一次而在循环里记
+            # max_retries + 1 次，等于让 max_tool_calls 只精确到 4 倍。
             # 重试另记一笔：那一档的上限是「同一个工具在这个 Run 上重试多少轮」，
             # 把首发也算进去等于调够几次就把这个工具永久关掉。
             if ledger is not None:
-                ledger.record_tool_call(tool_name)
+                ledger.reserve_tool_call(f"tool.{tool_name}", tool_name)
                 if attempt > 0:
                     ledger.record_tool_retry(tool_name)
             result = await await_model_operation(
@@ -859,6 +861,11 @@ async def execute_tool(
                     )
                     continue
                 break
+        except RunBudgetExhausted as exc:
+            # 与窗口关闭同一类边界：返回一个可解释的降级，不抛成 Run 失败。
+            last_error = str(exc)
+            budget_exhausted = exc.dimension
+            break
         except ModelWindowClosed as exc:
             last_error = str(exc)
             research_window_closed = True
@@ -897,6 +904,8 @@ async def execute_tool(
         fallback_info = get_fallback_tool(tool_name)
         if (
             not research_window_closed
+            # 预算用完之后不再降级：降级也是一次真实的 Provider 调用。
+            and budget_exhausted is None
             and allow_fallback
             and fallback_info
             and main_manifest.allow_offline_fallback
@@ -938,7 +947,7 @@ async def execute_tool(
                         return fallback_before.envelope
                     # 降级也是一次真实的 Provider 调用，记在备用工具自己的名下。
                     if ledger is not None:
-                        ledger.record_tool_call(fallback_name)
+                        ledger.reserve_tool_call(f"tool.{fallback_name}", fallback_name)
                     fallback_result = await await_model_operation(
                         registry.execute(fallback_name, **fallback_args),
                         operation=f"tool.{fallback_name}.fallback",
@@ -1015,6 +1024,8 @@ async def execute_tool(
         degradation_reason=last_error,
         activation_source=activation_source,
     )
+    if budget_exhausted is not None:
+        envelope["metadata"]["run_budget_exhausted"] = budget_exhausted
     if research_window_closed:
         envelope["metadata"]["research_window_closed"] = True
     return await gateway.after_call(

@@ -6,7 +6,11 @@ import pytest
 
 from travel_agent.agents.utils import execute_tool
 from travel_agent.entities.run_budget import RunBudgetSnapshot
-from travel_agent.workflows.run_budget import ledger_for, reset_ledgers
+from travel_agent.workflows.run_budget import (
+    RunBudgetExhausted,
+    ledger_for,
+    reset_ledgers,
+)
 from travel_agent.workflows.run_control import current_run_budget, current_run_id
 
 
@@ -168,3 +172,27 @@ def test_clearing_a_draft_generation_clears_the_budget_too():
     assert cleared["run_deadline"] is None
     assert cleared["run_budget"] is None
     assert "run_budget" in cleared
+
+
+async def test_the_retry_loop_cannot_outspend_the_tool_call_budget():
+    """入口判一次「还剩一次调用」，循环里却能记满 max_retries + 1 次加一次降级。
+
+    判和记是两个可以分别调用的函数时，漏掉判的那一半不会报错 —— 只是让 max_tool_calls
+    只精确到 4 倍。这一条钉住「每次尝试都判一次」。
+    """
+
+    snapshot = _snapshot(max_tool_calls=2, max_tool_retries_per_target=5)
+    token_run = current_run_id.set("run_retry_spend")
+    token_budget = current_run_budget.set(snapshot)
+    try:
+        ledger = ledger_for("run_retry_spend", snapshot)
+        ledger.reserve_tool_call("tool.web_search", "web_search")
+        ledger.reserve_tool_call("tool.web_search", "web_search")
+        # 预算已经用满：第三次预留必须被拒，而不是记进去再说。
+        with pytest.raises(RunBudgetExhausted):
+            ledger.reserve_tool_call("tool.web_search", "web_search")
+    finally:
+        current_run_budget.reset(token_budget)
+        current_run_id.reset(token_run)
+
+    assert ledger.usage().tool_calls == 2

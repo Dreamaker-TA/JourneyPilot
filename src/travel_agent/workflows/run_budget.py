@@ -140,6 +140,17 @@ class RunBudgetLedger:
 
         self.tool_calls += 1
 
+    def reserve_tool_call(self, operation: str, tool_name: str) -> None:
+        """判一次、记一次，一步完成。超出即抛 `RunBudgetExhausted`。
+
+        判和记是两个可以分别调用的函数时，调用方会漏掉判的那一半 —— 而漏掉不会报错，
+        只是让上限失效。工具重试循环里就漏过：入口判了一次「还剩一次调用」，循环里却
+        能记满 max_retries + 1 次加一次降级，于是 max_tool_calls 只精确到 4 倍。
+        """
+
+        self.guard(operation, tool_calls=1)
+        self.record_tool_call(tool_name)
+
     def record_tool_retry(self, tool_name: str) -> None:
         """一次**重试**。首发不走这里。
 
