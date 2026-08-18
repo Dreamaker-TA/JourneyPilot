@@ -126,3 +126,36 @@ def test_a_superseded_lease_keeper_does_not_evict_the_active_one():
         assert "run-1" not in run_lease._active_keepers
     finally:
         run_lease._active_keepers.pop("run-1", None)
+
+
+def test_the_node_window_table_covers_every_worker_the_graph_fans_out_to():
+    """`run_control` 按节点名字面量分窗，而名字的主人是 `travel_planning`。
+
+    它导不进那些常量（travel_planning 反过来导 run_control），所以那五个名字在第二个
+    文件里被重新敲了一遍。加一个第四个调研 worker 或改一个名字，代码照样跑：那个节点
+    静默落进 research 默认档，窗口关了不拦它，交付之后也不丢它的更新 —— 它能在自己被
+    审计的 closeout 之后发起模型调用，并覆盖一份已经落库的 Bundle。
+
+    这一条把「静默」换成「红灯」。
+    """
+
+    from travel_agent.workflows import run_control
+    from travel_agent.workflows.travel_planning import (
+        NODE_DELIVERY_FINALIZER,
+        WORKER_NODES,
+    )
+
+    declared = run_control._DEADLINE_BLOCKED_WORKER_NODES
+    assert declared == set(WORKER_NODES), (
+        "dispatcher 扇出的 worker 与 run_control 的分窗表不一致：\n"
+        f"  只在图里：{sorted(set(WORKER_NODES) - declared)}\n"
+        f"  只在表里：{sorted(declared - set(WORKER_NODES))}"
+    )
+
+    research = run_control._RESEARCH_WORKER_NODES
+    composition = run_control._COMPOSITION_WORKER_NODES
+    assert research | composition == declared, "每个 worker 都要恰好属于一个窗口"
+    assert not research & composition, "一个 worker 不能同时属于两个窗口"
+
+    # `mark_delivery_ready` 由这个名字触发；它一改，每一处 delivery_ready 守卫同时失效。
+    assert NODE_DELIVERY_FINALIZER == "delivery_finalizer"
