@@ -468,7 +468,9 @@ class ChatSessionMemory:
                     WHERE session_id = :sid
                       AND event_type IN ('message.user', 'message.assistant')
                       AND payload ->> 'message_id' = :mid
-                    ORDER BY event_order ASC
+                    -- 倒序：要读的永远是刚写下的那条，正序会从会话第一条开始逐行
+                    -- 解 JSONB 走到末尾。message_id 唯一，两个方向取到的是同一行。
+                    ORDER BY event_order DESC
                     LIMIT 1
                 """),
                 {"sid": session_id, "mid": message_id},
@@ -689,13 +691,12 @@ class ChatSessionMemory:
         summary = await self.get_session_summary(user_id, session_id)
         if not summary:
             return None
-        page = await self.list_turns(user_id, session_id)
+        page = await self.list_turns(user_id, session_id, summary=summary)
         return {
             **summary,
             "messages": [message for turn in page["turns"] for message in turn["messages"]],
             "next_before": page["next_before"],
             "has_more": page["has_more"],
-            "latest_event_order": page["latest_event_order"],
         }
 
     async def list_turns(
@@ -705,36 +706,61 @@ class ChatSessionMemory:
         *,
         before_turn: Optional[str] = None,
         limit: int = TURN_PAGE_LIMIT,
+        summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """按 turn 游标往回翻页，时间正序返回这一页。
 
         **一个 turn 永远整份返回**。游标是这个 turn 第一条事件的 `event_order`：
         它不随新消息插入而漂移，offset 会。
+
+        ``summary`` 由已经查过它的调用方传进来，省一次重复查询。
         """
 
-        summary = await self.get_session_summary(user_id, session_id)
+        if summary is None:
+            summary = await self.get_session_summary(user_id, session_id)
         if not summary:
-            return {"turns": [], "next_before": None, "has_more": False, "latest_event_order": 0}
+            return {"turns": [], "next_before": None, "has_more": False}
 
         page_size = max(1, min(int(limit), TURN_PAGE_LIMIT))
         cursor = _cursor_to_order(before_turn)
+        # 先按 (session_id, event_order) 倒序取**有界的一窗**再分组，而不是对整个会话
+        # GROUP BY turn_id：后者的代价随会话长度线性增长，于是「按 turn 分页」在一个
+        # 上万条事件的会话里和分页之前一样慢。窗口装得下一页的事件预算 + 一个 turn。
+        scan_limit = TURN_PAGE_MAX_EVENTS + 1
         async with get_db_session() as session:
             turn_rows = await session.execute(
                 text("""
+                    WITH windowed AS (
+                        SELECT turn_id, event_order
+                        FROM chat_session_events
+                        WHERE session_id = :sid
+                          AND (CAST(:cursor AS INTEGER) IS NULL
+                               OR event_order < CAST(:cursor AS INTEGER))
+                        ORDER BY event_order DESC
+                        LIMIT :scan_limit
+                    )
                     SELECT turn_id,
                            min(event_order) AS first_order,
-                           count(*)         AS event_count
-                    FROM chat_session_events
-                    WHERE session_id = :sid
+                           count(*)         AS event_count,
+                           count(*) OVER ()  AS window_turns
+                    FROM windowed
                     GROUP BY turn_id
-                    HAVING (CAST(:cursor AS INTEGER) IS NULL
-                            OR min(event_order) < CAST(:cursor AS INTEGER))
                     ORDER BY first_order DESC
                     LIMIT :limit
                 """),
-                {"sid": session_id, "cursor": cursor, "limit": page_size + 1},
+                {
+                    "sid": session_id,
+                    "cursor": cursor,
+                    "limit": page_size + 1,
+                    "scan_limit": scan_limit,
+                },
             )
             candidates = [dict(row) for row in turn_rows.mappings().all()]
+            # 窗口被填满时，最老的那个 turn 可能只截到一半，它的 event_count 偏小。
+            # 丢掉它：窗口外一定还有更多 turn，has_more 本来就成立。
+            window_saturated = sum(int(row["event_count"]) for row in candidates) >= scan_limit
+            if window_saturated and len(candidates) > 1:
+                candidates = candidates[:-1]
 
             # 页面还有第二道上限：事件总数。一个 turn 里塞了几百个思考步时，
             # 「30 个 turn」可以是一份没人能解析的响应。
@@ -745,22 +771,11 @@ class ChatSessionMemory:
                     break
                 selected.append(candidate)
                 events_budget += int(candidate["event_count"])
-            has_more = len(candidates) > len(selected)
+            # 窗口被填满就说明窗口之外还有事件 —— 哪怕这一页把窗口里的 turn 都取了。
+            has_more = len(candidates) > len(selected) or window_saturated
 
             if not selected:
-                latest = await session.execute(
-                    text(
-                        "SELECT COALESCE(MAX(event_order), 0) FROM chat_session_events "
-                        "WHERE session_id = :sid"
-                    ),
-                    {"sid": session_id},
-                )
-                return {
-                    "turns": [],
-                    "next_before": None,
-                    "has_more": False,
-                    "latest_event_order": int(latest.scalar() or 0),
-                }
+                return {"turns": [], "next_before": None, "has_more": False}
 
             statement = text("""
                 SELECT turn_id, event_order, event_type, payload
@@ -773,14 +788,6 @@ class ChatSessionMemory:
                 {"sid": session_id, "turn_ids": [str(row["turn_id"]) for row in selected]},
             )
             rows = [dict(row) for row in event_rows.mappings().all()]
-            latest = await session.execute(
-                text(
-                    "SELECT COALESCE(MAX(event_order), 0) FROM chat_session_events "
-                    "WHERE session_id = :sid"
-                ),
-                {"sid": session_id},
-            )
-            latest_event_order = int(latest.scalar() or 0)
 
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
@@ -798,7 +805,6 @@ class ChatSessionMemory:
             "turns": turns,
             "next_before": turns[0]["cursor"] if turns and has_more else None,
             "has_more": has_more,
-            "latest_event_order": latest_event_order,
         }
 
 

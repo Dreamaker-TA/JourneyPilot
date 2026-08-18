@@ -109,7 +109,6 @@ class ChatSessionDetail(BaseModel):
     #: 再往回翻的游标；`None` 表示这一页已经到底。
     next_before: Optional[str] = None
     has_more: bool = False
-    latest_event_order: int = 0
 
 
 class SessionTurn(BaseModel):
@@ -122,7 +121,6 @@ class SessionTurnPage(BaseModel):
     turns: List[SessionTurn]
     next_before: Optional[str] = None
     has_more: bool = False
-    latest_event_order: int = 0
 
 
 class UpdateSessionRequest(BaseModel):

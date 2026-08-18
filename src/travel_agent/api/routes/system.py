@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
@@ -375,6 +376,14 @@ async def readiness() -> JSONResponse:
 
     snapshot_summary = _probe_data_snapshots(settings)
 
+    # 三个 DB 探针并发跑：它们互不依赖，而 docker 的 healthcheck 每 30 秒打一次这条路，
+    # 串行等于把三次往返加起来。
+    corpus_probe, run_execution_probe, background_jobs_probe = await asyncio.gather(
+        _probe_knowledge_corpus(),
+        _probe_run_execution(components),
+        _probe_background_jobs(components),
+    )
+
     components_status = {
         "database": {"ready": db_ok, "message": db_message},
         "redis": {"ready": redis_ok, "message": redis_message},
@@ -391,14 +400,14 @@ async def readiness() -> JSONResponse:
         # Factory corpus: reported, never blocking — same call as data_snapshots above.
         # An empty knowledge base makes grounding worse, it does not stop the service
         # answering; 503-ing on it would hold a working deployment behind a seed file.
-        "knowledge_corpus": await _probe_knowledge_corpus(),
+        "knowledge_corpus": corpus_probe,
         # 数据库合同：revision、结构指纹、缺表、可选能力。这一项拦门禁，
         # 不通过时读 `problems` 与 `next_action`。
         "database_schema": _probe_schema_report(components),
         # 执行租约与启动恢复：报出来不拦门禁，理由见 `_probe_run_execution`。
-        "run_execution": await _probe_run_execution(components),
+        "run_execution": run_execution_probe,
         # 后台任务积压：同样报出来不拦门禁，理由见 `_probe_background_jobs`。
-        "background_jobs": await _probe_background_jobs(components),
+        "background_jobs": background_jobs_probe,
         # 增强依赖：配置要求了但没装的能力。**这一项拦门禁** —— 与空语料那一类不同，
         # 它会在第一次真正调用时抛 ImportError，而不是让质量下降一点。
         "optional_capabilities": capability_report(settings),

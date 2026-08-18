@@ -314,6 +314,16 @@ class RunExecutionStore:
 
         statement = text(
             """
+            -- 先用两条各自走索引的分支圈出候选，再对候选做原来的判定。
+            -- 直接把两张表的谓词 OR 在一起，没有任何索引能服务它：这个每 60 秒跑一次
+            -- 的扫描于是变成一次全表扫 + 排序，而正常情况下它的结果是空的。
+            WITH candidates AS (
+                SELECT run_id FROM trip_runs WHERE status IN :active_statuses
+                UNION
+                SELECT run_id FROM trip_run_executions
+                 WHERE (lease_expires_at IS NULL OR lease_expires_at < NOW())
+                   AND NOT (lease_token IS NULL AND recovery_status IN :settled_statuses)
+            )
             SELECT r.run_id,
                    r.status,
                    r.mode,
@@ -331,7 +341,8 @@ class RunExecutionStore:
                    e.recovery_status,
                    e.recovery_reason,
                    e.updated_at
-            FROM trip_runs r
+            FROM candidates c
+            JOIN trip_runs r ON r.run_id = c.run_id
             LEFT JOIN trip_run_executions e ON e.run_id = r.run_id
             LEFT JOIN trip_run_states s ON s.run_id = r.run_id
             WHERE (e.lease_expires_at IS NULL OR e.lease_expires_at < NOW())

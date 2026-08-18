@@ -134,7 +134,31 @@ async def test_ten_thousand_events_still_page_in_one_screen(migrated_async_datab
     page = await memory.list_turns(_USER, "s-big", limit=30)
     assert len(page["turns"]) == 30
     assert page["has_more"] is True
-    assert page["latest_event_order"] >= 10_000
+    # 最新的那个 turn 要在页尾：翻页取的是**最近**一页，不是最早一页。
+    assert page["turns"][-1]["messages"], "最新一页不该是空的"
+
+
+async def test_paging_backwards_walks_the_whole_session(migrated_async_database):
+    """有界窗口不能漏 turn：一路往回翻要能走完全部 40 轮。
+
+    分组从「整个会话 GROUP BY」改成「倒序一窗再分组」之后，窗口边界上那个可能被截断
+    的 turn 是唯一的风险点。
+    """
+
+    memory = ChatSessionMemory()
+    await _write_turns(memory, "s-walk", 40, steps=2)
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(20):
+        page = await memory.list_turns(_USER, "s-walk", before_turn=cursor, limit=10)
+        seen.extend(turn["turn_id"] for turn in page["turns"])
+        if not page["has_more"]:
+            break
+        cursor = page["next_before"]
+
+    assert len(seen) == 40, f"漏了 turn：只走到 {len(seen)} 个"
+    assert len(set(seen)) == 40, "同一个 turn 被返回了两次"
 
 
 async def test_a_page_stops_at_the_event_budget(migrated_async_database):

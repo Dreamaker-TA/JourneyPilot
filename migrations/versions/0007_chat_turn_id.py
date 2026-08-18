@@ -65,14 +65,15 @@ def upgrade() -> None:
         DO $$
         DECLARE orphan_sessions INTEGER;
         BEGIN
-            SELECT count(DISTINCT session_id) INTO orphan_sessions
-            FROM chat_session_events e
-            WHERE NOT EXISTS (
-                SELECT 1 FROM chat_session_events u
-                WHERE u.session_id = e.session_id
-                  AND u.event_type = 'message.user'
-                  AND u.event_order <= e.event_order
-            );
+            -- 一次分组扫完。相关子查询里带不等式会让它按会话逐行重探，
+            -- 而这条紧跟在一次全表回填后面、和它同处一个事务。
+            SELECT count(*) INTO orphan_sessions FROM (
+                SELECT min(event_order) AS first_any,
+                       min(event_order) FILTER (WHERE event_type = 'message.user') AS first_user
+                FROM chat_session_events
+                GROUP BY session_id
+            ) t
+            WHERE t.first_user IS NULL OR t.first_any < t.first_user;
             IF orphan_sessions > 0 THEN
                 RAISE WARNING 'turn 回填：% 个会话有落在首条用户消息之前的事件，已归入该会话的 synthetic turn',
                     orphan_sessions;

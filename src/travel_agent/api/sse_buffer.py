@@ -27,9 +27,8 @@ TERMINAL_KINDS = frozenset({"done", "error"})
 
 @dataclass
 class SSEBufferStats:
-    critical_size: int = 0
-    coalesced_entries: int = 0
-    pending_text_chars: int = 0
+    """只留水位与计数。当前深度直接读缓冲自己的计数器，不在这里存第二份。"""
+
     max_critical_size: int = 0
     max_pending_text_chars: int = 0
     coalesced_merges: int = 0
@@ -43,6 +42,9 @@ class _Entry:
     node: str
     payload: Any = None
     text: list[str] = field(default_factory=list)
+    #: 已累计的字符数。**增量维护**：每个 token 都重算一遍 sum(len(...)) 会让合并
+    #: 检查随尾块长度线性增长，而合并块本来就是按 2048 字符攒的。
+    chars: int = 0
     coalescible: bool = False
 
     def to_item(self) -> Tuple:
@@ -90,6 +92,8 @@ class SSEBuffer:
     async def _put_critical(self, kind: str, item: Tuple) -> None:
         if self._critical_count >= self._critical_queue_size:
             await self._await_space()
+        # 等不到位置也照样入队：一个被丢掉的 critical 事件会让客户端看不到状态边界。
+        # 上限在这里是背压，不是丢弃策略 —— 消费者已经收摊时由它结束传输来收敛。
         self._critical_count += 1
         self._append(_Entry(kind=kind, node="", payload=item))
 
@@ -109,12 +113,21 @@ class SSEBuffer:
             and tail.coalescible
             and tail.kind == kind
             and tail.node == node
-            and sum(len(part) for part in tail.text) + len(chunk) <= self._max_chunk_chars
+            and tail.chars + len(chunk) <= self._max_chunk_chars
         ):
             tail.text.append(chunk)
+            tail.chars += len(chunk)
             self.stats.coalesced_merges += 1
         else:
-            self._items.append(_Entry(kind=kind, node=node, text=[chunk], coalescible=True))
+            self._items.append(
+                _Entry(
+                    kind=kind,
+                    node=node,
+                    text=[chunk],
+                    chars=len(chunk),
+                    coalescible=True,
+                )
+            )
         self._pending_text_chars += len(chunk)
         self._after_append()
 
@@ -122,16 +135,19 @@ class SSEBuffer:
         self._items.append(entry)
         self._after_append()
 
+    def _full(self) -> bool:
+        return (
+            self._critical_count >= self._critical_queue_size
+            or self._pending_text_chars >= self._max_pending_text_chars
+        )
+
     def _after_append(self) -> None:
         self._arrived.set()
-        self.stats.critical_size = self._critical_count
-        self.stats.coalesced_entries = sum(1 for entry in self._items if entry.coalescible)
-        self.stats.pending_text_chars = self._pending_text_chars
         self.stats.max_critical_size = max(self.stats.max_critical_size, self._critical_count)
         self.stats.max_pending_text_chars = max(
             self.stats.max_pending_text_chars, self._pending_text_chars
         )
-        if self._critical_count >= self._critical_queue_size:
+        if self._full():
             self._space.clear()
 
     async def _await_space(self) -> None:
@@ -139,15 +155,18 @@ class SSEBuffer:
 
         这里不抛：浏览器慢不该让 Run 变成 failed。消费者下一次 `get` 会看见
         `stalled`，由它结束传输，之后一切以 durable 状态为准。
+
+        已经 stall 过就不再等：那个标志永不复位（消费者已经不再 `get`，`_space`
+        也就永远不会被 set），每个事件再等满一个 30 秒只是把生产者按住。
         """
 
-        self._space.clear()
+        if self.stalled:
+            return
         try:
             await asyncio.wait_for(self._space.wait(), self._stalled_consumer_seconds)
         except asyncio.TimeoutError:
-            if not self.stalled:
-                self.stalled = True
-                self.stats.stalled_total += 1
+            self.stalled = True
+            self.stats.stalled_total += 1
 
     async def get(self, timeout: float) -> Tuple:
         """取下一个事件。超时抛 `asyncio.TimeoutError`，由调用方发保活帧。"""
@@ -156,18 +175,13 @@ class SSEBuffer:
             if self._items:
                 entry = self._items.popleft()
                 if entry.coalescible:
-                    self._pending_text_chars -= sum(len(part) for part in entry.text)
+                    self._pending_text_chars -= entry.chars
                 elif entry.kind not in TERMINAL_KINDS:
                     self._critical_count -= 1
-                if (
-                    self._critical_count < self._critical_queue_size
-                    and self._pending_text_chars < self._max_pending_text_chars
-                ):
+                if not self._full():
                     self._space.set()
                 if not self._items:
                     self._arrived.clear()
-                self.stats.critical_size = self._critical_count
-                self.stats.pending_text_chars = self._pending_text_chars
                 return entry.to_item()
             self._arrived.clear()
             await asyncio.wait_for(self._arrived.wait(), timeout)
