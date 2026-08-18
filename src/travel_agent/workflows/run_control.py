@@ -13,6 +13,7 @@ import contextlib
 import contextvars
 import functools
 import inspect
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from .run_deadline import (
     observe_run_deadline,
 )
 
+logger = logging.getLogger(__name__)
 
 current_run_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "current_run_id",
@@ -747,14 +749,24 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                     getattr(state, "run_deadline")
                 )[0]
             if handle is not None and supplements_landed:
-                await handle.mark_supplements_applied(
-                    [
-                        str(item.get("command_id"))
-                        for item in claimed_supplements
-                        if item.get("command_id")
-                    ],
-                    node=node_name,
-                )
+                try:
+                    await handle.mark_supplements_applied(
+                        [
+                            str(item.get("command_id"))
+                            for item in claimed_supplements
+                            if item.get("command_id")
+                        ],
+                        node=node_name,
+                    )
+                except Exception as settle_err:
+                    # 标记生效失败不能吃掉节点已经算出来的结果：那是几分钟的模型与工具
+                    # 调用。命令留在 claimed，执行器停下来时归还，下一个边界再标一次。
+                    logger.warning(
+                        "追加要求标记生效失败 run_id=%s node=%s error=%s",
+                        run_id,
+                        node_name,
+                        settle_err,
+                    )
             await emit_node_lifecycle(
                 "completed",
                 node=node_name,

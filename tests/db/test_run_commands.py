@@ -251,3 +251,62 @@ async def test_commands_disappear_with_their_run(migrated_async_database):
         )
 
     assert await store.get(run_id, command.command_id) is None
+
+
+async def test_an_unapplied_claim_goes_back_to_pending(migrated_async_database):
+    """执行器停下来时手里没落地的那条要回到可领取位置。
+
+    Run 停在门上（AWAITING_INPUT）时终态收口按设计不跑，handle 被丢掉。不放回去的话
+    那条追加要求既不生效也不被拒绝，回执永远停在 claimed。
+    """
+
+    store = RunCommandStore()
+    run_id = await _create_run()
+    command, _ = await store.enqueue(
+        run_id, RunCommandType.SUPPLEMENT, {"category": "food", "content": "清真"}
+    )
+
+    claimed = await store.claim_pending(run_id)
+    assert [c.command_id for c in claimed] == [command.command_id]
+    assert await store.release_claims([command.command_id]) == 1
+
+    again = await store.claim_pending(run_id)
+    assert [c.command_id for c in again] == [command.command_id]
+
+
+async def test_release_does_not_reopen_a_settled_command(migrated_async_database):
+    """已经有结论的行不许被放回 pending —— 那会让它被消费第二次。"""
+
+    store = RunCommandStore()
+    run_id = await _create_run()
+    command, _ = await store.enqueue(run_id, RunCommandType.SUPPLEMENT, {"content": "x"})
+    await store.claim_pending(run_id)
+    await store.settle([command.command_id], status=RunCommandStatus.CONSUMED)
+
+    assert await store.release_claims([command.command_id]) == 0
+    assert await store.claim_pending(run_id) == []
+
+
+async def test_a_claim_left_by_a_dead_process_is_redelivered(migrated_async_database):
+    """上一个进程留下的 claimed 行必须能被这个进程领走。
+
+    claimed 的定义就是「取走了但还没落到效果上」，而那个进程已经不在了。
+    """
+
+    store = RunCommandStore()
+    run_id = await _create_run()
+    command, _ = await store.enqueue(run_id, RunCommandType.SUPPLEMENT, {"content": "x"})
+    await store.claim_pending(run_id)
+
+    async with get_db_session() as session:
+        await session.execute(
+            text(
+                "UPDATE trip_run_commands SET claimed_by = 'dead-host:1:beef:20200101T000000' "
+                "WHERE command_id = :command_id"
+            ),
+            {"command_id": command.command_id},
+        )
+
+    reclaimed = await store.claim_pending(run_id)
+    assert [c.command_id for c in reclaimed] == [command.command_id]
+    assert reclaimed[0].claimed_by == EXECUTOR_ID

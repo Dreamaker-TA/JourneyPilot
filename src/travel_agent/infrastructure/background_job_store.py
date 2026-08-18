@@ -223,13 +223,17 @@ class BackgroundJobStore:
                         last_error_summary = NULL,
                         completed_at = NOW(),
                         updated_at = NOW()
+                    -- 认租约主人：租约过期后任务会被另一个 worker 领走，而先跑完的
+                    -- 那个不该把后者的结果盖掉。
                     WHERE job_id = :job_id
                       AND status = :running
+                      AND lease_owner = :lease_owner
                     RETURNING job_id
                     """
                 ),
                 {
                     "job_id": job_id,
+                    "lease_owner": EXECUTOR_ID,
                     "completed": BackgroundJobStatus.COMPLETED.value,
                     "running": BackgroundJobStatus.RUNNING.value,
                     "result": _dumps(result) if result is not None else None,
@@ -270,11 +274,13 @@ class BackgroundJobStore:
                         updated_at = NOW()
                     WHERE job_id = :job_id
                       AND status = :running
+                      AND lease_owner = :lease_owner
                     RETURNING status
                     """
                 ),
                 {
                     "job_id": job_id,
+                    "lease_owner": EXECUTOR_ID,
                     "running": BackgroundJobStatus.RUNNING.value,
                     "dead": BackgroundJobStatus.DEAD.value,
                     "retry_wait": BackgroundJobStatus.RETRY_WAIT.value,

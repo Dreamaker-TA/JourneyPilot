@@ -103,10 +103,22 @@ class BackgroundJobWorker:
             )
             return
 
-        renewer = asyncio.create_task(self._renew_lease(job.job_id))
+        lease_lost = asyncio.Event()
+        handler_task = asyncio.create_task(handler(job))
+        renewer = asyncio.create_task(
+            self._renew_lease(job.job_id, handler_task, lease_lost)
+        )
         try:
-            result = await handler(job)
+            result = await handler_task
         except asyncio.CancelledError:
+            if lease_lost.is_set():
+                # 租约被另一个 worker 接走了。不写 complete/fail —— 那条任务现在归它。
+                logger.warning(
+                    "后台任务租约丢失，停止执行 job=%s type=%s",
+                    job.job_id,
+                    job.job_type.value,
+                )
+                return
             # 进程正在关闭。租约留给它自己过期，下一次启动重新领取。
             raise
         except BackgroundJobPermanentError as exc:
@@ -147,16 +159,36 @@ class BackgroundJobWorker:
 
         await self._store.complete(job.job_id, result=result)
 
-    async def _renew_lease(self, job_id: str) -> None:
+    async def _renew_lease(
+        self,
+        job_id: str,
+        handler_task: asyncio.Task,
+        lease_lost: asyncio.Event,
+    ) -> None:
+        """续租，续不上就把处理器停掉。
+
+        `renew_lease` 返回 False 意味着这条任务已经被另一个 worker 领走。丢掉这个返回值
+        等于让两个 worker 同时跑同一次抽取：双份模型花费、双份画像写入，而先完成的那个
+        把另一个的结果盖掉。
+        """
+
         interval = max(1.0, self._lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
             try:
-                await self._store.renew_lease(job_id, lease_seconds=self._lease_seconds)
+                renewed = await self._store.renew_lease(
+                    job_id, lease_seconds=self._lease_seconds
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.debug("后台任务续租失败 job=%s: %s", job_id, exc)
+                # 一次数据库抖动不算失去租约：租约还没到期，下一轮再续。
+                logger.warning("后台任务续租失败 job=%s: %s", job_id, exc)
+                continue
+            if not renewed:
+                lease_lost.set()
+                handler_task.cancel()
+                return
 
     async def cleanup(self) -> int:
         return await self._store.cleanup_completed(

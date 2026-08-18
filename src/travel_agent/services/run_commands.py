@@ -85,13 +85,35 @@ class RunCommandCoordinator:
         task = self._task
         self._task = None
         self._handle.supplement_applied_sink = None
-        if task is None or task.done():
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        await self._release_unapplied_claims()
+
+    async def _release_unapplied_claims(self) -> None:
+        """手里还没落地的那几条放回 pending。
+
+        Run 停在门上（AWAITING_INPUT）时终态收口按设计不跑，handle 连同它的
+        supplements 一起被丢掉。不放回去的话那条要求既不生效也不被拒绝，回执永远
+        停在 claimed —— 而用户已经被告知「已加入当前运行」。
+        """
+
+        pending = [
+            str(item.get("command_id"))
+            for item in self._handle.pending_supplements()
+            if str(item.get("command_id") or "").strip()
+        ]
+        if not pending:
             return
-        task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            await self._store.release_claims(pending)
+        except Exception as exc:
+            logger.warning(
+                "未生效命令归还失败 run_id=%s error=%s", self._run_id, exc
+            )
 
     async def settle_terminal(self, run_status: TripRunStatus | str) -> None:
         """Run 结束时给还没收口的命令一个结论。

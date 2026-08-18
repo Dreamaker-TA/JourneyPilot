@@ -337,3 +337,27 @@ def test_notification_is_only_a_wake_up(run_id) -> None:
         assert handle.wake_event.is_set()
     finally:
         run_control_registry.clear()
+
+
+def test_parallel_workers_do_not_store_the_same_supplement_twice():
+    """并行 Send 扇出里三个 worker 拿到同一份入参 state，都会判定这条要求还没并入。
+
+    纯 append 的 reducer 会把它存下三份，此后每个下游提示里那句「本次运行追加要求」
+    就出现三遍。
+    """
+
+    from travel_agent.entities.state import _merge_supplements
+
+    supplement = {"command_id": "cmd-1", "category": "food", "content": "清真"}
+    merged = _merge_supplements([], [supplement, supplement, supplement])
+
+    assert merged == [supplement]
+
+
+def test_merging_supplements_keeps_order_and_distinct_commands():
+    from travel_agent.entities.state import _merge_supplements
+
+    first = {"command_id": "cmd-1", "content": "a"}
+    second = {"command_id": "cmd-2", "content": "b"}
+
+    assert _merge_supplements([first], [second, first]) == [first, second]

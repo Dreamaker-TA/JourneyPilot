@@ -67,6 +67,26 @@ def _merge_lists(a: List[Any], b: List[Any]) -> List[Any]:
     return list(a or []) + list(b or [])
 
 
+def _merge_supplements(a: List[Dict[str, str]], b: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """按 ``command_id`` 去重的追加要求。
+
+    并行 ``Send`` 扇出里每个 worker 拿到的是同一份入参 state，于是都判定这条要求还没并入，
+    都把它加进自己返回的更新里。纯 append 的 reducer 会把它存下 N 份，此后每个下游提示里
+    那句「本次运行追加要求」就出现 N 遍。
+    """
+
+    merged: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(a or []) + list(b or []):
+        command_id = str(item.get("command_id") or "").strip() if isinstance(item, dict) else ""
+        if command_id:
+            if command_id in seen:
+                continue
+            seen.add(command_id)
+        merged.append(item)
+    return merged
+
+
 def _merge_reference_services(
     a: List["ProviderReferenceService"], b: List["ProviderReferenceService"]
 ) -> List["ProviderReferenceService"]:
@@ -370,7 +390,7 @@ class TravelAgentState(BaseModel):
     # reducer 与 plan_gate_decision 一致——门是单节点写入，不参与 fan-out 合并。
     plan_revision: Annotated[Optional[Dict[str, Any]], _take_latest_allow_clear] = None
     # 运行中追加的辅助规划要求；由 run control 在下一个节点边界注入，基础旅行身份不在此字段内。
-    supplemental_requirements: Annotated[List[Dict[str, str]], _merge_lists] = Field(default_factory=list)
+    supplemental_requirements: Annotated[List[Dict[str, str]], _merge_supplements] = Field(default_factory=list)
 
     # ── 用户上下文 ──────────────────────────────────────────────────────────
     # 这里**没有** ``user_profile_summary``：用户偏好与系统画像抵达模型的通道只有一条，

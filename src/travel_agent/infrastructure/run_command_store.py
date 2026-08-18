@@ -140,6 +140,9 @@ class RunCommandStore:
         `FOR UPDATE SKIP LOCKED`：多实例不是产品目标，但同一进程里两个协程同时轮询同一个
         run 是完全可能的（SSE 与恢复扫描），而同一条命令被消费两次意味着追加要求在提示里
         出现两遍。
+
+        也取走**上一个进程**留下的 claimed 行（`claimed_by` 不是本进程）：claimed 的定义
+        就是「取走了但还没落到效果上」，而那个进程已经不在了，没有人会再让它生效。
         """
 
         async with get_db_session() as session:
@@ -150,7 +153,10 @@ class RunCommandStore:
                         SELECT command_id
                         FROM trip_run_commands
                         WHERE run_id = :run_id
-                          AND status = :pending
+                          AND (
+                            status = :pending
+                            OR (status = :claimed AND claimed_by IS DISTINCT FROM :claimed_by)
+                          )
                         ORDER BY created_at ASC, command_id ASC
                         FOR UPDATE SKIP LOCKED
                         LIMIT :limit
@@ -176,6 +182,39 @@ class RunCommandStore:
             commands = [_command_from_row(dict(row)) for row in result.mappings().all()]
             commands.sort(key=lambda command: (command.created_at, command.command_id))
             return commands
+
+    async def release_claims(self, command_ids: Sequence[str]) -> int:
+        """把还没生效的 claimed 行放回 pending。
+
+        执行器停下来（Run 停在门上、进程要退出）时，它手里没落地的那几条要在下一个
+        执行器 claim 得到的位置上 —— 否则回执永远停在 claimed，而那条追加要求既不生效
+        也不被拒绝。
+        """
+
+        ids = [str(value) for value in command_ids if str(value).strip()]
+        if not ids:
+            return 0
+        async with get_db_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    UPDATE trip_run_commands
+                    SET status = :pending,
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        updated_at = NOW()
+                    WHERE command_id IN :command_ids
+                      AND status = :claimed
+                    RETURNING command_id
+                    """
+                ).bindparams(bindparam("command_ids", expanding=True)),
+                {
+                    "command_ids": ids,
+                    "pending": RunCommandStatus.PENDING.value,
+                    "claimed": RunCommandStatus.CLAIMED.value,
+                },
+            )
+            return len(result.mappings().all())
 
     async def settle(
         self,
