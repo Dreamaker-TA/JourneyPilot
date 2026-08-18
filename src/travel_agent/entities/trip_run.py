@@ -275,6 +275,14 @@ _RESUMABLE_STATUSES = {
 }
 
 
+def is_cancellable(status: TripRunStatus | str) -> bool:
+    """这个状态还能不能被取消。**表只有一张**：路由的前置判断与
+    `available_run_actions` 通报的动作必须读同一份，否则界面亮着的按钮点下去拿 409。
+    """
+
+    return coerce_status(status) in _CANCELLABLE_STATUSES
+
+
 def available_run_actions(
     run: "TripRun",
     execution: Optional["RunExecution"] = None,
@@ -832,6 +840,18 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         },
         "terminal_attribution": terminal_attribution,
     }
+
+
+def audit_has_durable_bundle(completion_audit: Any) -> bool:
+    """审计摘要里是否真的有一份已交付的 Bundle。
+
+    判据与写它的那段（`formal_delivery` 上面那几行）放在一起：读的一方在别的模块里
+    按字符串键自己拼一遍时，一次改名就让每个已完成的 deep run 都被判成没交付 ——
+    而恢复扫描会照着那个结论把它们标成不可恢复。
+    """
+
+    delivery = _as_mapping(_as_mapping(completion_audit).get("formal_delivery"))
+    return bool(delivery.get("has_bundle")) and bool(delivery.get("bundle_id"))
 
 
 def completion_audit_from_state_summary(summary: Any) -> Dict[str, Any]:

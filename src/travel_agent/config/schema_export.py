@@ -13,9 +13,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Tuple, get_args, get_origin
 
-from pydantic import BaseModel
 
-from .env import env_variable_name
+from .env import env_variable_name, leaf_fields
 from .models import CONFIG_VERSION, Settings
 
 GENERATED_HEADER = (
@@ -74,27 +73,6 @@ def _default_text(field: Any) -> str:
     return f"`{default}`"
 
 
-def _walk(model: type[BaseModel], prefix: Tuple[str, ...] = ()) -> List[Tuple[Tuple[str, ...], Any]]:
-    rows: List[Tuple[Tuple[str, ...], Any]] = []
-    for name, field in model.model_fields.items():
-        annotation = field.annotation
-        nested = None
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            nested = annotation
-        else:
-            for arg in get_args(annotation):
-                if isinstance(arg, type) and issubclass(arg, BaseModel):
-                    origin = get_origin(annotation)
-                    if origin not in (list, dict, set, tuple):
-                        nested = arg
-                    break
-        if nested is not None:
-            rows.extend(_walk(nested, (*prefix, name)))
-            continue
-        rows.append(((*prefix, name), field))
-    return rows
-
-
 def field_reference_markdown() -> str:
     """配置字段参考表（路径、类型、默认值、取值范围、环境变量名）。"""
 
@@ -113,7 +91,7 @@ def field_reference_markdown() -> str:
         "|---|---|---|---|---|",
     ]
     env_names = set(_env_capable_paths())
-    for path, field in _walk(Settings):
+    for path, field in leaf_fields(Settings, include_containers=True).items():
         dotted = ".".join(path)
         env = env_variable_name(path) if path in env_names else ""
         lines.append(

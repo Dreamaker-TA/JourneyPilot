@@ -66,6 +66,13 @@ def _job_from_row(row: Mapping[str, Any]) -> BackgroundJob:
     )
 
 
+class BackgroundJobVanished(RuntimeError):
+    """入队时冲突行在两条语句之间消失了。"""
+
+    def __init__(self, job_type: str, dedupe_key: str) -> None:
+        super().__init__(f"job {job_type}/{dedupe_key} disappeared while enqueuing")
+
+
 class BackgroundJobStore:
     """`background_jobs` 的仓储。"""
 
@@ -118,7 +125,11 @@ class BackgroundJobStore:
                 ),
                 {"job_type": kind.value, "dedupe_key": dedupe_key},
             )
-            return _job_from_row(dict(existing.mappings().first())), False
+            conflicting = existing.mappings().first()
+            if conflicting is None:
+                # 同 `RunCommandStore.enqueue`：冲突行在两条语句之间被删了。
+                raise BackgroundJobVanished(kind.value, dedupe_key)
+            return _job_from_row(dict(conflicting)), False
 
     async def get(self, job_id: str) -> Optional[BackgroundJob]:
         async with get_db_session() as session:

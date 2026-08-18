@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from ..entities.trip_run import (
     RunRecoveryStatus,
+    audit_has_durable_bundle,
     TripRunMode,
     TripRunResumePolicy,
     TripRunStatus,
@@ -88,13 +89,6 @@ class RunRecoveryReport:
             )
         for failure in self.failures:
             logger.error("启动恢复失败：%s", failure)
-
-
-def _has_durable_bundle(completion_audit: Dict[str, Any]) -> bool:
-    delivery = completion_audit.get("formal_delivery")
-    if not isinstance(delivery, dict):
-        return False
-    return bool(delivery.get("has_bundle")) and bool(delivery.get("bundle_id"))
 
 
 class RunRecoveryService:
@@ -310,7 +304,7 @@ class RunRecoveryService:
         if (
             candidate.status == TripRunStatus.COMPLETED
             and candidate.mode == TripRunMode.DEEP.value
-            and not _has_durable_bundle(candidate.completion_audit)
+            and not audit_has_durable_bundle(candidate.completion_audit)
         ):
             reason = "completed_without_durable_bundle"
             await self._execution_store.record_recovery(

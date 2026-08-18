@@ -24,6 +24,7 @@ from ...entities.trip_run import (
     RunCommandType,
     TripRunStatus,
     available_run_actions,
+    is_cancellable,
 )
 from ...local_profile import LOCAL_USER_ID
 from ...entities.workspace_v2_mutations import WorkspaceV2MutationError
@@ -1034,16 +1035,8 @@ async def control_trip_run(run_id: str, request: TripRunControlRequest) -> TripR
         raise HTTPException(status_code=404, detail="TripRun 不存在")
     if request.session_id and detail.run.session_id != request.session_id:
         raise HTTPException(status_code=403, detail="无权控制该 TripRun")
-    if detail.run.status not in {
-        TripRunStatus.CREATED,
-        TripRunStatus.RUNNING,
-        TripRunStatus.AWAITING_INPUT,
-        TripRunStatus.CANCEL_REQUESTED,
-    }:
-        # Same answer as the race below, because it is the same question — the
-        # precheck and the write only differ in when they noticed.  This used to
-        # interpolate the internal status word into a prose detail, which is neither
-        # machine-readable nor a sentence anyone should be shown .
+    if not is_cancellable(detail.run.status):
+        # 与下面那个竞态答同一句话：前置判断和写入只差在什么时候注意到。
         await _raise_run_not_cancellable(run_id)
 
     # 有没有执行器在跑，只有数据库里的租约能回答。这个判断决定要不要就地收敛，所以它必须

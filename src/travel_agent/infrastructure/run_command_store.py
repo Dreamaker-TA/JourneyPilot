@@ -55,6 +55,28 @@ def _command_from_row(row: Mapping[str, Any]) -> RunCommand:
     )
 
 
+#: 收口时写的那些列。**只写一次**：这段原本在 `settle` 与 `settle_open_for_run` 里各一份，
+#: 连注释都一样，而里面那个 `'consumed'` 字面量是 `RunCommandStatus.CONSUMED` 的复制。
+#: 只有真的被执行过才有 consumed_at —— 给一条被拒绝的命令盖上「消费于」会让回执读起来
+#: 像是它生效过。
+_SETTLE_SET_CLAUSE = f"""
+    status = :status,
+    consumed_at = CASE
+        WHEN :status = '{RunCommandStatus.CONSUMED.value}' THEN NOW() ELSE consumed_at
+    END,
+    result = CAST(:result AS jsonb),
+    error_code = :error_code,
+    updated_at = NOW()
+"""
+
+
+class RunCommandVanished(RuntimeError):
+    """入队时冲突行在两条语句之间消失了 —— run 已被删除。"""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run {run_id} disappeared while enqueuing a command")
+
+
 class RunCommandStore:
     """`trip_run_commands` 的仓储。"""
 
@@ -107,7 +129,12 @@ class RunCommandStore:
                 ),
                 {"run_id": run_id, "request_digest": digest},
             )
-            return _command_from_row(dict(existing.mappings().first())), False
+            conflicting = existing.mappings().first()
+            if conflicting is None:
+                # DO NOTHING 说有冲突行，回读却没有 —— 那一行在两条语句之间被删了
+                # （run 被级联删除）。这是一个领域错误，不是 `dict(None)` 的 TypeError。
+                raise RunCommandVanished(run_id)
+            return _command_from_row(dict(conflicting)), False
 
     async def get(self, run_id: str, command_id: str) -> Optional[RunCommand]:
         async with get_db_session() as session:
@@ -221,17 +248,9 @@ class RunCommandStore:
         if not ids:
             return 0
         statement = text(
-            """
+            f"""
             UPDATE trip_run_commands
-            SET status = :status,
-                -- 只有真的被执行过才有 consumed_at。rejected 的时间在 updated_at ——
-                -- 给一条被拒绝的命令盖上「消费于」会让回执读起来像是它生效过。
-                consumed_at = CASE
-                    WHEN :status = 'consumed' THEN NOW() ELSE consumed_at
-                END,
-                result = CAST(:result AS jsonb),
-                error_code = :error_code,
-                updated_at = NOW()
+            SET {_SETTLE_SET_CLAUSE}
             WHERE command_id IN :command_ids
               AND status IN :open_statuses
             RETURNING command_id
@@ -274,17 +293,9 @@ class RunCommandStore:
             else [kind.value for kind in RunCommandType]
         )
         statement = text(
-            """
+            f"""
             UPDATE trip_run_commands
-            SET status = :status,
-                -- 只有真的被执行过才有 consumed_at。rejected 的时间在 updated_at ——
-                -- 给一条被拒绝的命令盖上「消费于」会让回执读起来像是它生效过。
-                consumed_at = CASE
-                    WHEN :status = 'consumed' THEN NOW() ELSE consumed_at
-                END,
-                result = CAST(:result AS jsonb),
-                error_code = :error_code,
-                updated_at = NOW()
+            SET {_SETTLE_SET_CLAUSE}
             WHERE run_id = :run_id
               AND status IN :open_statuses
               AND command_type IN :command_types
