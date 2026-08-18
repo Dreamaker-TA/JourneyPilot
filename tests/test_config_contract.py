@@ -61,13 +61,31 @@ def test_mcp_servers_merge_rather_than_replace():
     整体替换会让 ``required_env=[]``，于是健康检查漏报「这个 server 缺 Key」。
     """
 
+    from travel_agent.config.mcp_defaults import default_mcp_servers
+
     settings = build_settings(
         {"mcp": {"servers": {"tavily-search": {"env": {"TAVILY_API_KEY": "x"}}}}}
     )
     server = settings.mcp_servers["tavily-search"]
-    assert server.command == "npx"
+    # 与内置默认比，而不是与 "npx" 比：装了根 node_modules 之后 command 是本地 bin。
+    builtin = default_mcp_servers()["tavily-search"]
+    assert server.command == builtin.command
+    assert server.args == builtin.args
     assert server.required_env == ["TAVILY_API_KEY"]
     assert server.env == {"TAVILY_API_KEY": "x"}
+    assert set(settings.mcp_servers) == set(default_mcp_servers())
+
+
+def test_top_level_mcp_servers_is_refused():
+    """顶层 `mcp_servers` 是替换语义，会把内置的 11 个 server 整体抹掉。
+
+    抹掉之后留下的那个没有 command，MCPManager 标 misconfigured，工具层静默归零 ——
+    所以这条路直接拒绝，并指向 `mcp.servers`。
+    """
+
+    with pytest.raises(ConfigError) as exc:
+        build_settings({"mcp_servers": {"tavily-search": {"env": {"TAVILY_API_KEY": "x"}}}})
+    assert "mcp.servers" in str(exc.value) or "servers" in str(exc.value)
 
 
 # --- 版本判定 ------------------------------------------------------------- #

@@ -2,7 +2,7 @@
 
 加载顺序固定：
 
-    找到 config.yaml → 按 config_version 迁移结构 → 严格校验 → 环境变量覆盖
+    找到 config.yaml → 判 config_version（不匹配就拒绝）→ 严格校验 → 环境变量覆盖
     → 生成 effective config（脱敏）
 
 严格校验在环境变量之前：一个拼错的 YAML 字段要在它有机会被环境变量掩盖之前报出来。
@@ -124,7 +124,7 @@ def _describe_validation_error(exc: ValidationError, path: Optional[Path]) -> st
 
 
 def build_settings(data: Dict[str, Any], *, path: Optional[Path] = None) -> Settings:
-    """严格校验一份已迁移的 YAML 数据。
+    """严格校验一份已摘掉 config_version 的 YAML 数据。
 
     ``mcp.servers`` 与 `Settings` 其余部分不同：它是**合并**语义而不是替换 ——
     用户通常只在 YAML 里填 env，command/args/required_env 要保留内置默认，否则
@@ -132,6 +132,13 @@ def build_settings(data: Dict[str, Any], *, path: Optional[Path] = None) -> Sett
     """
 
     payload = dict(data)
+    if "mcp_servers" in payload:
+        # 字段名不是 YAML 的写法：顶层写它会整体替换内置默认，留下一个没有 command
+        # 的 server，工具层静默归零。合并语义只在 `mcp.servers` 这条路上。
+        raise ConfigError(
+            "config.yaml 顶层不接受 `mcp_servers`，改写成 `mcp:` → `servers:`："
+            "只有那条路会与内置的 MCP 默认合并（照字段名写会把它们整体替换掉）。"
+        )
     mcp_section = payload.pop("mcp", None) or {}
     try:
         settings = Settings.model_validate(payload)

@@ -92,7 +92,7 @@ def field_reference_markdown() -> str:
     ]
     env_names = set(_env_capable_paths())
     for path, field in leaf_fields(Settings, include_containers=True).items():
-        dotted = ".".join(path)
+        dotted = _YAML_SPELLING.get(path) or ".".join(path)
         env = env_variable_name(path) if path in env_names else ""
         lines.append(
             f"| `{dotted}` | {_type_name(field.annotation)} | {_default_text(field)} "
@@ -100,6 +100,11 @@ def field_reference_markdown() -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+#: Settings 的内部字段名 → YAML 里真正被接受的写法（见 loader.build_settings）。
+#: 照字段名写 `mcp_servers:` 会整体替换掉内置的 11 个 server，而不是合并。
+_YAML_SPELLING = {("mcp_servers",): "mcp.servers"}
 
 
 def _env_capable_paths() -> List[Tuple[str, ...]]:

@@ -134,7 +134,7 @@
 | `tool_exposure.worker_only` | bool | `True` | — | `JOURNEYPILOT_TOOL_EXPOSURE__WORKER_ONLY` |
 | `tool_exposure.min_tools_threshold` | int | `8` | — | `JOURNEYPILOT_TOOL_EXPOSURE__MIN_TOOLS_THRESHOLD` |
 | `model_pricing` | list[ModelPricingItem] | （按段默认） | — | — |
-| `mcp_servers` | dict[str, MCPServerItem] | （按段默认） | — | — |
+| `mcp.servers` | dict[str, MCPServerItem] | （按段默认） | — | — |
 | `logging.level` | str | `info` | — | `JOURNEYPILOT_LOGGING__LEVEL` |
 | `logging.file.enabled` | bool | `True` | — | `JOURNEYPILOT_LOGGING__FILE__ENABLED` |
 | `logging.file.path` | str | `logs/` | — | `JOURNEYPILOT_LOGGING__FILE__PATH` |
