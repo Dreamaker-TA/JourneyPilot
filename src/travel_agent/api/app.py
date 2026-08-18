@@ -148,10 +148,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 try:
                     recovery_report = await recovery.sweep()
                     recovery_report.log_summary()
-                    recovery.start()
                 except Exception as e:
                     logger.error("启动恢复普查失败: %s", e, exc_info=True)
                     degraded.append(f"启动恢复普查失败（{e}）")
+                # 周期扫描与这一次普查各自成败：租约还没过期的 run 本来就该被首次普查
+                # 跳过、留给后面的扫描接住，普查失败把扫描也一起关掉，那些 run 会永远
+                # 停在 running。
+                recovery.start()
             # 上一个进程留下的后台任务在这里被重新领走：它们的最终事实在 background_jobs，
             # 不在任何一个已经退出的 Event Loop 里。
             worker = components.background_job_worker

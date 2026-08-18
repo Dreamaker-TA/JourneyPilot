@@ -97,16 +97,32 @@ async def test_expired_lease_can_be_reclaimed(migrated_async_database):
     assert reclaimed.executor_id == EXECUTOR_ID
 
 
-async def test_same_executor_reclaim_is_idempotent(migrated_async_database):
-    """同一个执行器重复 claim 必须成功 —— 否则一次重试就把自己锁在外面。"""
+async def test_the_same_executor_cannot_claim_its_own_live_lease(migrated_async_database):
+    """同进程的第二次 claim 也要被拒。
+
+    executor_id 是进程常量，放它过等于双执行守卫在最需要它的场景（同一个用户开两个
+    标签页、或者在「继续」上双击）恰好不生效 —— 那两次请求来自同一个进程。
+    """
+
+    store = RunExecutionStore()
+    run_id = await _create_run()
+
+    assert await store.claim(run_id, lease_seconds=45) is not None
+    assert await store.claim(run_id, lease_seconds=45) is None
+
+
+async def test_a_released_lease_can_be_reclaimed_by_the_same_executor(migrated_async_database):
+    """交还之后自己再抢回来要成功 —— 否则一次正常的流退出会把下一次「继续」锁在外面。"""
 
     store = RunExecutionStore()
     run_id = await _create_run()
 
     first = await store.claim(run_id, lease_seconds=45)
-    second = await store.claim(run_id, lease_seconds=45)
+    assert first is not None
+    await store.release(run_id, lease_token=first.lease_token)
 
-    assert first is not None and second is not None
+    second = await store.claim(run_id, lease_seconds=45)
+    assert second is not None
     assert second.lease_token != first.lease_token
 
 

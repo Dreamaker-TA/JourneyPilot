@@ -85,3 +85,44 @@ def test_heartbeat_must_fit_inside_the_lease() -> None:
         RunControlConfig(lease_seconds=10, lease_heartbeat_seconds=9)
 
     assert RunControlConfig(lease_seconds=45, lease_heartbeat_seconds=10)
+
+
+def test_unregister_only_removes_its_own_handle():
+    """被接管的那条流清理时，不能把接管者的 handle 一起摘掉。
+
+    盲删按 run_id 摘，摘掉的是接管者 —— 此后用户的取消在任何节点边界上都观察不到。
+    """
+
+    from travel_agent.workflows.run_control import RunControlRegistry
+
+    registry = RunControlRegistry()
+    losing = registry.register("run-1")
+    winning = registry.register("run-1")
+
+    registry.unregister("run-1", losing)
+
+    assert registry.get("run-1") is winning
+    registry.unregister("run-1", winning)
+    assert registry.get("run-1") is None
+
+
+def test_a_superseded_lease_keeper_does_not_evict_the_active_one():
+    """输的那个 keeper 失效时，关闭时要交还的那份名单里不能少了接管者。"""
+
+    from travel_agent.services import run_lease
+
+    class _Keeper:
+        def __init__(self, run_id: str) -> None:
+            self._run_id = run_id
+
+    losing = _Keeper("run-1")
+    winning = _Keeper("run-1")
+    run_lease._active_keepers["run-1"] = losing
+    run_lease._active_keepers["run-1"] = winning
+    try:
+        run_lease._drop_active_keeper(losing)
+        assert run_lease._active_keepers.get("run-1") is winning
+        run_lease._drop_active_keeper(winning)
+        assert "run-1" not in run_lease._active_keepers
+    finally:
+        run_lease._active_keepers.pop("run-1", None)

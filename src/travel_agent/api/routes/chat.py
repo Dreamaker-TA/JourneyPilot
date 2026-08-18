@@ -47,6 +47,7 @@ from ...workflows.travel_planning import CheckpointContractError
 from ...workflows.run_budget import peek_ledger, release_ledger
 from ...workflows.run_control import (
     RunCancelled,
+    RunControlHandle,
     node_timing_registry,
     run_control_registry,
     run_ts_ms,
@@ -293,6 +294,9 @@ async def chat_stream(
     resume_payload: Optional[Dict[str, Any]] = None
     safe_checkpoint_id: Optional[str] = None
     lease_keeper: Optional[RunLeaseKeeper] = None
+    # 本次请求自己的 handle。失去租约时要停的是**这一条流**，不是 registry 当前
+    # 那一格里的 handle —— 被接管的那一方去查 registry，查到的正是接管者。
+    stream_control_handle: Optional[RunControlHandle] = None
     gate_resume = request.gate_decision is not None
 
     async def claim_execution_lease(
@@ -311,8 +315,10 @@ async def chat_stream(
             heartbeat_seconds=lease_settings.lease_heartbeat_seconds,
             failure_threshold=lease_settings.lease_heartbeat_failure_threshold,
             # 失去租约只是「停止发起新的外部调用」的信号，终态归属由 stop reason 决定。
-            on_lease_lost=lambda reason: run_control_registry.request_stop(
-                run_id, "lease_lost"
+            on_lease_lost=lambda reason: (
+                stream_control_handle.request_stop("lease_lost")
+                if stream_control_handle is not None
+                else None
             ),
         )
         if not await keeper.claim(last_safe_checkpoint_id=checkpoint_id):
@@ -485,6 +491,7 @@ async def chat_stream(
         )
 
     async def generate_sse() -> AsyncGenerator[str, None]:
+        nonlocal stream_control_handle
         # event_queue 汇聚两类事件：
         #   ("token", node_name, chunk)  —— Fast Answer 或过程草稿的临时 token
         #   ("state", node_name, update) —— 节点完成时的 state update（由 run_workflow 推送）
@@ -772,6 +779,7 @@ async def chat_stream(
         control_registered = False
         command_coordinator: Optional[RunCommandCoordinator] = None
         process_cleanup_done = False
+        lease_released = False
         stream_exit_reason = "stream_closed_before_terminal"
 
         async def converge_stream_exit(reason: str) -> None:
@@ -846,7 +854,7 @@ async def chat_stream(
                 return
             process_cleanup_done = True
             if control_registered:
-                run_control_registry.unregister(trip_run.run_id)
+                run_control_registry.unregister(trip_run.run_id, stream_control_handle)
             # 回收本 run 的工具曝光计量（进程内瞬态，汇总已在 finalize 时读走）。
             get_tool_exposure_ledger().clear(trip_run.run_id)
             # 回收本 run 未被 trace 读走的节点计时（interrupt 的门节点等；进程内瞬态）。
@@ -854,6 +862,20 @@ async def chat_stream(
             # 回收预算账本。消耗量的最终事实在 `run_llm_calls`，下一次接管这个 run 的
             # 进程会从那里读回基线，所以这里丢掉进程内的那份是安全的。
             release_ledger(trip_run.run_id)
+
+        async def release_execution_lease(reason: str) -> None:
+            nonlocal lease_released
+            if lease_released or lease_keeper is None:
+                return
+            lease_released = True
+            try:
+                await lease_keeper.release(reason=reason)
+            except Exception as release_err:  # noqa: BLE001 — 交还失败只让租约自然过期
+                logger.warning(
+                    "execution lease release failed run_id=%s error=%s",
+                    trip_run.run_id,
+                    release_err,
+                )
 
         def finish_detached_workflow(task: asyncio.Task) -> None:
             try:
@@ -874,6 +896,8 @@ async def chat_stream(
                     workflow_err,
                 )
             finally:
+                # 到这里任务才真的停了，租约现在交还才是安全的。
+                asyncio.ensure_future(release_execution_lease("workflow_detached"))
                 clear_process_run_state()
 
         async def mark_safe_boundary() -> None:
@@ -946,10 +970,6 @@ async def chat_stream(
             if command_coordinator is not None:
                 await command_coordinator.stop()
 
-            # 状态已经收敛，租约再没有工作可做。交还它 —— 否则「继续」按钮要等一个
-            # 已经没人在用的租约自然过期才点得动。
-            await lease_keeper.release(reason=reason)
-
             if workflow_task is not None and not workflow_task.done():
                 workflow_task.cancel()
                 try:
@@ -968,6 +988,8 @@ async def chat_stream(
                         _WORKFLOW_CANCEL_GRACE_SECONDS,
                         reason,
                     )
+                    # 租约不在这里交还：任务还在跑，交还它就等于允许第二个执行器
+                    # 接管一个仍在发工具/模型调用的 run。detach 回调里等它真停了再还。
                     workflow_task.add_done_callback(finish_detached_workflow)
                     return
                 except asyncio.CancelledError:
@@ -978,12 +1000,16 @@ async def chat_stream(
                         trip_run.run_id,
                         workflow_err,
                     )
+            # 工作流已经停了，租约再没有工作可做。交还它 —— 否则「继续」按钮要等一个
+            # 已经没人在用的租约自然过期才点得动。
+            await release_execution_lease(reason)
             clear_process_run_state()
 
         try:
             # 快慢两条路径都注册：控制命令的消费者不该取决于这次是深度规划还是快问快答。
             # 两条路径的节点都走 `with_run_control`，所以协作边界的语义也是同一份。
             control_handle = run_control_registry.register(trip_run.run_id)
+            stream_control_handle = control_handle
             control_registered = True
             command_coordinator = RunCommandCoordinator(
                 components.run_command_store,

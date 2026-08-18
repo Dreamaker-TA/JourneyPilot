@@ -145,9 +145,11 @@ class RunExecutionStore:
                         recovery_status = EXCLUDED.recovery_status,
                         recovery_reason = NULL,
                         updated_at = NOW()
+                    -- 只接管没主的行：租约已释放（release 置 NULL）或已过期。
+                    -- 不判 executor_id：它是进程常量，同进程的第二次 claim 会无条件
+                    -- 命中，于是双执行守卫在最需要它的那个场景里恰好不生效。
                     WHERE trip_run_executions.lease_expires_at IS NULL
                        OR trip_run_executions.lease_expires_at < NOW()
-                       OR trip_run_executions.executor_id = EXCLUDED.executor_id
                     RETURNING *
                     """
                 ),

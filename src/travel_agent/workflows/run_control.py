@@ -226,9 +226,18 @@ class RunControlRegistry:
             return None
         return self._handles.get(run_id)
 
-    def unregister(self, run_id: Optional[str]) -> None:
-        if run_id:
-            self._handles.pop(run_id, None)
+    def unregister(self, run_id: Optional[str], handle: Optional["RunControlHandle"] = None) -> None:
+        """注销。给了 ``handle`` 就只在这一格还是它的时候删。
+
+        被接管的那条流清理时按 run_id 盲删，删掉的是接管者的 handle，此后用户的
+        取消在任何节点边界上都观察不到。
+        """
+
+        if not run_id:
+            return
+        if handle is not None and self._handles.get(run_id) is not handle:
+            return
+        self._handles.pop(run_id, None)
 
     def request_stop(self, run_id: str, reason: RunStopReason = "user_cancel") -> bool:
         """进程内的停止信号。用于失去租约这类**不来自用户**、没有 durable command 的停止。"""

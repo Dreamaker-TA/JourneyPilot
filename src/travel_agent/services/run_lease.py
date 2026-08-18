@@ -96,7 +96,7 @@ class RunLeaseKeeper:
         recovery_status: RunRecoveryStatus = RunRecoveryStatus.RELEASED,
         reason: Optional[str] = None,
     ) -> None:
-        _active_keepers.pop(self._run_id, None)
+        _drop_active_keeper(self)
         task = self._task
         self._task = None
         if task is not None and not task.done():
@@ -162,7 +162,7 @@ class RunLeaseKeeper:
             self._run_id,
             reason,
         )
-        _active_keepers.pop(self._run_id, None)
+        _drop_active_keeper(self)
         if self._on_lease_lost is None:
             return
         try:
@@ -175,6 +175,17 @@ class RunLeaseKeeper:
 
 #: 本进程正在持有租约的 run。关闭时要把它们交还，否则下一次启动要等租约自然过期。
 _active_keepers: dict[str, RunLeaseKeeper] = {}
+
+
+def _drop_active_keeper(keeper: "RunLeaseKeeper") -> None:
+    """只在这一格还是自己的时候摘掉。
+
+    盲删按 run_id 摘，摘掉的会是接管者；关闭时 `release_all_leases` 就看不见它，
+    它的租约留着一个未来的过期时间，下一个进程要白等一个租约周期。
+    """
+
+    if _active_keepers.get(keeper._run_id) is keeper:
+        _active_keepers.pop(keeper._run_id, None)
 
 
 async def release_all_leases(*, reason: str = "process_shutdown") -> int:
