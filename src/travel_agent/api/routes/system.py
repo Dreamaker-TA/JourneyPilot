@@ -446,7 +446,11 @@ async def configure_model(config: ModelConfigRequest):
         if not settings.server.allow_runtime_model_config:
             raise HTTPException(
                 status_code=403,
-                detail="运行时模型配置接口未启用；请通过后端配置文件或 ALLOW_RUNTIME_MODEL_CONFIG=1 显式开启",
+                detail=(
+                    "运行时模型配置接口未启用；在 config.yaml 里设 "
+                    "server.allow_runtime_model_config: true，或设环境变量 "
+                    "JOURNEYPILOT_SERVER__ALLOW_RUNTIME_MODEL_CONFIG=1"
+                ),
             )
         if tier == ModelTier.PRIMARY:
             m = settings.primary_model
