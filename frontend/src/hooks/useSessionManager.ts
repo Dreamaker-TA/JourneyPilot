@@ -123,6 +123,10 @@ function latestAssistantThinkingSteps(messages: Message[]): ThinkingStep[] {
 export function useSessionManager() {
   const { state, dispatch, activeStreamRef, currentStateRef, sessionRuntimeCacheRef } = useApp();
   const openSessionSeqRef = useRef(0);
+  // 翻页的在飞标记走 ref 而不是 reducer state：滚动事件密到每帧一次，而 state 与
+  // currentStateRef 都要等 React 提交（后者还要等一个 post-paint effect）才更新，
+  // 提交之前来的那几个事件全都会通过判据，各发一次同游标的请求。
+  const earlierHistoryInFlightRef = useRef(false);
 
   const cacheCurrentRuntimeIfStreaming = useCallback(
     (nextSessionId: string) => {
@@ -368,19 +372,31 @@ export function useSessionManager() {
    * 一次只取一页，正在取的时候不重复发 —— 滚动事件密到每帧一次，不挡住就是每帧一个请求。
    */
   const loadEarlierHistory = useCallback(async () => {
-    const { currentSessionId, historyPaging } = currentStateRef.current;
-    if (!currentSessionId || !historyPaging.hasMore || historyPaging.loading) return;
+    const { currentSessionId, historyPaging, currentTripRunStatus } = currentStateRef.current;
+    if (!currentSessionId || !historyPaging.hasMore) return;
+    if (earlierHistoryInFlightRef.current) return;
     const cursor = historyPaging.nextBefore;
     if (!cursor) return;
 
+    earlierHistoryInFlightRef.current = true;
     dispatch({ type: 'SET_HISTORY_PAGING_LOADING', payload: true });
     try {
       const page = await api.getSessionTurns(currentSessionId, cursor);
-      if (currentStateRef.current.currentSessionId !== currentSessionId) return;
+      if (currentStateRef.current.currentSessionId !== currentSessionId) {
+        // 中途切了会话。仍要落回加载态：它会被快照进那个会话的运行时缓存，留成 true
+        // 就等于此后那个会话再也翻不动页。
+        dispatch({ type: 'SET_HISTORY_PAGING_LOADING', payload: false });
+        return;
+      }
       dispatch({
         type: 'PREPEND_HISTORY',
         payload: {
-          messages: page.turns.flatMap((turn) => turn.messages).map(mapMessage),
+          // 与首屏同一条归一化：少这一步，一个早已结束的运行留下的 waiting_approval
+          // 会被当成还活着的计划门渲染出来。
+          messages: projectMessagesForRunLifecycle(
+            page.turns.flatMap((turn) => turn.messages).map(mapMessage),
+            currentTripRunStatus,
+          ).map((message) => ({ ...message, isEarlierHistory: true })),
           nextBefore: page.next_before,
           hasMore: page.has_more,
         },
@@ -388,6 +404,8 @@ export function useSessionManager() {
     } catch {
       // 取不到更早的历史不影响当前这一屏：停掉加载态，用户可以再试一次。
       dispatch({ type: 'SET_HISTORY_PAGING_LOADING', payload: false });
+    } finally {
+      earlierHistoryInFlightRef.current = false;
     }
   }, [currentStateRef, dispatch]);
 

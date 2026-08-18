@@ -488,18 +488,6 @@ export interface TripRunSupplementResponse {
   impact_scope: string[];
 }
 
-export interface TripRunCommandResponse {
-  command_id: string;
-  run_id: string;
-  command_type: 'cancel' | 'supplement';
-  status: TripRunCommandStatus;
-  run_status: TripRunStatus;
-  error_code: string | null;
-  result: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-  consumed_at: string | null;
-}
 
 export interface TripRunResponse {
   run_id: string;

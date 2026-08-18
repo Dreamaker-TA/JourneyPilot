@@ -50,6 +50,16 @@ export function projectVisibleMessages(
   messages: Message[],
   options?: { planGatePending?: boolean },
 ): Message[] {
+  // 用户点「载入更早的对话」翻回来的历史不参与投影：它是被明确要求看的，而 setup
+  // 边界要隐藏的只是**本次运行**开始之前的那段来回。不分开的话边界落在同一条
+  // `开始调研` 上，前插进来的整页历史被一并切掉 —— 按钮点了没有任何反应。
+  const firstCurrent = messages.findIndex((message) => !message.isEarlierHistory);
+  if (firstCurrent > 0) {
+    return [
+      ...messages.slice(0, firstCurrent),
+      ...projectVisibleMessages(messages.slice(firstCurrent), options),
+    ];
+  }
   const startIndex = researchStartIndex(messages);
   if (startIndex >= 0) return afterSetupBoundary(messages, startIndex);
   if (options?.planGatePending) {

@@ -141,6 +141,45 @@ def run_ts_ms() -> Optional[float]:
 RunStopReason = Literal["user_cancel", "lease_lost", "stream_exit"]
 
 
+@dataclass(frozen=True)
+class StopVerdict:
+    """一个停止原因收敛成什么。"""
+
+    #: 记进 `trip_runs` 的终态名。
+    terminal_status: str
+    #: 落进事件 payload 的 reason。
+    payload_reason: str
+    #: 有值时写进 `error_code`。
+    error_code: Optional[str] = None
+    #: 是否是用户自己的决定（决定要不要先写一条 cancel_requested）。
+    user_decision: bool = False
+
+
+#: 原因 → 判决。**穷举表放在原因旁边**：写在路由里的一个 `if reason == "lease_lost"`
+#: 会让其余每一种原因默默落进 CANCELLED 分支，于是记录里出现一个用户从没做过的决定。
+STOP_VERDICTS: Dict[str, StopVerdict] = {
+    "user_cancel": StopVerdict(
+        terminal_status="cancelled",
+        payload_reason="user_cancelled",
+        user_decision=True,
+    ),
+    "lease_lost": StopVerdict(
+        terminal_status="interrupted",
+        payload_reason="executor_lease_lost",
+        error_code="executor_lease_lost",
+    ),
+    "stream_exit": StopVerdict(
+        terminal_status="interrupted",
+        payload_reason="stream_exit",
+        error_code="stream_exit_before_terminal",
+    ),
+}
+
+
+def stop_verdict(reason: str) -> StopVerdict:
+    return STOP_VERDICTS.get(reason, STOP_VERDICTS["stream_exit"])
+
+
 class RunCancelled(Exception):
     """Raised when a cooperative stop signal reaches a boundary."""
 

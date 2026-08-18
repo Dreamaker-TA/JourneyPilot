@@ -110,6 +110,8 @@ export interface Message {
   contextReport?: ContextReport;  // 上下文透镜印记数据（有则渲染 Hallmark，无则不渲染）
   /** 用户可回看的完整压缩摘要与显式约束快照。 */
   contextCompaction?: ContextCompactionEvent;
+  /** 由「载入更早的对话」翻回来的历史。setup 投影不切它（见 conversationFlow）。 */
+  isEarlierHistory?: boolean;
   /** 正文安全局部锚点与可展示来源；不含 ev_/claim_ 内部 id。 */
   citations?: FinalAnswerCitation[];
   /** 正文局部信息状态；与来源 citation 分离，不承诺每句话都有来源。 */

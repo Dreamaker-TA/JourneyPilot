@@ -842,6 +842,12 @@ export function useSendMessage() {
                 });
                 scopedDispatch({ type: 'SET_SYNTHESIZING', payload: false });
                 scopedDispatch({ type: 'SET_STREAMING', payload: false });
+                // 失去租约那一路带着终态过来（后端已经落库 interrupted）。不认它的话
+                // 登机牌继续显示「正在运行」，而那个可继续的运行要切走会话再回来才看得见。
+                if (isTripRunStatus(event.run_status)) {
+                  scopedDispatch({ type: 'SET_TRIP_RUN_STATUS', payload: event.run_status });
+                  scopedDispatch({ type: 'BUMP_TRIP_RUN_REFRESH' });
+                }
                 break;
             }
           },

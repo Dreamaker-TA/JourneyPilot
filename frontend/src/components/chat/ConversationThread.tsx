@@ -123,18 +123,24 @@ export const ConversationThread: React.FC = () => {
   const stickRef = React.useRef(true);
   // 前插更早历史时，把「视口相对内容底部的距离」保持住 —— 只写 scrollTop 的话，
   // 新插进来的那几屏会把用户正在读的段落顶出屏幕。
-  const restoreAnchorRef = React.useRef<number | null>(null);
+  //
+  // 连同请求那一刻的消息条数一起记：下面那个 layout effect 也被流式 token 触发，
+  // 只按「锚点非空」消费的话，取回历史之前它就被一次无变化的重定位吃掉了。
+  const restoreAnchorRef = React.useRef<{ fromBottom: number; length: number } | null>(null);
   const lastMessage = visibleMessages[visibleMessages.length - 1];
   const lastLen = lastMessage?.displayContent?.length ?? 0;
   const lastSteps = lastMessage?.thinkingSteps?.length ?? 0;
   const { hasMore: hasEarlierHistory, loading: loadingEarlierHistory } = state.historyPaging;
 
+  const visibleCount = visibleMessages.length;
   const requestEarlierHistory = React.useCallback(() => {
     const el = scrollRef.current;
-    if (!el || !hasEarlierHistory || loadingEarlierHistory) return;
-    restoreAnchorRef.current = el.scrollHeight - el.scrollTop;
+    // 这里不判在飞：渲染态要等 React 提交才变，而滚动事件密到每帧一次。真正的判据
+    // 在 `loadEarlierHistory` 里，是一个同步写的 ref。
+    if (!el || !hasEarlierHistory) return;
+    restoreAnchorRef.current = { fromBottom: el.scrollHeight - el.scrollTop, length: visibleCount };
     void loadEarlierHistory();
-  }, [hasEarlierHistory, loadEarlierHistory, loadingEarlierHistory]);
+  }, [hasEarlierHistory, loadEarlierHistory, visibleCount]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -148,8 +154,10 @@ export const ConversationThread: React.FC = () => {
     if (!el) return;
     const anchor = restoreAnchorRef.current;
     if (anchor !== null) {
+      // 只有条数真的变了才是那一页到了。没到就把锚点留着继续等。
+      if (visibleMessages.length === anchor.length) return;
       restoreAnchorRef.current = null;
-      el.scrollTop = el.scrollHeight - anchor;
+      el.scrollTop = el.scrollHeight - anchor.fromBottom;
       return;
     }
     if (!stickRef.current) return;

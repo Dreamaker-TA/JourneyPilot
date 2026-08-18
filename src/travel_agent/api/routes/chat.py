@@ -49,6 +49,7 @@ from ...workflows.run_control import (
     RunCancelled,
     RunControlHandle,
     node_timing_registry,
+    stop_verdict,
     run_control_registry,
     run_ts_ms,
     set_run_ts_anchor,
@@ -1359,18 +1360,18 @@ async def chat_stream(
                 or "workflow"
             )
             # 失去租约不是用户的决定：它收敛 INTERRUPTED，并且是可继续的那一类中断。
-            lease_lost = cancelled.reason == "lease_lost"
+            verdict = stop_verdict(cancelled.reason)
             try:
                 current_run = await trip_run_store.get_run(trip_run.run_id)
-                if lease_lost:
+                if not verdict.user_decision:
                     if current_run and current_run.status == TripRunStatus.RUNNING:
                         await trip_run_store.transition_status(
                             trip_run.run_id,
                             TripRunStatus.INTERRUPTED,
                             current_node=stop_node,
-                            error_code="executor_lease_lost",
+                            error_code=verdict.error_code,
                             event_type="run.interrupted",
-                            payload={"reason": "executor_lease_lost"},
+                            payload={"reason": verdict.payload_reason},
                         )
                 else:
                     if current_run and current_run.status == TripRunStatus.RUNNING:
@@ -1387,19 +1388,23 @@ async def chat_stream(
                         current_node=stop_node,
                         event_type="run.cancelled",
                         payload={
-                            "reason": "user_cancelled",
+                            "reason": verdict.payload_reason,
                             "trace_event_count": len(ctx.trace_events),
                         },
                     )
             except Exception as run_err:
                 logger.warning(f"TripRun 停止状态保存失败: {run_err}")
             cost_summary = await finalize_cost_summary(terminal=True)
-            if lease_lost:
+            if not verdict.user_decision:
                 yield sse_event({
                     "type": "error",
                     "message": "这次规划被中断了（本机执行记录丢失），可以稍后继续。",
                     "message_id": message_id,
                     "run_id": trip_run.run_id,
+                    # 带上终态：没有它前端的 error 分支不动 run 状态，登机牌继续显示
+                    # 「正在运行」，那个「继续」按钮要切走会话再回来才出现。
+                    "run_status": verdict.terminal_status,
+                    "run_cost_summary": cost_summary,
                 })
             else:
                 yield sse_event({

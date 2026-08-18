@@ -256,20 +256,6 @@ export const api = {
     });
   },
 
-  /** 一条控制命令的结论。断线重连后查它，而不是重发一次取消。 */
-  async getTripRunCommand(
-    runId: string,
-    commandId: string,
-    options?: { sessionId?: string | null }
-  ): Promise<import('../types/api').TripRunCommandResponse> {
-    return fetchJson(
-      withQuery(
-        `/trip-runs/${encodeURIComponent(runId)}/commands/${encodeURIComponent(commandId)}`,
-        { session_id: options?.sessionId }
-      )
-    );
-  },
-
   async listTripRuns(options?: { sessionId?: string; mode?: 'deep' | 'fast'; limit?: number }): Promise<TripRunListResponse> {
     return fetchJson<TripRunListResponse>(
       withQuery('/trip-runs', {
