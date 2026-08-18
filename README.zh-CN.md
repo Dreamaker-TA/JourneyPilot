@@ -155,19 +155,20 @@ JOURNEYPILOT_DATABASE__PORT=55433 JOURNEYPILOT_REDIS__PORT=16379 ./run.sh
 而不是等到第一次真正调用才抛 ImportError：
 
 ```bash
-uv sync                            # core
-uv sync --group local-embedding    # 本地 Qwen3 ONNX 向量（embedding.provider=qwen3）
+uv sync                            # core：只够跑远程 embedding（embedding.provider=openai）
+uv sync --group local-embedding    # 本地 Qwen3 ONNX 向量（配置默认档，run.sh 装的就是这个）
 uv sync --group cross-encoder      # BGE 重排（rerank.provider=cross_encoder，会拉 torch）
 ```
 
 默认的 Compose 数据库用官方 `pgvector` 镜像，不编译任何东西。中文分词增强（zhparser）
-是可选 profile，它构建失败不影响默认档：
+是**换一个镜像**，它构建失败不影响默认档：
 
 ```bash
-docker compose --profile zhparser up -d --build postgres-zhparser redis api
+docker build -t journeypilot-postgres:pg18-zhparser ./docker
+POSTGRES_IMAGE=journeypilot-postgres:pg18-zhparser docker compose up -d
 ```
 
-两个 profile 共用同一个卷和同一个端口，所以必须显式点名服务，切换后要重建词法索引。
+同一个卷、同一个端口、同一个服务名，切换后要重建词法索引。
 `journeypilot doctor` 会报出当前实际生效的 lexical config。
 
 ## 工作方式

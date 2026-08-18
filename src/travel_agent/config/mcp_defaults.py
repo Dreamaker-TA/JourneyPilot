@@ -37,6 +37,17 @@ def _env_mapping(target_name: str, *aliases: str) -> Dict[str, str]:
     return {target_name: value} if value else {}
 
 
+def _node_mcp_fields(package: str, bin_name: str) -> Dict[str, object]:
+    """Node stdio server 的启动方式：本地装好的 bin 优先，否则回落到 ``npx -y``。
+
+    镜像构建期 ``npm ci`` 到 ``<repo>/node_modules``，运行层不带 npm（npx 不存在）。
+    """
+    local_bin = _REPO_ROOT / "node_modules" / ".bin" / bin_name
+    if local_bin.exists():
+        return {"command": str(local_bin), "args": []}
+    return {"command": "npx", "args": ["-y", package]}
+
+
 def default_mcp_servers() -> Dict[str, "MCPServerItem"]:
     """
     提供仓库内置的 MCP 默认配置。
@@ -56,22 +67,19 @@ def default_mcp_servers() -> Dict[str, "MCPServerItem"]:
     return {
         # ── 检索层：agent 原生搜索 + 深度抓取 ──────────────────────────────
         "tavily-search": MCPServerItem(
-            command="npx",
-            args=["-y", "tavily-mcp@0.2.21"],
+            **_node_mcp_fields("tavily-mcp@0.2.21", "tavily-mcp"),
             env=_env_mapping("TAVILY_API_KEY"),
             description="Tavily agent 原生检索（搜索/提取/爬取，返回带引用结果，https://tavily.com）",
             required_env=["TAVILY_API_KEY"],
         ),
         "brave-search": MCPServerItem(
-            command="npx",
-            args=["-y", "@brave/brave-search-mcp-server@2.1.0"],
+            **_node_mcp_fields("@brave/brave-search-mcp-server@2.1.0", "brave-search-mcp-server"),
             env=_env_mapping("BRAVE_API_KEY"),
             description="Brave 独立索引网络搜索（备份检索源，https://brave.com/search/api）",
             required_env=["BRAVE_API_KEY"],
         ),
         "firecrawl": MCPServerItem(
-            command="npx",
-            args=["-y", "firecrawl-mcp@3.23.0"],
+            **_node_mcp_fields("firecrawl-mcp@3.23.0", "firecrawl-mcp"),
             env=_env_mapping("FIRECRAWL_API_KEY"),
             description="Firecrawl 深度网页抓取与正文提取（反爬强，https://firecrawl.dev）",
             required_env=["FIRECRAWL_API_KEY"],
@@ -90,15 +98,13 @@ def default_mcp_servers() -> Dict[str, "MCPServerItem"]:
         ),
         # ── 地图层：高德 + 百度双覆盖 ──────────────────────────────────────
         "baidu-maps": MCPServerItem(
-            command="npx",
-            args=["-y", "@baidumap/mcp-server-baidu-map@1.0.5"],
+            **_node_mcp_fields("@baidumap/mcp-server-baidu-map@1.0.5", "mcp-server-baidu-map"),
             env=_env_mapping("BAIDU_MAP_API_KEY"),
             description="百度地图（国内）：地理编码、POI、路线、天气、路况（https://lbsyun.baidu.com）",
             required_env=["BAIDU_MAP_API_KEY"],
         ),
         "amap-maps": MCPServerItem(
-            command="npx",
-            args=["-y", "@amap/amap-maps-mcp-server@0.0.8"],
+            **_node_mcp_fields("@amap/amap-maps-mcp-server@0.0.8", "mcp-amap"),
             env=_env_mapping("AMAP_MAPS_API_KEY"),
             description="高德地图（国内）：地理编码 maps_geo、天气 maps_weather、路线、POI（https://lbs.amap.com）",
             required_env=["AMAP_MAPS_API_KEY"],
@@ -143,8 +149,7 @@ def default_mcp_servers() -> Dict[str, "MCPServerItem"]:
         # 注：mcp-openweathermap 的 fastmcp 版本存在 completion 能力声明 bug，
         # 与本项目 MCP 客户端不兼容（启动即崩），故改用零 Key 的 Open-Meteo。
         "open-meteo": MCPServerItem(
-            command="npx",
-            args=["-y", "open-meteo-mcp@0.1.0"],
+            **_node_mcp_fields("open-meteo-mcp@0.1.0", "weather-mcp"),
             description="Open-Meteo MCP：当前天气、固定 7 日预报、历史天气与空气质量（零 Key，https://open-meteo.com）",
         ),
         # ── 汇率（全球，零 Key）────────────────────────────────────────────

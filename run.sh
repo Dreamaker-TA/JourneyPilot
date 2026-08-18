@@ -585,17 +585,22 @@ step_infra() {
   fi
 }
 
+# 依赖分组：随 config 的默认值走。默认 `embedding.provider: qwen3` 需要
+# local-embedding 组（Dockerfile 的 DEPENDENCY_GROUPS 默认值同此）；只装 core
+# 会让启动期能力预检直接拒绝启动。cross-encoder 由用户按提示自己加。
+UV_SYNC_ARGS=(--frozen --group local-embedding)
+
 step_python() {
   print_section "Environment"
 
-  start_spinner "uv sync --frozen..."
+  start_spinner "uv sync ${UV_SYNC_ARGS[*]}..."
   local sync_ok=0
-  (cd "$ROOT_DIR" && uv sync --frozen >/dev/null 2>&1) && sync_ok=1 || true
+  (cd "$ROOT_DIR" && uv sync "${UV_SYNC_ARGS[@]}" >/dev/null 2>&1) && sync_ok=1 || true
   stop_spinner
 
   if [[ "$sync_ok" -eq 0 ]]; then
-    print_item "python" fail "uv sync --frozen failed"
-    printf "  ${DIM}│${RESET}  ${DIM}Run manually: cd %s && uv sync --frozen${RESET}\n" "$ROOT_DIR"
+    print_item "python" fail "uv sync failed"
+    printf "  ${DIM}│${RESET}  ${DIM}Run manually: cd %s && uv sync %s${RESET}\n" "$ROOT_DIR" "${UV_SYNC_ARGS[*]}"
     return 1
   fi
 
@@ -998,15 +1003,15 @@ cmd_check() {
   local status=0
 
   # Python env
-  start_spinner "uv sync --frozen..."
+  start_spinner "uv sync ${UV_SYNC_ARGS[*]}..."
   local sync_ok=0
-  (cd "$ROOT_DIR" && uv sync --frozen >/dev/null 2>&1) && sync_ok=1 || true
+  (cd "$ROOT_DIR" && uv sync "${UV_SYNC_ARGS[@]}" >/dev/null 2>&1) && sync_ok=1 || true
   stop_spinner
 
   if [[ "$sync_ok" -eq 1 ]] && check_python_env_exists; then
     print_item "python" ok ".venv OK"
   else
-    print_item "python" fail ".venv not runnable — run: uv sync --frozen"
+    print_item "python" fail ".venv not runnable — run: uv sync ${UV_SYNC_ARGS[*]}"
     status=1
   fi
 
@@ -1019,7 +1024,7 @@ cmd_check() {
   if [[ "$import_ok" -eq 1 ]]; then
     print_item "imports" ok "all critical imports OK"
   else
-    print_item "imports" fail "some imports failed — run: uv sync --frozen"
+    print_item "imports" fail "some imports failed — run: uv sync ${UV_SYNC_ARGS[*]}"
     status=1
   fi
 

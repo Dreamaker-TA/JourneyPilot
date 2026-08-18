@@ -6,7 +6,8 @@ typmod、生成列的表达式、advisory lock 的竞争、`pg_restore --list` �
 跑出来的绿灯，恰好在这些不变量上没有意义。
 
 连不上库时**跳过而不是失败**：CI 里没有 PostgreSQL 的那一档不该因此变红，
-但跳过的原因会打印出来，不会静默变成「0 个测试通过」。
+但跳过的原因会打印出来，不会静默变成「0 个测试通过」。声明了库一定在的那一档
+（``JP_TESTS_REQUIRE_POSTGRES=1``，CI 的 db job）反过来：连不上就是失败。
 
 每个测试用一个**新建的临时库**（`jp_test_<随机>`），跑完删掉。它绝不碰
 `config.yaml` 里那个真实库 —— 那里有开发者的数据。
@@ -60,6 +61,9 @@ def postgres_available(base_target) -> bool:
                 cur.execute("SELECT 1")
         return True
     except Exception as exc:  # noqa: BLE001 — 任何连接失败都同样是「不可用」
+        if os.getenv("JP_TESTS_REQUIRE_POSTGRES") == "1":
+            # CI 的 db 档声明了库一定在。跳过在那里等于门禁静默失效。
+            pytest.fail(f"PostgreSQL 不可达（{base_target.describe()}）：{exc}", pytrace=False)
         print(f"\n[tests] PostgreSQL 不可达（{base_target.describe()}）：{exc}")
         return False
 

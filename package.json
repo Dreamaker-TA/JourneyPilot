@@ -2,6 +2,11 @@
   "name": "journeypilot",
   "private": true,
   "dependencies": {
-    "@baidumap/mcp-server-baidu-map": "^1.0.5"
+    "@amap/amap-maps-mcp-server": "0.0.8",
+    "@baidumap/mcp-server-baidu-map": "1.0.5",
+    "@brave/brave-search-mcp-server": "2.1.0",
+    "firecrawl-mcp": "3.23.0",
+    "open-meteo-mcp": "0.1.0",
+    "tavily-mcp": "0.2.21"
   }
 }

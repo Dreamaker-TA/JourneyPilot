@@ -157,22 +157,22 @@ configuration that asks for one without its dependency **refuses to start** rath
 failing on the first real call:
 
 ```bash
-uv sync                            # core
-uv sync --group local-embedding    # local Qwen3 ONNX embeddings (embedding.provider=qwen3)
+uv sync                            # core: remote embeddings only (embedding.provider=openai)
+uv sync --group local-embedding    # local Qwen3 ONNX embeddings (the shipped default; what run.sh installs)
 uv sync --group cross-encoder      # BGE reranker (rerank.provider=cross_encoder, pulls torch)
 ```
 
 The default Compose database is the official `pgvector` image and compiles nothing.
-Chinese word segmentation (zhparser) is an optional profile, and a build failure there
+Chinese word segmentation (zhparser) is a **different image**, and a build failure there
 leaves the default stack untouched:
 
 ```bash
-docker compose --profile zhparser up -d --build postgres-zhparser redis api
+docker build -t journeypilot-postgres:pg18-zhparser ./docker
+POSTGRES_IMAGE=journeypilot-postgres:pg18-zhparser docker compose up -d
 ```
 
-Both profiles share one volume and one port, so name the services explicitly and rebuild
-the lexical indexes after switching. `journeypilot doctor` reports the lexical
-configuration actually in effect.
+Same volume, same port, same service name. Rebuild the lexical indexes after switching;
+`journeypilot doctor` reports the lexical configuration actually in effect.
 
 ## How it works
 

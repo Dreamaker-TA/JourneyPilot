@@ -16,9 +16,14 @@ def _settings(**overrides) -> Settings:
     return settings
 
 
-def test_a_configuration_matching_the_install_has_no_gaps():
-    """这个环境装了 local-embedding，所以默认配置应当没有缺口。"""
+def test_a_configuration_matching_the_install_has_no_gaps(monkeypatch):
+    """依赖齐了就没有缺口。
 
+    探测被固定成「什么都不缺」而不是读当前 venv：CI 的 core 档故意不装
+    local-embedding，让断言跟着环境走会让那一档永远是红的。
+    """
+
+    monkeypatch.setattr("travel_agent.capabilities._missing", lambda *modules: [])
     assert capability_gaps(_settings()) == []
 
 
@@ -74,7 +79,8 @@ def test_the_report_blocks_readiness_when_a_gap_exists(monkeypatch):
     assert "uv sync --group local-embedding" in report["message"]
 
 
-def test_the_report_is_ready_when_nothing_is_missing():
+def test_the_report_is_ready_when_nothing_is_missing(monkeypatch):
+    monkeypatch.setattr("travel_agent.capabilities._missing", lambda *modules: [])
     report = capability_report(_settings())
     assert report["ready"] is True
     assert report["gaps"] == []

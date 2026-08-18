@@ -85,6 +85,8 @@ jobs:
 
   image:
     name: image · amd64 + arm64 + SBOM
+    # candidate 是发布门禁：空库安装、旧库升级、备份恢复没过就不该产出发布物。
+    needs: candidate
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -131,6 +133,7 @@ jobs:
 
   live-smoke:
     name: live · real provider smoke (opt-in)
+    needs: candidate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # **只在显式勾选时跑，且不在任何 PR 上跑**（ADR-0009）。

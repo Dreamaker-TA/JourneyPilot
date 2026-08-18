@@ -49,7 +49,8 @@ RUN npm ci --omit=dev
 FROM python:3.11-slim AS runtime
 
 # curl 供 healthcheck；libpq5 是 psycopg 的运行时（不是 libpq-dev）；
-# nodejs 供 Node stdio MCP server（不带 npm：运行期不允许临时下载未锁定版本）。
+# nodejs 供 Node stdio MCP server。不带 npm：那几个 server 的包已在 node-mcp 阶段
+# `npm ci` 装进镜像，`mcp_defaults` 直接调 node_modules/.bin 里的 bin，不需要 npx。
 #
 # 字体：**fonts-wqy-microhei，不是 fonts-noto-cjk**。Debian 的 Noto CJK 打的是 CFF
 # （PostScript）轮廓，reportlab 的 TTFont 解析器嵌不进去（实测
@@ -67,7 +68,7 @@ WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=node-mcp /mcp/node_modules /app/node_modules
-ENV PATH="/app/.venv/bin:${PATH}" \
+ENV PATH="/app/.venv/bin:/app/node_modules/.bin:${PATH}" \
     VIRTUAL_ENV="/app/.venv" \
     PYTHONUNBUFFERED=1
 

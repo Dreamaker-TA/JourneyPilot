@@ -51,8 +51,8 @@ fast_model:
 #   only for getting the RAG path to run end to end.
 # dimensions must match the model you point at, and must match the pgvector column
 # your database was created with — changing it later means re-indexing.
-# Env overrides: EMBEDDING_PROVIDER / EMBEDDING_MODEL_NAME / EMBEDDING_BASE_URL /
-# EMBEDDING_API_KEY / EMBEDDING_DIMENSIONS.
+# Env overrides: JOURNEYPILOT_EMBEDDING__PROVIDER / __MODEL_NAME / __BASE_URL /
+# __API_KEY / __DIMENSIONS（完整清单：journeypilot config env）。
 embedding:
   provider: "qwen3"
   api_key: ""                                          # openai provider only

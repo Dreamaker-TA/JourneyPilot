@@ -106,13 +106,13 @@ jobs:
         run: uv run python journeypilot.py migrate --json
       - name: Schema contract
         run: uv run python journeypilot.py doctor --json
-      # db/ 下的测试各自建临时库；连不上时它们会跳过，所以这里要确认它们真的跑了。
+      # db/ 下的测试各自建临时库；连不上时它们默认跳过，而一个静默跳过的门禁是绿的。
+      # JP_TESTS_REQUIRE_POSTGRES=1 让这一档把「连不上」判成失败（见 tests/conftest.py）。
+      # 收集数是数不出跳过的：skip 发生在 fixture setup，不在收集期。
       - name: Integration + migration tests
+        env:
+          JP_TESTS_REQUIRE_POSTGRES: "1"
         run: uv run pytest tests/db -q
-      - name: Refuse a silent skip
-        run: |
-          count=$(uv run pytest tests/db -q --collect-only 2>/dev/null | grep -c "::" || true)
-          test "$count" -gt 40 || { echo "只收集到 $count 个 db 测试"; exit 1; }
 
   frontend:
     name: frontend · type-check + unit + build

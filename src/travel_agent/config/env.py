@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Tuple, get_args, get_origin
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 ENV_PREFIX = "JOURNEYPILOT_"
 ENV_SEPARATOR = "__"
@@ -149,4 +149,24 @@ def apply_env_overrides(settings: BaseModel) -> List[Tuple[str, str]]:
             f"合法名称形如 {env_variable_name(('database', 'port'))}；"
             "完整清单见 `journeypilot config env`。"
         )
+
+    if applied:
+        _revalidate(settings, applied)
     return applied
+
+
+def _revalidate(settings: BaseModel, applied: List[Tuple[str, str]]) -> None:
+    """覆盖写完之后整体重校验一次。
+
+    ``setattr`` 不触发 Field 约束和 ``model_validator``（模型没开
+    ``validate_assignment``），所以 ``LEASE_SECONDS=0`` 这类值会直接落进配置。逐次赋值
+    校验也不行：四段 deadline 一起调高时，中间那次赋值必然是乱序的。
+    """
+
+    try:
+        type(settings).model_validate(settings.model_dump())
+    except ValidationError as exc:
+        names = ", ".join(name for _, name in applied)
+        raise EnvOverrideError(
+            f"环境变量覆盖之后配置不合法（本次覆盖：{names}）：{exc}"
+        ) from exc
