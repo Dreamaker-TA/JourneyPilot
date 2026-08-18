@@ -59,8 +59,7 @@ async def test_a_tool_that_used_up_its_retries_is_not_called_again():
     token_budget = current_run_budget.set(snapshot)
     try:
         ledger = ledger_for("run_tool_retries", snapshot)
-        ledger.record_tool_call("web_search")
-        ledger.record_tool_call("web_search")
+        ledger.record_tool_retry("web_search")
         envelope = await execute_tool("web_search", {"query": "京都"})
     finally:
         current_run_budget.reset(token_budget)

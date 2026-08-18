@@ -38,6 +38,14 @@ class CompactionResult:
     last_included_event_order: int
 
 
+class CompactionBusy(Exception):
+    """同一会话已经有一次压缩在跑，或提交时边界已被别人推走。
+
+    与「没有可整理的消息」不是一回事：调用方照着后者的措辞回话，用户看到的是
+    「会话中无可整理的消息」—— 而那个会话有几千条没压缩的消息。
+    """
+
+
 class CompactionService:
     """读预算内的历史 → 生成增量摘要 → 与新边界、时间线快照同事务落库。"""
 
@@ -59,7 +67,11 @@ class CompactionService:
         session_id: str,
         source: str,
     ) -> Optional[CompactionResult]:
-        """压缩一次。没有可压缩的消息、或提交时边界已被别人推走，返回 None。
+        """压缩一次。没有可压缩的消息返回 None；已有一次在跑或提交时被抢先抛
+        :class:`CompactionBusy`。
+
+        两者分开，因为调用方要说的话不一样：一个是「没什么可整理的」，另一个是
+        「正在整理，等一下」。
 
         失败一律抛出：**不推进边界、不覆盖旧摘要**。压缩失败只是本轮少一份摘要，
         不该变成整个 Run 失败。
@@ -69,7 +81,7 @@ class CompactionService:
         if lock.locked():
             # 同一会话已经有一次压缩在跑。第二个请求继续用旧摘要，不排队再调一次模型。
             logger.info("会话已有压缩在进行，本次跳过 session=%s", session_id)
-            return None
+            raise CompactionBusy(session_id)
 
         async with lock:
             messages, expected_boundary, last_included = (
@@ -99,7 +111,7 @@ class CompactionService:
             )
             if committed is None:
                 logger.info("压缩提交时边界已被推走，本次作废 session=%s", session_id)
-                return None
+                raise CompactionBusy(session_id)
 
             logger.info(
                 "上下文压缩完成 session=%s source=%s messages=%s 边界 %s→%s tokens %s→%s",

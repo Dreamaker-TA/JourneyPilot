@@ -18,9 +18,6 @@ from typing import Dict
 
 from .models import MCPServerItem
 
-#: 曾经内置、现已移除的 server 名。加载器遇到它们时跳过并 warn（见 `loader.py`）。
-REMOVED_MCP_SERVERS = {"google-maps", "tripadvisor"}
-
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 

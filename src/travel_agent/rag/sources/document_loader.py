@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .document_parse import DocumentRejected, parse_file
+from .document_parse import DocumentRejected, has_indexable_text, parse_file
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +139,10 @@ class DocumentLoader:
             parsed = await parse_file(path)
         except DocumentRejected as exc:
             raise ValueError(f"文档解析被拒（{exc.code}）：{path.name}") from exc
+        if not has_indexable_text(parsed.text):
+            # 扫描版 PDF 是这条路上最常见的一种：pypdf 不报错、逐页返回空串。
+            # 不拦的话它变成一次「成功索引 0 个块」，还被计进 indexed。
+            raise ValueError(f"未提取到可索引正文：{path.name}")
         if parsed.truncated:
             logger.warning("批量导入正文被截断 [%s]", path)
         return [

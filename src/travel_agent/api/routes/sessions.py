@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 from ...builders import get_components
 from ...local_profile import LOCAL_USER_ID
 from ...memory.chat_session import TURN_PAGE_LIMIT
-from ...memory.compaction import get_compaction_service
+from ...memory.compaction import CompactionBusy, get_compaction_service
 from ..schemas import SessionTurnPage
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,8 @@ async def list_session_turns(
         )
     except PermissionError:
         raise HTTPException(status_code=403, detail="无权访问该会话")
+    except CompactionBusy:
+        raise HTTPException(status_code=409, detail="上下文正在整理中，稍后再试")
     except Exception as e:
         logger.error(f"读取会话分页失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="读取会话历史失败")

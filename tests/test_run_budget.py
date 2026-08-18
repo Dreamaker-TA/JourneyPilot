@@ -119,11 +119,24 @@ def test_a_new_snapshot_starts_a_new_ledger():
 def test_per_tool_retries_are_bounded():
     ledger = ledger_for("run_c", _snapshot(max_tool_retries_per_target=1))
     assert ledger.tool_retries_exhausted("search") is False
-    ledger.record_tool_call("search")
-    assert ledger.tool_retries_exhausted("search") is False  # 1 次首发 + 1 次重试
-    ledger.record_tool_call("search")
+    ledger.record_tool_retry("search")
     assert ledger.tool_retries_exhausted("search") is True
     assert ledger.tool_retries_exhausted("other") is False
+
+
+def test_a_tool_that_keeps_succeeding_never_runs_out_of_retries():
+    """这一档管的是重试轮数，不是调用次数。
+
+    把首发也记进去，一个工具在这个 Run 里正常调够几次就被永久短路成 FAILED，
+    此后所有调研静默返回空证据，而 max_tool_calls 永远够不到。
+    """
+
+    ledger = ledger_for("run_c2", _snapshot(max_tool_calls=50, max_tool_retries_per_target=2))
+    for _ in range(20):
+        ledger.record_tool_call("search")
+
+    assert ledger.tool_retries_exhausted("search") is False
+    assert ledger.usage().tool_calls == 20
 
 
 def test_report_states_limits_usage_and_remaining_together():

@@ -112,6 +112,7 @@
 | `provider_channels.online_fast_llm` | int | `8` | >= 1 | `JOURNEYPILOT_PROVIDER_CHANNELS__ONLINE_FAST_LLM` |
 | `provider_channels.ingest_contextual_llm` | int | `4` | >= 1 | `JOURNEYPILOT_PROVIDER_CHANNELS__INGEST_CONTEXTUAL_LLM` |
 | `provider_channels.embedding` | int | `4` | >= 1 | `JOURNEYPILOT_PROVIDER_CHANNELS__EMBEDDING` |
+| `provider_channels.max_queue_wait_seconds` | float | `180.0` | > 0 | `JOURNEYPILOT_PROVIDER_CHANNELS__MAX_QUEUE_WAIT_SECONDS` |
 | `geocoding.nominatim_base_url` | str | `https://nominatim.openstreetmap.org` | — | `JOURNEYPILOT_GEOCODING__NOMINATIM_BASE_URL` |
 | `geocoding.user_agent` | str | `JourneyPilot/1.0 (travel itinerary geocoder; https://github.com/journeypilot)` | — | `JOURNEYPILOT_GEOCODING__USER_AGENT` |
 | `geocoding.timeout_seconds` | float | `10.0` | > 0 | `JOURNEYPILOT_GEOCODING__TIMEOUT_SECONDS` |

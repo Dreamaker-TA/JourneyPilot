@@ -633,6 +633,12 @@
           "title": "Ingest Contextual Llm",
           "type": "integer"
         },
+        "max_queue_wait_seconds": {
+          "default": 180.0,
+          "exclusiveMinimum": 0,
+          "title": "Max Queue Wait Seconds",
+          "type": "number"
+        },
         "online_fast_llm": {
           "default": 8,
           "minimum": 1,

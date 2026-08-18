@@ -1,0 +1,24 @@
+# OpenAI 官方 endpoint。
+#
+# 没有 preset 的上游走保守档（`supports_json_schema: false`），而 OpenAI 是
+# Structured Outputs 的参考实现 —— 价格表里已经有 gpt-5.4 三档，却没有一份 preset，
+# 于是它被静默降级成 json_object + prompt 里明写 schema。
+id: openai
+label: OpenAI Official
+base_url: https://api.openai.com/v1
+last_verified_at: ""
+hostnames:
+  - api.openai.com
+models:
+  primary: gpt-5.4
+  fast: gpt-5.4-mini
+  embedding: text-embedding-3-small
+capabilities:
+  supports_json_schema: true
+  supports_json_object: true
+  supports_stream_usage: true
+  reasoning_control: none
+  token_limit_field: max_completion_tokens
+notes: >
+  last_verified_at 留空：这份 capability 来自 Structured Outputs 的公开契约，
+  不是本仓的真实调用观察。配好 Key 之后跑一次 `journeypilot doctor` 复核。

@@ -89,8 +89,8 @@ class RunBudgetLedger:
     cost_usd: float = 0.0
     #: 有没有出现过价格表没命中的调用。见 `RunBudgetUsage.cost_complete`。
     unpriced_calls: int = 0
-    #: 每个工具在这个 Run 上重试了多少轮。
-    tool_attempts: Dict[str, int] = field(default_factory=dict)
+    #: 每个工具在这个 Run 上**重试**了多少轮。首次调用不计在内。
+    tool_retries: Dict[str, int] = field(default_factory=dict)
     seeded: bool = False
 
     def usage(self) -> RunBudgetUsage:
@@ -140,14 +140,24 @@ class RunBudgetLedger:
             self.cost_usd += float(cost_usd)
 
     def record_tool_call(self, tool_name: str) -> None:
+        """一次真实的 Provider 调用。首发和重试都算，它们同样花配额。"""
+
         self.tool_calls += 1
-        self.tool_attempts[tool_name] = self.tool_attempts.get(tool_name, 0) + 1
+
+    def record_tool_retry(self, tool_name: str) -> None:
+        """一次**重试**。首发不走这里。
+
+        与 `record_tool_call` 分开：把两者记在同一个计数器上，会让一个工具在这个 Run 里
+        正常调用几次之后就被判成「重试用尽」，此后每次调用都短路成 FAILED，
+        而 max_tool_calls 永远够不到。
+        """
+
+        self.tool_retries[tool_name] = self.tool_retries.get(tool_name, 0) + 1
 
     def tool_retries_exhausted(self, tool_name: str) -> bool:
         """这个工具在这个 Run 上是否已经用完了它的重试轮数。"""
 
-        allowed = self.snapshot.max_tool_retries_per_target + 1
-        return self.tool_attempts.get(tool_name, 0) >= allowed
+        return self.tool_retries.get(tool_name, 0) >= self.snapshot.max_tool_retries_per_target
 
     def report(self) -> Dict[str, Any]:
         """给 SSE / REST / doctor 的那一份读数。"""

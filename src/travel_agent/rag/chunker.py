@@ -527,8 +527,16 @@ class ContextualChunker:
                     )
                 return _chunk_without_prefix(chunk)
 
+        # 分批派发而不是一次 gather 全部：熔断标志只在**进入** `_add_context` 时读一次，
+        # 而一次性派发会让后面所有段都已经排在通道队列里 —— 熔断之后它们照样发出去，
+        # `contextual_failure_threshold` 于是只是一句日志。批大小取通道配额，通道本来
+        # 就会把它们排成这个宽度，所以吞吐不变。
+        wave = max(1, int(get_settings().provider_channels.ingest_contextual_llm))
+        results: List[Dict[str, Any]] = []
         with llm_channel("ingest_contextual_llm"):
-            results = await asyncio.gather(*[_add_context(c) for c in base_chunks])
+            for start in range(0, len(base_chunks), wave):
+                batch = base_chunks[start : start + wave]
+                results.extend(await asyncio.gather(*[_add_context(c) for c in batch]))
         prefixed = sum(
             1 for c in results if c["content"] != c.get("original_content")
         )

@@ -62,6 +62,17 @@ from .usage import (
 logger = logging.getLogger(__name__)
 
 
+def _close_unstarted(awaitable: Any) -> None:
+    """关掉一个还没被 await 的协程。已经跑过的对象上是 no-op。"""
+
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        try:
+            close()
+        except RuntimeError:
+            pass
+
+
 @runtime_checkable
 class BaseLLM(Protocol):
     """本模块使用的 LLM 协议类型（duck typing，由各实现类自带签名对齐）。"""
@@ -430,16 +441,25 @@ class OpenAICompatibleLLM(BaseLLM):
         """在通道配额内发起一次调用，并受 Run 的时间窗约束。
 
         排队等在时间窗**里面**：等不到位置和调用本身太慢对一个 Run 是同一件事 ——
-        窗口关了。所以这里不给排队另设一个超时，由 `await_model_operation` 定界。
+        窗口关了。没有窗口的那一档（快问快答、授权之前）由
+        `provider_channels.max_queue_wait_seconds` 兜底，否则通道满了这条请求永远不回来。
         """
 
         gate = self._channel()
+        try:
+            wait_seconds = remaining_model_seconds(operation)
+            if wait_seconds is None:
+                wait_seconds = self._queue_wait_seconds()
+            async with gate.hold(wait_seconds=wait_seconds):
+                return await await_model_operation(awaitable, operation=operation)
+        except BaseException:
+            # 同步拒绝（窗口已关、已取消、通道满）时调用方构造好的那个协程还没被 await。
+            # 不关掉它就是一条 "coroutine was never awaited" 警告。
+            _close_unstarted(awaitable)
+            raise
 
-        async def _hold() -> Any:
-            async with gate.hold(wait_seconds=None):
-                return await awaitable
-
-        return await await_model_operation(_hold(), operation=operation)
+    def _queue_wait_seconds(self) -> float:
+        return float(get_settings().provider_channels.max_queue_wait_seconds)
 
     def _start_record(self, method: str, *, stream: bool) -> Optional[LLMCallRecord]:
         """无 run 上下文（离线 eval 等）→ 返回 None，静默跳过记账。"""
@@ -635,11 +655,12 @@ class OpenAICompatibleLLM(BaseLLM):
         try:
             remaining = remaining_model_seconds("model.astream")
             gate = self._channel()
+            queue_wait = remaining if remaining is not None else self._queue_wait_seconds()
 
             async def consume_stream() -> AsyncIterator[str]:
                 nonlocal full, ttft_ms
                 # 通道位置要占满整条流：一条在读的流一直占着上游的一条连接。
-                async with gate.hold(wait_seconds=None):
+                async with gate.hold(wait_seconds=queue_wait):
                     async for chunk in self._client.astream(
                         _to_langchain_messages(messages), **kwargs
                     ):

@@ -17,13 +17,12 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import yaml
 from pydantic import ValidationError
 
 from .env import EnvOverrideError, apply_env_overrides, known_env_variables
-from .mcp_defaults import REMOVED_MCP_SERVERS
 from .models import CONFIG_VERSION, MCPServerItem, ModelPricingItem, Settings
 from .pricing import resolve_price_in
 from .redaction import redact
@@ -73,56 +72,36 @@ def load_yaml(path: Path) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# 结构迁移
+# 版本判定
 # --------------------------------------------------------------------------- #
 
-def migrate_config_data(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
-    """把任意受支持版本的 config.yaml 结构迁到当前版本，返回 (数据, 迁移说明)。
+def check_config_version(data: Dict[str, Any]) -> Dict[str, Any]:
+    """判 ``config_version`` 并把它摘掉，返回其余字段。
 
-    没有 ``config_version`` 的文件按 1 处理：这个字段是版本 2 引入的，所以「缺失」
-    本身就是版本 1 的标记。
+    **不迁移旧结构**：不认识的版本一律拒绝并说清楚要改什么。留一条静默改写的读路径，
+    换来的是「我明明改了配置」与「程序读到的不是我写的那份」并存。
     """
 
     payload = dict(data)
-    version = int(payload.pop("config_version", 1) or 1)
-    notes: List[str] = []
-    if version > CONFIG_VERSION:
+    raw_version = payload.pop("config_version", None)
+    if raw_version is None:
+        # 空文件（全走默认值）不需要声明版本。
+        if not payload:
+            return payload
         raise ConfigError(
-            f"config_version={version} 比这个版本的 JourneyPilot 认识的 "
-            f"{CONFIG_VERSION} 更新；升级程序或改回旧配置。"
+            f"config.yaml 缺少 config_version；当前版本是 {CONFIG_VERSION}，"
+            "照 config.example.yaml 补上这一行。"
         )
-    if version < 2:
-        notes.extend(_migrate_v1_to_v2(payload))
-    return payload, notes
-
-
-def _migrate_v1_to_v2(payload: Dict[str, Any]) -> List[str]:
-    notes: List[str] = []
-
-    if "model" in payload:
-        # v1 把主力模型段叫 `model`，与「哪个模型」这个更细的问题重名。
-        payload.setdefault("primary_model", payload["model"])
-        payload.pop("model")
-        notes.append("model → primary_model")
-
-    rag = payload.get("rag")
-    if isinstance(rag, dict) and "contextual_max_concurrency" in rag:
-        # 并发归 provider_channels 一处：入库与在线请求共用上游，配额必须分开声明。
-        rag.pop("contextual_max_concurrency")
-        notes.append(
-            "rag.contextual_max_concurrency 已移除"
-            "（并发归 provider_channels.ingest_contextual_llm）"
+    try:
+        version = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"config_version 必须是整数，实际 {raw_version!r}") from exc
+    if version != CONFIG_VERSION:
+        raise ConfigError(
+            f"config_version={version}，这个版本的 JourneyPilot 只认 {CONFIG_VERSION}。"
+            "对照 config.example.yaml 改这份文件，或者换回对应版本的程序。"
         )
-
-    servers = (payload.get("mcp") or {}).get("servers")
-    if isinstance(servers, dict):
-        removed = sorted(name for name in servers if name in REMOVED_MCP_SERVERS)
-        for name in removed:
-            servers.pop(name)
-        if removed:
-            notes.append(f"移除已停用的 MCP server：{', '.join(removed)}")
-
-    return notes
+    return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -202,7 +181,6 @@ class EffectiveConfig:
 
     settings: Settings
     config_path: Optional[Path]
-    migration_notes: List[str] = field(default_factory=list)
     #: 字段路径 → "config default" | "config.yaml" | "environment (VAR)"
     sources: Dict[str, str] = field(default_factory=dict)
 
@@ -242,9 +220,9 @@ def load_effective_config() -> EffectiveConfig:
 
     path = find_config_yaml()
     raw = load_yaml(path) if path else {}
-    migrated, notes = migrate_config_data(raw)
-    settings = build_settings(migrated, path=path)
-    sources = _yaml_sources(migrated)
+    payload = check_config_version(raw)
+    settings = build_settings(payload, path=path)
+    sources = _yaml_sources(payload)
     try:
         applied = apply_env_overrides(settings)
     except EnvOverrideError as exc:
@@ -257,7 +235,6 @@ def load_effective_config() -> EffectiveConfig:
     return EffectiveConfig(
         settings=settings,
         config_path=path,
-        migration_notes=notes,
         sources=sources,
     )
 
@@ -273,11 +250,6 @@ def get_effective_config() -> EffectiveConfig:
     global _effective
     if _effective is None:
         _effective = load_effective_config()
-        if _effective.migration_notes:
-            logger.warning(
-                "config.yaml 按 config_version 迁移了结构（文件本身未改写）：%s",
-                "；".join(_effective.migration_notes),
-            )
     return _effective
 
 
@@ -308,8 +280,8 @@ def resolve_price(
 def persist_model_config(tier: str, model_data: Dict[str, Any]) -> None:
     """把模型段写回 config.yaml。
 
-    写入方**只有 CLI 与这一个函数**。写回时补上 ``config_version``：一份被程序改过
-    却没有版本号的文件，下一次加载会被当成 v1 再迁移一遍。
+    写入方**只有 CLI 与这一个函数**。写回时补上 ``config_version``，否则下一次加载
+    会因为缺版本号被拒。
     """
 
     path = find_config_yaml()

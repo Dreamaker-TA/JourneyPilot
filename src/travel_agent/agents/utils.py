@@ -787,8 +787,12 @@ async def execute_tool(
         try:
             remaining_model_seconds(f"tool.{tool_name}.attempt_{attempt + 1}")
             # 每一次尝试都算一次调用：重试也花配额，也一样能变成无限循环。
+            # 重试另记一笔：那一档的上限是「同一个工具在这个 Run 上重试多少轮」，
+            # 把首发也算进去等于调够几次就把这个工具永久关掉。
             if ledger is not None:
                 ledger.record_tool_call(tool_name)
+                if attempt > 0:
+                    ledger.record_tool_retry(tool_name)
             result = await await_model_operation(
                 registry.execute(tool_name, **arguments),
                 operation=f"tool.{tool_name}.attempt_{attempt + 1}",

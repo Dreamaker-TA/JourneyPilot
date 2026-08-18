@@ -679,7 +679,6 @@ def cmd_config_show(args: argparse.Namespace) -> int:
 
     payload = {
         "config_path": str(effective.config_path) if effective.config_path else None,
-        "migration_notes": effective.migration_notes,
         "sources": effective.sources,
         "effective": effective.redacted(),
     }
@@ -688,9 +687,6 @@ def cmd_config_show(args: argparse.Namespace) -> int:
         "",
         *effective.report_lines(),
     ]
-    if effective.migration_notes:
-        lines.extend(["", "结构迁移（内存中生效，文件未改写）："])
-        lines.extend(f"  {note}" for note in effective.migration_notes)
     _emit(payload, as_json=args.json, lines=lines)
     return EXIT_OK
 
@@ -712,10 +708,8 @@ def cmd_config_validate(args: argparse.Namespace) -> int:
     payload = {
         "valid": True,
         "config_path": str(effective.config_path) if effective.config_path else None,
-        "migration_notes": effective.migration_notes,
     }
     lines = [f"配置有效：{effective.config_path or '（默认值）'}"]
-    lines.extend(f"  迁移：{note}" for note in effective.migration_notes)
     _emit(payload, as_json=args.json, lines=lines)
     return EXIT_OK
 

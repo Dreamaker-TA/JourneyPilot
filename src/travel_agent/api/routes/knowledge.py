@@ -18,6 +18,7 @@ from ...config import get_settings
 from ...local_profile import LOCAL_USER_ID
 from ...rag.collections import canonical_logical_collection, user_scoped_collection
 from ...rag.sources.document_parse import (
+    MIN_INDEXABLE_CHARS,
     SUPPORTED_SUFFIXES,
     DocumentRejected,
     parse_upload,
@@ -37,11 +38,9 @@ from ..schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
-# 一份「进得去」的资料至少要有这么多非空白字符。**这个数只在这里写一次**：
-# 它必须对四种格式一视同仁 —— 否则一个空 .md 上传成功、回执写着「已成功索引 0 个
-# 文本块」，而「成功」与「0 个」在同一句话里。同一个入口对四种格式给两种答案，
-# 说明那个数在错的层上。
-_MIN_INDEXABLE_CHARS = 8
+# 阈值与判定在 `rag/sources/document_parse.py`：上传与批量导入两条入口共用一份，
+# 否则扫描版 PDF 在一条路上被拒、在另一条路上变成一次「成功索引 0 个文本块」。
+_MIN_INDEXABLE_CHARS = MIN_INDEXABLE_CHARS
 
 # 这条路上每一个 4xx 都带一个 `code`，**一个都不许少**。少一个的后果不是「少一句话」，
 # 是**画成另一句话**：界面读不到 code 就按状态码回落，而 422 那一档的回落是

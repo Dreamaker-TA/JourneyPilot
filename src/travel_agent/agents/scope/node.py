@@ -166,7 +166,7 @@ async def _check_and_handle_compaction_deep(
 
     compaction_updates: dict = {}
     if built_ctx.needs_compaction and stream_queue is not None:
-        from ...memory.compaction import get_compaction_service
+        from ...memory.compaction import CompactionBusy, get_compaction_service
 
         try:
             result = await get_compaction_service().compact(
@@ -174,6 +174,10 @@ async def _check_and_handle_compaction_deep(
                 session_id=state.session_id or "",
                 source="automatic",
             )
+        except CompactionBusy:
+            # 已经有一次在跑（或提交时被抢先）。这是正常跳过，不是失败。
+            logger.info("Scope: 会话已有压缩在进行，本轮沿用原上下文")
+            result = None
         except Exception as e:  # 压缩涉及 DB + LLM 多步异步操作，需 catch-all 保证主流程不中断
             # 失败就照原上下文继续。这条路径上没有「压缩进度」这一类事件了
             # （见 ``api/routes/chat_stream_handlers.py`` 里那段说明）：本轮压缩没成，

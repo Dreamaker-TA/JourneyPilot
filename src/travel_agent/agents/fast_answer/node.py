@@ -624,7 +624,7 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
     # 压完立刻用新 Anchor 重装一次上下文，不再回头看还需不需要压。
     context_compaction: Dict[str, Any] = {"triggered": False}
     if built_ctx.needs_compaction and stream_queue is not None:
-        from ...memory.compaction import get_compaction_service
+        from ...memory.compaction import CompactionBusy, get_compaction_service
 
         try:
             result = await get_compaction_service().compact(
@@ -632,6 +632,10 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
                 session_id=state.session_id or "",
                 source="automatic",
             )
+        except CompactionBusy:
+            # 已经有一次在跑（或提交时被抢先）。这是正常跳过，不是失败。
+            logger.info("FastAnswer: 会话已有压缩在进行，本轮沿用原上下文")
+            result = None
         except Exception as e:
             # 压缩失败就照原上下文继续，不额外发事件：这条路径上没有「压缩进度」这
             # 一类事件了（见 ``chat_stream_handlers`` 里那段说明），而本轮压缩没成，

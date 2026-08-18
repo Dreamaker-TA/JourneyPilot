@@ -15,7 +15,7 @@ from travel_agent.config import (
     env_variable_reference,
     get_preset,
     load_effective_config,
-    migrate_config_data,
+    check_config_version,
     preset_model_section,
     redact,
 )
@@ -70,38 +70,38 @@ def test_mcp_servers_merge_rather_than_replace():
     assert server.env == {"TAVILY_API_KEY": "x"}
 
 
-# --- 结构迁移 ------------------------------------------------------------- #
+# --- 版本判定 ------------------------------------------------------------- #
 
 
-def test_a_file_without_a_version_is_migrated_from_v1():
-    payload, notes = migrate_config_data(
-        {
-            "model": {"model_name": "legacy"},
-            "rag": {"contextual_max_concurrency": 4, "top_k": 7},
-            "mcp": {"servers": {"tripadvisor": {"command": "npx"}, "fetch": {}}},
-        }
-    )
-    assert payload["primary_model"] == {"model_name": "legacy"}
-    assert "model" not in payload
-    assert "contextual_max_concurrency" not in payload["rag"]
-    assert payload["rag"]["top_k"] == 7
-    assert "tripadvisor" not in payload["mcp"]["servers"]
-    assert "fetch" in payload["mcp"]["servers"]
-    assert len(notes) == 3
+def test_a_version_that_is_not_the_current_one_is_refused():
+    """认不出的版本必须报错，不能当成当前版本读，也不能静默改写。"""
+
+    for version in (CONFIG_VERSION - 1, CONFIG_VERSION + 5):
+        with pytest.raises(ConfigError) as exc:
+            check_config_version({"config_version": version, "database": {"host": "x"}})
+        assert str(CONFIG_VERSION) in str(exc.value)
 
 
-def test_a_migrated_v1_file_then_validates():
-    payload, _ = migrate_config_data({"model": {"model_name": "legacy"}})
-    settings = build_settings(payload)
-    assert settings.primary_model.model_name == "legacy"
-
-
-def test_a_future_config_version_is_refused():
-    """认不出的版本必须报错，不能当成当前版本读。"""
-
+def test_a_non_empty_file_without_a_version_is_refused():
     with pytest.raises(ConfigError) as exc:
-        migrate_config_data({"config_version": CONFIG_VERSION + 5})
-    assert str(CONFIG_VERSION) in str(exc.value)
+        check_config_version({"database": {"host": "x"}})
+    assert "config_version" in str(exc.value)
+
+
+def test_an_empty_file_needs_no_version():
+    """全走默认值的空文件不必声明版本。"""
+
+    assert check_config_version({}) == {}
+
+
+def test_the_version_key_does_not_reach_the_schema():
+    """``config_version`` 不是 Settings 的字段，留着它会撞上 extra=forbid。"""
+
+    payload = check_config_version(
+        {"config_version": CONFIG_VERSION, "primary_model": {"model_name": "m"}}
+    )
+    assert "config_version" not in payload
+    assert build_settings(payload).primary_model.model_name == "m"
 
 
 # --- 环境变量 ------------------------------------------------------------- #
@@ -290,9 +290,7 @@ def test_the_example_config_is_valid_and_current():
     root = Path(__file__).resolve().parents[1]
     raw = load_yaml(root / "config.example.yaml")
     assert raw["config_version"] == CONFIG_VERSION
-    payload, notes = migrate_config_data(raw)
-    assert notes == [], f"示例配置需要迁移，说明它已经落后：{notes}"
-    build_settings(payload)
+    build_settings(check_config_version(raw))
 
 
 def test_the_example_config_ships_no_api_key():

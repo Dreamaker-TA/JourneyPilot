@@ -5,9 +5,8 @@
 不会在每次解析时加载配置、建连接池或触发任何一次网络调用。上限由调用方以 JSON
 传进来，因为一个只读参数比一个被 import 的全局配置更容易在崩溃后复现。
 
-为什么是子进程而不是线程：pypdf / python-docx 处理的是**用户上传的不可信文件**，
-一次解析可以在纯 C 代码里跑很久，而线程既杀不掉也限不住内存。子进程可以带
-RLIMIT，超时可以杀整个进程组，进程退出时 OS 一并回收。
+为什么是子进程而不是线程：解析的是不可信文件，线程既杀不掉也限不住内存。
+RLIMIT 由它自己装（见 `_apply_rlimits`），不走调用方的 preexec_fn。
 
 约定：正常退出码 0，stdout 一行 JSON。失败也是退出码 0 + 一行 JSON（带 ``code``），
 被解析器自己搞死（OOM / CPU 上限 / segfault）才是非零退出码。
@@ -84,6 +83,30 @@ def _parse_docx(path: str, limits: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _apply_rlimits(limits: Dict[str, Any]) -> None:
+    """给自己装上 CPU 时间与地址空间上限。
+
+    在子进程里自己装，不用调用方的 ``preexec_fn``：那个钩子在多线程进程里 fork
+    之后、exec 之前跑，CPython 明说它不安全（可能死锁）。而 API 进程有 anyio 工作
+    线程和 Starlette 的线程池。
+    """
+
+    try:
+        import resource
+    except ImportError:  # pragma: no cover - 非 POSIX 平台
+        return
+    cpu_seconds = int(limits.get("parse_cpu_seconds") or 0)
+    address_space = int(limits.get("parse_address_space_bytes") or 0)
+    for name, value in (("RLIMIT_CPU", cpu_seconds), ("RLIMIT_AS", address_space)):
+        if value <= 0:
+            continue
+        try:
+            resource.setrlimit(getattr(resource, name), (value, value))
+        except (ValueError, OSError):
+            # 某些容器拒绝收紧 RLIMIT。少一道上限，但输入边界与墙钟上限仍然在。
+            pass
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 4:
         print(json.dumps(_fail("worker_usage", "expected <suffix> <path> <limits-json>")))
@@ -94,6 +117,7 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(json.dumps(_fail("worker_usage", f"bad limits json: {exc}")))
         return 0
+    _apply_rlimits(limits)
     try:
         if suffix == ".pdf":
             result = _parse_pdf(path, limits)

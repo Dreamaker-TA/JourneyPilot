@@ -390,6 +390,9 @@ class ProviderChannelConfig(StrictConfig):
     ingest_contextual_llm: int = Field(default=4, ge=1)
     #: 远程 embedding 服务的同时请求数（本地 ONNX 推理走 BlockingWorkConfig）。
     embedding: int = Field(default=4, ge=1)
+    #: 没有 Run deadline 的调用（快问快答、授权之前）排队等位置的上限。有 deadline 的
+    #: 那一档由窗口自己定界，不读这个值。
+    max_queue_wait_seconds: float = Field(default=180.0, gt=0)
 
 
 class BackgroundJobsConfig(StrictConfig):

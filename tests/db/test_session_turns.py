@@ -252,3 +252,24 @@ async def _max_event_order(session_id: str) -> int:
             {"sid": session_id},
         )
     return int(result.scalar() or 0)
+
+
+async def test_a_raced_commit_is_busy_not_nothing_to_compact(migrated_async_database):
+    """提交时边界被抢先，答案不能是「会话中无可整理的消息」。
+
+    那个会话有几千条没压缩的消息，而路由照着这句话回 400，用户没有理由再试一次。
+    """
+
+    from travel_agent.memory.compaction import CompactionBusy
+
+    memory = ChatSessionMemory()
+    service = CompactionService(chat_session_memory=memory, compressor=_FakeCompressor())
+    await _write_turns(memory, "s-race", 2, steps=0)
+
+    async def _lose_the_cas(*args, **kwargs):
+        return None
+
+    memory.commit_compaction = _lose_the_cas
+
+    with pytest.raises(CompactionBusy):
+        await service.compact(user_id=_USER, session_id="s-race", source="manual")
