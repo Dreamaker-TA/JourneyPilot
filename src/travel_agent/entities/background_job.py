@@ -82,9 +82,6 @@ class BackgroundJob(BaseModel):
     updated_at: str = Field(default_factory=utc_now_iso)
     completed_at: Optional[str] = None
 
-    @property
-    def is_open(self) -> bool:
-        return self.status in OPEN_BACKGROUND_JOB_STATUSES
 
 
 def coerce_job_type(value: str | BackgroundJobType) -> BackgroundJobType:

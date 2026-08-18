@@ -3,22 +3,22 @@
 与 `utils/rate_gate.py` 分工明确：闸管**两次请求之间的间隔**，这里管**同时在飞
 的条数**。一个上游同时需要两者时两个都要挂上。
 
-通道是产品预算的单位，不是传输层设施。一次资料入库和一次在线问答走同一个 fast 档
-上游、共用一条 httpx 连接池，但它们的配额必须分开，否则一次上传就能把在线请求排到
-队尾（实测服务不可达 7 分半）。
+通道是产品预算的单位，不是传输层设施：共用一条连接池的上游也要分开配额。
 
-排队**有上界**：等不到位置时抛 :class:`ChannelBusy`，由调用方决定这是一次降级
-（少一段上下文前缀）还是一个诚实的失败（导出请稍后重试）。无限排队等于把背压
-藏起来，然后在内存里付账。
+排队**有上界**：等不到位置抛 :class:`ChannelBusy`，由调用方决定这是一次降级还是一个
+诚实的失败。
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ChannelBusy(RuntimeError):
@@ -136,3 +136,53 @@ def reset_channels() -> None:
     """丢掉全部通道状态。只供测试在用例之间隔离读数。"""
 
     _GATES.clear()
+
+
+class PeriodicTask:
+    """一个后台轮询协程的启停。
+
+    这套 start / cancel-and-await-CancelledError 的样板原本在四个类里各写一份，其中
+    一份的清理顺序还与另外三份不同 —— 读了三个就以为懂了第四个。加固关闭行为（比如给
+    join 加超时，免得一个卡住的轮询挡住 lifespan 收尾）现在只改这一处。
+    """
+
+    def __init__(self, name: str, factory: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        self._name = name
+        self._factory = factory
+        self._task: Optional[asyncio.Task] = None
+
+    @property
+    def running(self) -> bool:
+        task = self._task
+        return task is not None and not task.done()
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._factory(), name=self._name)
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+async def run_forever(name: str, step: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    """反复跑 ``step``，直到被取消。
+
+    一次异常不停掉循环：数据库抖一下之后，取消请求仍然必须能被看见。取消要原样往外抛
+    —— 把它并进 ``except Exception`` 会让关闭变成一次静默的重试。
+    """
+
+    while True:
+        try:
+            await step()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("%s 轮询失败：%s", name, exc, exc_info=True)

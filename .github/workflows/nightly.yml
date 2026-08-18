@@ -31,12 +31,11 @@ jobs:
             groups: "--group local-embedding --group cross-encoder"
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --frozen --group dev ${{ matrix.groups }}
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--group dev ${{ matrix.groups }}"
       # 每种组合都要能读配置、能跑不依赖增强能力的测试。承诺的是这三种组合，
       # 其余组合标记 advanced，不承诺每次都测（ADR-0007）。
       - run: uv run python journeypilot.py config validate
@@ -66,18 +65,18 @@ jobs:
     env:
       JOURNEYPILOT_DATABASE__HOST: 127.0.0.1
       JOURNEYPILOT_DATABASE__PORT: "5432"
+      JOURNEYPILOT_DATABASE__NAME: travel_agent
       JOURNEYPILOT_DATABASE__USER: travel_agent
       JOURNEYPILOT_DATABASE__PASSWORD: travel_agent_pwd
       JOURNEYPILOT_REDIS__HOST: 127.0.0.1
       JOURNEYPILOT_REDIS__PORT: "6379"
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --frozen --group local-embedding --group dev
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--group local-embedding --group dev"
       # 这里跑的是**同一套**测试（大历史分页、慢客户端、租约竞争都已经在 PR 门禁里），
       # nightly 加的是**重复**：竞争与超时相关的用例偶发失败，只跑一次看不出来，
       # 而一个偶发红灯会训练所有人忽略红灯。跑三遍，任意一遍失败即失败。
@@ -107,28 +106,19 @@ jobs:
     env:
       JOURNEYPILOT_DATABASE__HOST: 127.0.0.1
       JOURNEYPILOT_DATABASE__PORT: "5432"
+      JOURNEYPILOT_DATABASE__NAME: travel_agent
       JOURNEYPILOT_DATABASE__USER: travel_agent
       JOURNEYPILOT_DATABASE__PASSWORD: travel_agent_pwd
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --frozen --group local-embedding --group dev
-      - name: Install PostgreSQL 18 client
-        run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--group local-embedding --group dev"
+          postgres-client: "true"
       # 三条路径共用同一套断言：迁到 head 之后指纹必须匹配存档。
       - name: 迁移矩阵 + 备份恢复
         run: uv run pytest tests/db/test_migration_baseline.py tests/db/test_migration_gates.py

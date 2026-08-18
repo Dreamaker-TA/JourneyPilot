@@ -7,14 +7,7 @@ Create Date: 2026-08-17
 新增 `background_jobs`（后台任务的最终事实），并为「至少一次执行」补上业务侧幂等：
 `memory_facts.fact_digest` 唯一约束 + `user_profiles.revision` 画像基线。
 
-## 门禁
-
-- **影响面**：新增一张表；`memory_facts` 与 `user_profiles` 各加列，既有列不动。
-- **旧数据路径**：历史事实 `fact_digest` 为 NULL，不参与唯一约束。
-- **失败注入**：单事务，中途失败整体回滚，`alembic_version` 不前进。
-- **幂等**：`IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`。
-- **观察信号**：`GET /api/health/ready` 的 `background_jobs`。
-- **回滚**：可逆。丢掉 job 表等于「没有待处理的后台任务」。
+历史事实 `fact_digest` 为 NULL，不参与唯一约束；`IF NOT EXISTS` 幂等；可逆。
 """
 
 from __future__ import annotations

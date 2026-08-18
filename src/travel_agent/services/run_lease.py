@@ -41,18 +41,6 @@ class RunLeaseKeeper:
         self._task: Optional[asyncio.Task] = None
         self._lost = False
 
-    @property
-    def run_id(self) -> str:
-        return self._run_id
-
-    @property
-    def held(self) -> bool:
-        return self._lease_token is not None and not self._lost
-
-    @property
-    def lost(self) -> bool:
-        return self._lost
-
     async def claim(self, *, last_safe_checkpoint_id: Optional[str] = None) -> bool:
         execution = await self._store.claim(
             self._run_id,

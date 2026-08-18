@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..entities.trip_run import (
     RunCommand,
@@ -22,6 +22,7 @@ from ..entities.trip_run import (
 )
 from ..infrastructure.run_command_store import RunCommandStore
 from ..workflows.run_control import RunControlHandle
+from ..utils.concurrency import PeriodicTask, run_forever
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,51 @@ logger = logging.getLogger(__name__)
 PAST_SUPPLEMENT_STAGE = "run_past_supplement_stage"
 RUN_ENDED_BEFORE_CONSUMPTION = "run_ended_before_consumption"
 RUN_INTERRUPTED_BEFORE_CONSUMPTION = "run_interrupted_before_consumption"
+
+
+async def settle_run_terminal_commands(
+    store: RunCommandStore,
+    run_id: str,
+    *,
+    run_status: str,
+    cancel_consumed: bool,
+    error_code: str = RUN_ENDED_BEFORE_CONSUMPTION,
+    reason: Optional[str] = None,
+) -> None:
+    """Run 不再有执行器时，给还没收口的命令一个结论。
+
+    「没有命令永远停在 pending」是一条不变量，而它有两个到达点：还活着的协调器
+    （`RunCommandCoordinator.settle_terminal`）和恢复扫描（`RunRecoveryService`）。
+    判据必须是同一份 —— 否则同一条命令会因为「进程当时还在没在」收出两种形状。
+
+    取消命令只在 Run 真的停下来时算 consumed：那是它要的效果。其他终态下留着的取消
+    命令没有被执行（是运行自己结束的），和没能生效的追加要求一样明确拒绝。
+
+    **顺序不可交换**：先 CONSUMED 掉取消，再统一 REJECTED，否则那条取消会被拒掉。
+    """
+
+    result: Dict[str, Any] = {"run_status": run_status}
+    if reason is not None:
+        result["reason"] = reason
+    try:
+        if cancel_consumed:
+            await store.settle_open_for_run(
+                run_id,
+                status=RunCommandStatus.CONSUMED,
+                command_types=[RunCommandType.CANCEL],
+                result=result,
+            )
+        await store.settle_open_for_run(
+            run_id,
+            status=RunCommandStatus.REJECTED,
+            error_code=error_code,
+            result=result,
+        )
+    except Exception as exc:
+        # 收口失败只影响回执的措辞：恢复扫描会在下一轮对同一批命令再做一次同样的判定。
+        logger.warning(
+            "运行控制命令收口失败 run_id=%s status=%s error=%s", run_id, run_status, exc
+        )
 
 
 class RunCommandCoordinator:
@@ -48,7 +94,7 @@ class RunCommandCoordinator:
         self._run_id = run_id
         self._handle = handle
         self._poll_seconds = max(0.2, poll_seconds)
-        self._task: Optional[asyncio.Task] = None
+        self._poller = PeriodicTask(f"run_commands:{run_id}", self._poll_loop)
         handle.supplement_applied_sink = self._on_supplements_applied
 
     async def poll_once(self) -> List[RunCommand]:
@@ -78,19 +124,11 @@ class RunCommandCoordinator:
         return commands
 
     def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._poll_loop())
+        self._poller.start()
 
     async def stop(self) -> None:
-        task = self._task
-        self._task = None
         self._handle.supplement_applied_sink = None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await self._poller.stop()
         await self._release_unapplied_claims()
 
     async def _release_unapplied_claims(self) -> None:
@@ -116,37 +154,17 @@ class RunCommandCoordinator:
             )
 
     async def settle_terminal(self, run_status: TripRunStatus | str) -> None:
-        """Run 结束时给还没收口的命令一个结论。
-
-        取消命令在 Run 真的停下来时才算 consumed —— 那是它要的效果。其他终态下留着的
-        取消命令没有被执行（是运行自己结束的），和没能生效的追加要求一样明确拒绝。
-        """
+        """Run 结束时给还没收口的命令一个结论。判据见 `settle_run_terminal_commands`。"""
 
         status = (
             run_status.value if isinstance(run_status, TripRunStatus) else str(run_status)
         )
-        try:
-            if status == TripRunStatus.CANCELLED.value:
-                await self._store.settle_open_for_run(
-                    self._run_id,
-                    status=RunCommandStatus.CONSUMED,
-                    command_types=[RunCommandType.CANCEL],
-                    result={"run_status": status},
-                )
-            await self._store.settle_open_for_run(
-                self._run_id,
-                status=RunCommandStatus.REJECTED,
-                error_code=RUN_ENDED_BEFORE_CONSUMPTION,
-                result={"run_status": status},
-            )
-        except Exception as exc:
-            # 收口失败只影响回执的措辞：恢复扫描会在下一轮对同一批命令再做一次同样的判定。
-            logger.warning(
-                "运行控制命令收口失败 run_id=%s status=%s error=%s",
-                self._run_id,
-                status,
-                exc,
-            )
+        await settle_run_terminal_commands(
+            self._store,
+            self._run_id,
+            run_status=status,
+            cancel_consumed=status == TripRunStatus.CANCELLED.value,
+        )
 
     async def _on_supplements_applied(self, command_ids: List[str], node: str) -> None:
         await self._store.settle(
@@ -171,20 +189,12 @@ class RunCommandCoordinator:
                 )
 
     async def _poll_loop(self) -> None:
-        while True:
-            try:
-                await asyncio.wait_for(
-                    self._handle.wake_event.wait(), timeout=self._poll_seconds
-                )
-            except asyncio.TimeoutError:
-                pass
-            self._handle.wake_event.clear()
-            try:
-                await self.poll_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # 轮询失败不能停掉循环：一次数据库抖动之后，取消请求仍然必须能被看见。
-                logger.warning(
-                    "运行控制命令轮询失败 run_id=%s error=%s", self._run_id, exc
-                )
+        await run_forever(f"运行控制命令 run_id={self._run_id}", self._step)
+
+    async def _step(self) -> None:
+        try:
+            await asyncio.wait_for(self._handle.wake_event.wait(), timeout=self._poll_seconds)
+        except asyncio.TimeoutError:
+            pass
+        self._handle.wake_event.clear()
+        await self.poll_once()

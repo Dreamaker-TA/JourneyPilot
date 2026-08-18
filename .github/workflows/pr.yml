@@ -31,15 +31,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      # --frozen：lockfile 就是事实。它与 pyproject 不一致时这一步失败，
-      # 而那正是「改了依赖没提交 lockfile」应该被发现的地方。
-      - name: Install (core + local-embedding + dev)
-        run: uv sync --frozen --group local-embedding --group dev
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--group local-embedding --group dev"
       - run: uv run ruff check src/ tests/ scripts/
       - name: 配置校验与生成物一致性
         run: |
@@ -82,24 +78,12 @@ jobs:
       JOURNEYPILOT_REDIS__PORT: "6379"
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --frozen --group local-embedding --group dev
-      # postgresql-client 供备份/恢复测试调 pg_dump / pg_restore。
-      # 版本必须 >= 服务端，否则 create_backup 会拒绝产出备份。
-      - name: Install PostgreSQL 18 client
-        run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--group local-embedding --group dev"
+          postgres-client: "true"
       # 空库 → head，以及结构指纹存档必须匹配。指纹不匹配意味着有人加了迁移
       # 却没重新生成存档，此后所有校验都对着错的基准比。
       - name: Migration on an empty database
@@ -198,13 +182,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      # core 单独装：这一条守的是「基础安装不被增强依赖拖着走」（ADR-0007）。
-      - run: uv sync --frozen --no-dev
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--no-dev"
       - name: torch stack must be absent
         run: |
           ! uv run python -c "import torch" 2>/dev/null || { echo "core 装进了 torch"; exit 1; }

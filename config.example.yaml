@@ -176,7 +176,6 @@ blocking_work:
   pdf_export: 1
   document_parse: 2
   local_embedding: 2
-  cpu_projection: 2
   queue_wait_seconds: 30.0
 
 # 上传与文档解析的硬输入边界（rag/sources/document_parse.py）。

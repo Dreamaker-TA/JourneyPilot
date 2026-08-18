@@ -19,6 +19,7 @@ from ..entities.background_job import (
     retry_delay_seconds,
 )
 from ..infrastructure.background_job_store import BackgroundJobStore
+from ..utils.concurrency import PeriodicTask, run_forever
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ class BackgroundJobWorker:
         self._lease_seconds = max(5, lease_seconds)
         self._batch_size = max(1, batch_size)
         self._completed_retention_days = max(1, completed_retention_days)
-        self._task: Optional[asyncio.Task] = None
         self._wakeup = asyncio.Event()
+        self._poller = PeriodicTask("background_jobs", self._loop)
 
     def notify(self) -> None:
         """有新任务入队时缩短一次等待。丢了也只影响延迟，不影响正确性。"""
@@ -53,19 +54,10 @@ class BackgroundJobWorker:
         self._wakeup.set()
 
     def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._loop())
+        self._poller.start()
 
     async def stop(self) -> None:
-        task = self._task
-        self._task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        await self._poller.stop()
 
     async def poll_once(self) -> int:
         """领取并执行一批任务，返回执行条数。"""
@@ -76,21 +68,17 @@ class BackgroundJobWorker:
         return len(jobs)
 
     async def _loop(self) -> None:
-        while True:
-            try:
-                executed = await self.poll_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.error("后台任务轮询失败: %s", exc, exc_info=True)
-                executed = 0
-            if executed:
-                continue
-            self._wakeup.clear()
-            try:
-                await asyncio.wait_for(self._wakeup.wait(), self._poll_seconds)
-            except asyncio.TimeoutError:
-                pass
+        await run_forever("后台任务", self._step)
+
+    async def _step(self) -> None:
+        if await self.poll_once():
+            # 这一批有活干，立刻再领一批，不等下一个周期。
+            return
+        self._wakeup.clear()
+        try:
+            await asyncio.wait_for(self._wakeup.wait(), self._poll_seconds)
+        except asyncio.TimeoutError:
+            pass
 
     async def _execute(self, job: BackgroundJob) -> None:
         handler = self._handlers.get(job.job_type)

@@ -1,0 +1,47 @@
+name: Set up the JourneyPilot backend
+description: 固定版本的 uv + Python，按分组装依赖，可选装 PostgreSQL 客户端。
+
+# 这三段原本在 pr / nightly / release 里各抄一份（setup-uv + python install + uv sync
+# 出现九次，pgdg 那十行出现三次）。抄出来的东西会漂：pr.yml 设了
+# JOURNEYPILOT_DATABASE__NAME，另外三个 DB 作业没设，于是它们跑在配置默认库名上。
+
+inputs:
+  uv-version:
+    description: uv 版本。会自己升级的工具链让红/绿不可复现。
+    required: true
+  python-version:
+    required: true
+  groups:
+    description: 传给 uv sync 的依赖分组，如 "--group local-embedding --group dev"。
+    required: false
+    default: "--group dev"
+  postgres-client:
+    description: 装 postgresql-client-18（备份/恢复测试要 pg_dump / pg_restore）。
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v5
+      with:
+        version: ${{ inputs.uv-version }}
+        enable-cache: true
+    - run: uv python install ${{ inputs.python-version }}
+      shell: bash
+    # --frozen：lockfile 就是事实。它与 pyproject 不一致时这一步失败，
+    # 而那正是「改了依赖没提交 lockfile」应该被发现的地方。
+    - run: uv sync --frozen ${{ inputs.groups }}
+      shell: bash
+    # 客户端版本必须 >= 服务端，否则 create_backup 会拒绝产出备份。
+    - if: inputs.postgres-client == 'true'
+      shell: bash
+      run: |
+        sudo install -d /usr/share/postgresql-common/pgdg
+        sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+          https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+          https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+          | sudo tee /etc/apt/sources.list.d/pgdg.list
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends postgresql-client-18

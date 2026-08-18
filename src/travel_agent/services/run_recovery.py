@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from ..entities.trip_run import (
-    RunCommandStatus,
-    RunCommandType,
     RunRecoveryStatus,
     TripRunMode,
     TripRunResumePolicy,
@@ -30,9 +28,11 @@ from ..infrastructure.run_execution_store import (
     RunExecutionStore,
     RunRecoveryCandidate,
 )
+from ..utils.concurrency import PeriodicTask, run_forever
 from .run_commands import (
     RUN_ENDED_BEFORE_CONSUMPTION,
     RUN_INTERRUPTED_BEFORE_CONSUMPTION,
+    settle_run_terminal_commands,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,14 +49,6 @@ class RunRecoveryOutcome:
     recovery_status: str
     reason: str
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "previous_status": self.previous_status,
-            "resolved_status": self.resolved_status,
-            "recovery_status": self.recovery_status,
-            "reason": self.reason,
-        }
 
 
 @dataclass(frozen=True)
@@ -79,13 +71,6 @@ class RunRecoveryReport:
             counts[outcome.recovery_status] = counts.get(outcome.recovery_status, 0) + 1
         return counts
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "recovered_run_count": len(self.outcomes),
-            "counts": self.counts,
-            "outcomes": [outcome.to_dict() for outcome in self.outcomes],
-            "failures": list(self.failures),
-        }
 
     def log_summary(self) -> None:
         if not self.outcomes and not self.failures:
@@ -133,7 +118,7 @@ class RunRecoveryService:
         self._command_store = command_store
         self._checkpoint_probe = checkpoint_probe
         self._sweep_seconds = max(5, sweep_seconds)
-        self._task: Optional[asyncio.Task] = None
+        self._poller = PeriodicTask("run_recovery", self._sweep_loop)
         self.last_report = RunRecoveryReport()
 
     async def sweep(self) -> RunRecoveryReport:
@@ -156,32 +141,19 @@ class RunRecoveryService:
         return report
 
     def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._sweep_loop())
+        self._poller.start()
 
     async def stop(self) -> None:
-        task = self._task
-        self._task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        await self._poller.stop()
 
     async def _sweep_loop(self) -> None:
-        while True:
-            await asyncio.sleep(self._sweep_seconds)
-            try:
-                report = await self.sweep()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.error("孤儿扫描失败: %s", exc, exc_info=True)
-                continue
-            if report.outcomes or report.failures:
-                report.log_summary()
+        await run_forever("孤儿扫描", self._step)
+
+    async def _step(self) -> None:
+        await asyncio.sleep(self._sweep_seconds)
+        report = await self.sweep()
+        if report.outcomes or report.failures:
+            report.log_summary()
 
     async def _recover(self, candidate: RunRecoveryCandidate) -> Optional[RunRecoveryOutcome]:
         if candidate.status == TripRunStatus.CANCEL_REQUESTED:
@@ -298,28 +270,20 @@ class RunRecoveryService:
         """给这个 Run 留下的控制命令一个结论。
 
         没有执行器的 Run 上，pending 命令永远等不到消费者。**不许留成永远 pending**：
-        回执接口会一直答「还在等」，而实际上没有任何人会来。
+        回执接口会一直答「还在等」，而实际上没有任何人会来。判据与还活着的协调器共用
+        同一份（`settle_run_terminal_commands`）。
         """
 
         if self._command_store is None:
             return
-        try:
-            if cancel_consumed:
-                await self._command_store.settle_open_for_run(
-                    run_id,
-                    status=RunCommandStatus.CONSUMED,
-                    command_types=[RunCommandType.CANCEL],
-                    result={"run_status": run_status, "reason": reason},
-                )
-            await self._command_store.settle_open_for_run(
-                run_id,
-                status=RunCommandStatus.REJECTED,
-                error_code=error_code,
-                result={"run_status": run_status, "reason": reason},
-            )
-        except Exception as exc:
-            # 恢复判定本身已经写完了。命令收口失败只是回执的措辞，下一轮扫描会再来一次。
-            logger.warning("恢复时的命令收口失败 run_id=%s error=%s", run_id, exc)
+        await settle_run_terminal_commands(
+            self._command_store,
+            run_id,
+            run_status=run_status,
+            cancel_consumed=cancel_consumed,
+            error_code=error_code,
+            reason=reason,
+        )
 
     async def _resume_verdict(self, candidate: RunRecoveryCandidate) -> tuple[bool, str]:
         if candidate.resume_policy != TripRunResumePolicy.CHECKPOINT.value:

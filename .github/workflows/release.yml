@@ -43,6 +43,7 @@ jobs:
     env:
       JOURNEYPILOT_DATABASE__HOST: 127.0.0.1
       JOURNEYPILOT_DATABASE__PORT: "5432"
+      JOURNEYPILOT_DATABASE__NAME: travel_agent
       JOURNEYPILOT_DATABASE__USER: travel_agent
       JOURNEYPILOT_DATABASE__PASSWORD: travel_agent_pwd
       JOURNEYPILOT_REDIS__HOST: 127.0.0.1
@@ -51,25 +52,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      - name: Freeze dependencies
-        run: |
-          uv lock --check
-          uv sync --frozen --group local-embedding --group dev
-      - name: Install PostgreSQL 18 client
-        run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--group local-embedding --group dev"
+          postgres-client: "true"
+      - name: Lockfile is current
+        run: uv lock --check
       - name: 空库安装 → head
         run: uv run python journeypilot.py migrate --json
       - name: 结构合同 + 可选能力
@@ -142,11 +132,11 @@ jobs:
     environment: live-smoke
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: ./.github/actions/setup-backend
         with:
-          version: ${{ env.UV_VERSION }}
-      - run: uv python install ${{ env.PYTHON_VERSION }}
-      - run: uv sync --frozen --group local-embedding --group dev
+          uv-version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          groups: "--group local-embedding --group dev"
       - name: Preflight one real model call
         env:
           JOURNEYPILOT_PRIMARY_MODEL__API_KEY: ${{ secrets.LIVE_PRIMARY_API_KEY }}

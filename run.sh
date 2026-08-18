@@ -20,12 +20,7 @@ BACKEND_PID=""
 FRONTEND_PID=""
 SPINNER_PID=""
 
-# 这个脚本**不定义任何策略**。Deadline 窗口、预算、超时、端口默认值都在
-# `config.yaml` / Pydantic 默认里（`journeypilot config show` 能报出每个值的来源）。
-# 脚本在这里 export 一份、Compose 里另一份、代码里第三份，是「同一条策略有三个
-# owner」的标准形态：改了一处之后另外两处继续生效，而没有一处读数能解释为什么。
-#
-# 要临时试更紧或更宽的窗口，用环境变量覆盖同一个 schema：
+# 这个脚本不定义任何策略（ADR-0008）。要临时改窗口就覆盖同一个 schema：
 #   JOURNEYPILOT_RUN_DEADLINE__DELIVERY_SECONDS=900 ./run.sh start
 
 # ─────────────────────────────────────────────────────────────────────────────

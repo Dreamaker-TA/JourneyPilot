@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from sqlalchemy import bindparam, text
@@ -27,26 +25,15 @@ from ..entities.trip_run import (
 )
 from .database import get_db_session
 from .run_execution_store import EXECUTOR_ID
+from .row_values import iso_or_none as _iso, json_dumps as _dumps, json_object as _json_object
 
 _OPEN_STATUS_VALUES = tuple(sorted(status.value for status in OPEN_RUN_COMMAND_STATUSES))
 
 
-def _iso(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-        return moment.isoformat()
-    text_value = str(value).strip()
-    return text_value or None
 
 
-def _dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def _json_object(value: Any) -> Dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _command_from_row(row: Mapping[str, Any]) -> RunCommand:

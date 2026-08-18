@@ -289,3 +289,28 @@ def test_every_adr_states_its_alternatives():
         if "替代方案" not in path.read_text(encoding="utf-8")
     ]
     assert incomplete == [], f"这些 ADR 没写替代方案：{incomplete}"
+
+
+def test_ci_and_compose_pin_the_same_database_image():
+    """CI 与用户跑的必须是同一个数据库。
+
+    `services:` 块里用不了 env 上下文，所以那个 digest 在四个文件里各写一份，改一处
+    漏三处不会有任何红灯 —— 直到某次 nightly 对着一个旧镜像报绿。
+    """
+
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pattern = re.compile(r"pgvector/pgvector:pg18@sha256:[0-9a-f]{64}")
+
+    compose = pattern.findall((root / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert len(compose) == 1, f"compose 里应当只有一处 digest，实际 {len(compose)}"
+
+    for name in ("pr", "nightly", "release"):
+        text = (root / ".github" / "workflows" / f"{name}.yml").read_text(encoding="utf-8")
+        for found in pattern.findall(text):
+            assert found == compose[0], (
+                f"{name}.yml 的 pgvector digest 与 docker-compose.yml 不一致：\n"
+                f"  {found}\n  {compose[0]}"
+            )

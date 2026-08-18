@@ -27,6 +27,7 @@ from sqlalchemy import text
 from ..config import ModelPricingItem, resolve_price
 from ..models.usage import LLMCallRecord
 from .database import get_db_session
+from .row_values import iso_or_none as _iso
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,6 @@ class CostLedgerConflict(Exception):
     """Same call id already stored with different content."""
 
 
-def _iso(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-    return str(value)
 
 
 def _parse_ts(value: Optional[str]) -> Optional[datetime]:

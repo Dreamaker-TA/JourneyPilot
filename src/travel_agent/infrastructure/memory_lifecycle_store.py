@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
@@ -23,10 +22,9 @@ from ..memory.memory_graph import MemoryGraph
 from ..memory.memory_store import MemoryStore
 from ..memory.user_profile import UserProfileMemory
 from .database import get_db_session
+from .row_values import iso_or_empty as _iso, json_dumps as _json_dumps
 
 
-def _json_dumps(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False)
 
 
 def _json_loads(value: Any, default: Any) -> Any:
@@ -40,14 +38,6 @@ def _json_loads(value: Any, default: Any) -> Any:
     return value
 
 
-def _iso(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-    return str(value)
 
 
 def _record_from_row(row: Dict[str, Any]) -> ForgettingAuditRecord:

@@ -26,6 +26,7 @@ from sqlalchemy import text
 from ..entities.background_job import memory_fact_digest
 from ..entities.memory_lifecycle import MemoryRetentionPolicy, MemoryRetentionStatus
 from ..infrastructure.database import get_db_session
+from ..infrastructure.row_values import iso_or_empty as _iso
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,6 @@ USER_MANUAL_SESSION_ID = "user-manual"
 USER_MANUAL_IMPORTANCE = _IMPORTANCE_MAX
 
 
-def _iso(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-    return str(value)
 
 
 def _fact_row(row: Any) -> Dict[str, Any]:

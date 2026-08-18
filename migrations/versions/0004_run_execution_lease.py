@@ -4,25 +4,10 @@ Revision ID: 0004_run_execution_lease
 Revises: 0003_local_identity
 Create Date: 2026-08-17
 
-## 这条迁移做什么
+新增 `trip_run_executions`：一个 running TripRun 的执行归属（哪个进程在跑、租约、心跳、
+最近一个安全 checkpoint）与重启后的恢复判定。租约是否过期由 PostgreSQL 的 `NOW()` 说。
 
-新增 `trip_run_executions`：一个 running TripRun 的**执行归属**（哪个进程在跑、
-租约到什么时候、最后一次心跳、最近一个安全 checkpoint）以及重启后的恢复判定结果。
-
-它与 `trip_runs` 分表：业务生命周期（status/终态/审计）和执行归属是两件会以完全不同
-频率改写的事实，心跳每 10 秒一次，不该把它压在核心表的每一行上。
-
-时钟以 PostgreSQL 的 `NOW()` 为准 —— 租约是否过期不能由各个 Python 进程的墙钟决定。
-
-## 门禁
-
-- **影响面**：只有 DB 新增。既有表结构不动，既有数据不动。
-- **旧数据路径**：无。历史 run 没有执行行，启动 census 按「没有 executor」处理。
-- **失败注入**：单条迁移一个事务，中途失败整体回滚，`alembic_version` 不前进。
-- **幂等**：`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`。
-- **观察信号**：`GET /api/trip-runs/{run_id}` 返回 `execution` 段。
-- **回滚**：可逆。表里只有执行归属，丢掉它等于「所有 run 都没有 executor」，
-  与首次安装的状态相同。
+只新增，既有表与数据不动；`IF NOT EXISTS` 幂等；可逆（丢掉它等于所有 run 都没有 executor）。
 """
 
 from __future__ import annotations

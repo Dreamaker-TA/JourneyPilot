@@ -1,14 +1,8 @@
 #!/bin/sh
-# API 容器的启动编排器。**与 run.sh 走同一个 Python 编排器**（`journeypilot`
-# CLI + main.py），两条路径的差别只在「前端从哪来、要不要 reload」，不在策略。
+# API 容器的启动编排器。与 run.sh 走同一个 Python 编排器。
 #
 # 顺序不可交换：API 进程不建表（ADR-P0-03），所以迁移必须先跑完。
-# 迁移被拒绝时不 exec API，诊断留在 `docker compose logs api`（compose 里 api 的
-# restart 因此不是 unless-stopped，否则拒绝会变成无限重启并滚掉诊断）。
-#
-# 不用 `uv run`：镜像里 .venv 已在 PATH 上（Dockerfile 的 ENV），而 `uv run` 会去
-# 校验并可能改写 lockfile —— 一个非 root 的运行层不该有写 lockfile 的权限，也不该
-# 在每次启动时重新解析依赖。
+# 不用 `uv run`：.venv 已在 PATH 上，而它会去校验并可能改写 lockfile。
 set -e
 
 echo "[entrypoint] 校验配置…"

@@ -259,21 +259,10 @@ class RunControlConfig(StrictConfig):
 
 
 class RunDeadlineConfig(StrictConfig):
-    """一次 Deep Run 的四段时间窗（秒）。**全仓唯一定义处**。
+    """一次 Deep Run 的四段时间窗（秒）。**全仓唯一定义处**（ADR-0008）。
 
-    每个模型调用恰好属于其中一段。``target`` 是期望完成点；``closeout`` 关研究
-    （过它之后没有 worker、门修复或 Provider 补扫可以再发调用）；``composition``
-    关行程编排（它拿到的是研究窗已经用完之后的那一段）；``delivery`` 是投影与持久化
-    的外界，它比 ``composition`` 多出的 30 秒就是一次原子 Bundle 写入的开销。
-
-    这些数**不许由启动脚本定义**：run.sh 里 export 一份、Compose 里另一份、代码里
-    第三份，是「同一条策略有三个 owner」的标准形态。已经开始的 Run 用它自己封存的
-    快照（`entities/run_deadline_policy.py` 只在**新建**快照时读这里），所以改这里
-    既不会让一个在跑的 Run 越过它被审计的 closeout，也不会截短一个快照还在供着它的 Run。
-
-    默认值 375/450/570/600 来自实测：直连 DeepSeek 一次完整 Run 143–373 秒；同样的
-    模型经代理每 token 慢 2–4 倍（实测 82 tok/s 直连 vs 19 tok/s 经代理），把一次两
-    目的地的普通行程推到 499 秒。窗口按更慢的那一档设。
+    ``closeout`` 关研究，``composition`` 关行程编排，``delivery`` 是投影与持久化的外界。
+    已经开始的 Run 用它自己封存的快照，改这里不影响在跑的 Run。
     """
 
     target_seconds: int = Field(default=375, gt=0)
@@ -325,8 +314,6 @@ class BlockingWorkConfig(StrictConfig):
     document_parse: int = Field(default=2, ge=1)
     #: 本地 ONNX embedding 的同时推理批数。
     local_embedding: int = Field(default=2, ge=1)
-    #: 大 JSON canonical hash、报告投影这类纯 CPU 折算。
-    cpu_projection: int = Field(default=2, ge=1)
     #: 等一个通道腾出位置的上限。超时的含义是「现在太忙」，不是「这件事做不成」。
     queue_wait_seconds: float = Field(default=30.0, gt=0)
 

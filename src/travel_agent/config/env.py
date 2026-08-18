@@ -1,18 +1,7 @@
-"""环境变量覆盖：一处解析嵌套路径，不为每个字段手写一次 ``os.getenv``。
+"""环境变量覆盖：按 schema 一处解析嵌套路径（ADR-0008）。
 
-命名统一为 ``JOURNEYPILOT_<段>__<字段>``，``__`` 是层级分隔符：
-
-    JOURNEYPILOT_SERVER__HOST
-    JOURNEYPILOT_DATABASE__PORT
-    JOURNEYPILOT_PRIMARY_MODEL__API_KEY
-    JOURNEYPILOT_RUN_BUDGET__MAX_COST_USD
-
-为什么值得做成一处：逐字段 ``os.getenv`` 的那份代码里，新增一个配置项要记得同时
-加一行覆盖，而**忘了加不会报错** —— 它只是让那个字段永远不能用环境变量配。这里按
-schema 走，加字段就自动可覆盖。
-
-**认不出的变量是错误，不是忽略。** ``JOURNEYPILOT_DATABSE__HOST`` 拼错一个字母之后
-静默什么都不做，正是「我设了环境变量为什么没生效」的全部来源。
+命名统一为 ``JOURNEYPILOT_<段>__<字段>``，``__`` 是层级分隔符，例如
+``JOURNEYPILOT_DATABASE__PORT``。**认不出的变量是错误，不是忽略。**
 
 MCP provider 的原生 Key 名（``TAVILY_API_KEY`` 等）不走这套前缀，见 `mcp_defaults.py`。
 """

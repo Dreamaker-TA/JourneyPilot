@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
 from sqlalchemy import bindparam, text
@@ -23,6 +21,7 @@ from ..entities.background_job import (
 )
 from .database import get_db_session
 from .run_execution_store import EXECUTOR_ID
+from .row_values import iso_or_none as _iso, json_dumps as _dumps
 
 _OPEN_STATUS_VALUES = tuple(sorted(status.value for status in OPEN_BACKGROUND_JOB_STATUSES))
 #: 可领取的状态。`running` 也在里面：一条租约已过期的 running 就是「上一个进程崩在
@@ -39,18 +38,8 @@ _BACKLOG_STATUS_VALUES = (
 )
 
 
-def _iso(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-        return moment.isoformat()
-    text_value = str(value).strip()
-    return text_value or None
 
 
-def _dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def _job_from_row(row: Mapping[str, Any]) -> BackgroundJob:

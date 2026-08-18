@@ -4,23 +4,10 @@ Revision ID: 0005_run_commands
 Revises: 0004_run_execution_lease
 Create Date: 2026-08-17
 
-## 这条迁移做什么
+新增 `trip_run_commands`：cancel 与 supplement 的持久化命令。
+`(run_id, request_digest)` 唯一 —— 重发同一个意图落回同一行，回执也是同一张。
 
-新增 `trip_run_commands`：cancel 与 supplement 的**持久化命令**。在此之前这两个动作
-只存在于发请求那一刻命中的进程内 registry，进程一换就消失，而 API 已经答了「已接受」。
-
-`(run_id, request_digest)` 唯一：重发同一个意图落回同一行，回执也是同一张。
-
-## 门禁
-
-- **影响面**：只有 DB 新增。既有表结构不动，既有数据不动。
-- **旧数据路径**：无。历史 run 没有命令行，等于「没有待处理命令」。
-- **失败注入**：单条迁移一个事务，中途失败整体回滚，`alembic_version` 不前进。
-- **幂等**：`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`。
-- **观察信号**：`GET /api/trip-runs/{run_id}/commands/{command_id}` 能查到回执；
-  `GET /api/health/ready` 的 `run_execution.pending_commands` 报待处理数。
-- **回滚**：可逆。表里只有控制命令，丢掉它等于「没有待处理的取消/追加要求」，
-  与首次安装的状态相同。
+只新增，既有表与数据不动；`IF NOT EXISTS` 幂等；可逆（丢掉它等于没有待处理命令）。
 """
 
 from __future__ import annotations

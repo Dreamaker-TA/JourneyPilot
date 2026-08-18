@@ -1,11 +1,9 @@
 """把同步工作赶出 Event Loop 的唯一入口。
 
 PDF 渲染、文档解析、本地 ONNX 推理、大 JSON canonical hash 都是纯 CPU 的同步调用。
-在 async route 里直接执行它们会让整个进程停住：一次 500 页 PDF 导出期间连 SSE 保活
-帧都发不出去，客户端读到的是一次断流。
 
-**取消的限度必须写在这里，而不是靠调用方猜**：线程里的 Python/C 代码不能被安全强杀，
-``asyncio.wait_for`` 超时只停止*等待*，线程会继续跑到自己结束。所以
+**取消的限度**（ADR-0006）：线程里的 Python/C 代码不能被安全强杀，``asyncio.wait_for``
+超时只停止*等待*，线程会继续跑到自己结束。所以
 
 - 可信的内部数据（ReportLab 读一份 immutable Bundle）走线程；
 - 不可信的用户上传走子进程（`rag/sources/document_parse.py`），超时杀进程树；
@@ -34,7 +32,6 @@ BLOCKING_CHANNELS = {
     "pdf_export": "pdf_export",
     "document_parse": "document_parse",
     "local_embedding": "local_embedding",
-    "cpu_projection": "cpu_projection",
 }
 
 

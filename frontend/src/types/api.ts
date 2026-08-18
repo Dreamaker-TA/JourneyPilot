@@ -420,7 +420,6 @@ export type TripRunRecoveryStatus =
   | 'claimed'
   | 'running'
   | 'shutdown_requested'
-  | 'orphaned'
   | 'resume_available'
   | 'non_resumable'
   | 'released'

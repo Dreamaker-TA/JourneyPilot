@@ -100,7 +100,7 @@ async def test_blocking_call_does_not_stall_the_event_loop(limits):
             ticks += 1
 
     beat = asyncio.create_task(_heartbeat())
-    await run_blocking("cpu_projection", time.sleep, 0.3)
+    await run_blocking("pdf_export", time.sleep, 0.3)
     beat.cancel()
     assert ticks >= 5
 
@@ -112,7 +112,7 @@ async def test_a_thread_call_keeps_its_contextvars():
 
     token = current_run_id.set("run_blocking_ctx")
     try:
-        seen = await run_blocking("cpu_projection", current_run_id.get)
+        seen = await run_blocking("pdf_export", current_run_id.get)
     finally:
         current_run_id.reset(token)
     assert seen == "run_blocking_ctx"

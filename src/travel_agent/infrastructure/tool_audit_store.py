@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
@@ -17,6 +16,7 @@ from ..entities.tool_gateway import (
 )
 from ..entities.trip_run import utc_now_iso
 from .database import get_db_session
+from .row_values import iso_or_none as _iso, json_dumps as _json_dumps
 
 
 _SENSITIVE_KEY_RE = re.compile(
@@ -55,8 +55,6 @@ _SENSITIVE_VALUE_RE = re.compile(
 )
 
 
-def _json_dumps(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False)
 
 
 def _json_loads(value: Any, default: Any) -> Any:
@@ -70,14 +68,6 @@ def _json_loads(value: Any, default: Any) -> Any:
     return value
 
 
-def _iso(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-    return str(value)
 
 
 def sanitize_audit_metadata(value: Any, *, depth: int = 0) -> Any:

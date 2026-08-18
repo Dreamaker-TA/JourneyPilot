@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from ..local_profile import LOCAL_USER_ID
 
+from ..infrastructure.row_values import iso_or_none as _iso_or_none
 from .provider_evidence import (
     ProviderEvidenceOutcome,
     build_required_long_distance_legs,
@@ -68,7 +69,6 @@ class RunRecoveryStatus(str, Enum):
     RUNNING = "running"
     #: 进程收到关闭信号后主动放弃租约，交给下一次启动 census 判定。
     SHUTDOWN_REQUESTED = "shutdown_requested"
-    ORPHANED = "orphaned"
     RESUME_AVAILABLE = "resume_available"
     NON_RESUMABLE = "non_resumable"
     RELEASED = "released"
@@ -385,15 +385,6 @@ def _as_mappings(value: Any) -> List[Dict[str, Any]]:
     return values
 
 
-def _iso_or_none(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-    text = str(value).strip()
-    return text or None
 
 
 def _unique_strings(values: Iterable[Any]) -> List[str]:

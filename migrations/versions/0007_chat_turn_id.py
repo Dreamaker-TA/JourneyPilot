@@ -4,21 +4,11 @@ Revision ID: 0007_chat_turn_id
 Revises: 0006_background_jobs
 Create Date: 2026-08-18
 
-`chat_session_events.turn_id`：一轮对话的所有事件（用户消息、压缩快照、思考步、
-助手消息）共用一个 id。分页按 turn 走，一个 turn 永远整份返回 —— 按原始事件游标
-切页会把 assistant message 和它的 thinking 切到两页，前端拼不回来。
+`chat_session_events.turn_id`：一轮对话的所有事件共用一个 id，分页按 turn 走且一个 turn
+永远整份返回。回填规则：一条 `message.user` 到下一条之前算一个 turn；第一条用户消息之前
+的事件落进本会话的 synthetic turn（数量在迁移里 warn 出来）。
 
-回填规则：从一条 `message.user` 开始，到下一条 `message.user` 之前，算一个 turn。
-第一条用户消息之前的事件（手动压缩快照等）落进本会话的 synthetic turn。
-
-## 门禁
-
-- **影响面**：一列 + 一个索引 + 一次全表回填。既有列与既有 payload 不动。
-- **旧数据路径**：回填，不是运行期兜底 —— 读路径只认 `turn_id NOT NULL`。
-- **失败注入**：单事务，中途失败整体回滚，`alembic_version` 不前进。
-- **幂等**：`ADD COLUMN IF NOT EXISTS`；回填只写 `turn_id IS NULL` 的行。
-- **观察信号**：`GET /api/sessions/{id}/turns` 能翻页；synthetic turn 数量在下面报出来。
-- **回滚**：可逆，丢掉的只是分组信息，事件本身不动。
+回填是**一次性**的，读路径只认 `turn_id NOT NULL`，没有运行期兜底。
 """
 
 from __future__ import annotations

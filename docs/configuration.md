@@ -97,7 +97,6 @@
 | `blocking_work.pdf_export` | int | `1` | >= 1 | `JOURNEYPILOT_BLOCKING_WORK__PDF_EXPORT` |
 | `blocking_work.document_parse` | int | `2` | >= 1 | `JOURNEYPILOT_BLOCKING_WORK__DOCUMENT_PARSE` |
 | `blocking_work.local_embedding` | int | `2` | >= 1 | `JOURNEYPILOT_BLOCKING_WORK__LOCAL_EMBEDDING` |
-| `blocking_work.cpu_projection` | int | `2` | >= 1 | `JOURNEYPILOT_BLOCKING_WORK__CPU_PROJECTION` |
 | `blocking_work.queue_wait_seconds` | float | `30.0` | > 0 | `JOURNEYPILOT_BLOCKING_WORK__QUEUE_WAIT_SECONDS` |
 | `ingest.max_upload_bytes` | int | `10485760` | >= 1024 | `JOURNEYPILOT_INGEST__MAX_UPLOAD_BYTES` |
 | `ingest.max_pdf_pages` | int | `500` | >= 1 | `JOURNEYPILOT_INGEST__MAX_PDF_PAGES` |

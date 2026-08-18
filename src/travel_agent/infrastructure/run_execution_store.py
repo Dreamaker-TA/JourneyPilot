@@ -24,6 +24,7 @@ from ..entities.trip_run import (
     coerce_status,
 )
 from .database import get_db_session
+from .row_values import iso_or_none as _iso
 
 
 def _build_executor_id() -> str:
@@ -53,14 +54,6 @@ _SETTLED_RECOVERY_STATUSES = (
 )
 
 
-def _iso(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-        return moment.isoformat()
-    text_value = str(value).strip()
-    return text_value or None
 
 
 def _execution_from_row(row: Dict[str, Any]) -> RunExecution:

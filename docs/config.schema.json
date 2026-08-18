@@ -36,12 +36,6 @@
       "additionalProperties": false,
       "description": "同步工作被赶出 Event Loop 之后的并发与排队上界。**全仓唯一定义处**。\n\n线程池不是无限资源：`services/blocking_work.py` 按通道分配，一个通道排满时\n调用方等 ``queue_wait_seconds``，不是无限排队。",
       "properties": {
-        "cpu_projection": {
-          "default": 2,
-          "minimum": 1,
-          "title": "Cpu Projection",
-          "type": "integer"
-        },
         "document_parse": {
           "default": 2,
           "minimum": 1,
@@ -925,7 +919,7 @@
     },
     "RunDeadlineConfig": {
       "additionalProperties": false,
-      "description": "一次 Deep Run 的四段时间窗（秒）。**全仓唯一定义处**。\n\n每个模型调用恰好属于其中一段。``target`` 是期望完成点；``closeout`` 关研究\n（过它之后没有 worker、门修复或 Provider 补扫可以再发调用）；``composition``\n关行程编排（它拿到的是研究窗已经用完之后的那一段）；``delivery`` 是投影与持久化\n的外界，它比 ``composition`` 多出的 30 秒就是一次原子 Bundle 写入的开销。\n\n这些数**不许由启动脚本定义**：run.sh 里 export 一份、Compose 里另一份、代码里\n第三份，是「同一条策略有三个 owner」的标准形态。已经开始的 Run 用它自己封存的\n快照（`entities/run_deadline_policy.py` 只在**新建**快照时读这里），所以改这里\n既不会让一个在跑的 Run 越过它被审计的 closeout，也不会截短一个快照还在供着它的 Run。\n\n默认值 375/450/570/600 来自实测：直连 DeepSeek 一次完整 Run 143–373 秒；同样的\n模型经代理每 token 慢 2–4 倍（实测 82 tok/s 直连 vs 19 tok/s 经代理），把一次两\n目的地的普通行程推到 499 秒。窗口按更慢的那一档设。",
+      "description": "一次 Deep Run 的四段时间窗（秒）。**全仓唯一定义处**（ADR-0008）。\n\n``closeout`` 关研究，``composition`` 关行程编排，``delivery`` 是投影与持久化的外界。\n已经开始的 Run 用它自己封存的快照，改这里不影响在跑的 Run。",
       "properties": {
         "closeout_seconds": {
           "default": 450,
