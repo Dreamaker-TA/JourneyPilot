@@ -73,13 +73,14 @@ class RunRecoveryReport:
         return counts
 
 
-    def log_summary(self) -> None:
+    def log_summary(self, *, phase: str = "启动恢复") -> None:
         if not self.outcomes and not self.failures:
-            logger.info("启动恢复：没有孤儿 Run")
+            logger.info("%s：没有孤儿 Run", phase)
             return
         if self.outcomes:
             logger.warning(
-                "启动恢复：%d 个 Run 失去执行器 | %s",
+                "%s：%d 个 Run 失去执行器 | %s",
+                phase,
                 len(self.outcomes),
                 "；".join(
                     f"{outcome.run_id} {outcome.previous_status}→{outcome.resolved_status}"
@@ -88,7 +89,7 @@ class RunRecoveryReport:
                 ),
             )
         for failure in self.failures:
-            logger.error("启动恢复失败：%s", failure)
+            logger.error("%s失败：%s", phase, failure)
 
 
 class RunRecoveryService:
@@ -147,7 +148,7 @@ class RunRecoveryService:
         await asyncio.sleep(self._sweep_seconds)
         report = await self.sweep()
         if report.outcomes or report.failures:
-            report.log_summary()
+            report.log_summary(phase="孤儿复扫")
 
     async def _recover(self, candidate: RunRecoveryCandidate) -> Optional[RunRecoveryOutcome]:
         if candidate.status == TripRunStatus.CANCEL_REQUESTED:

@@ -3304,7 +3304,8 @@ async def itinerary_planner_node(
             "composition_failure_context": None,
         }
     except Exception as exc:
-        logger.error("ItineraryPlanner v2 failed: %s", exc)
+        # 带上 traceback：这是整个深度规划的终止点，只留一句话没法定位是哪一道校验。
+        logger.error("ItineraryPlanner v2 failed: %s", exc, exc_info=True)
         return {
             "messages": [AIMessage(content="行程组合未通过结构化校验")],
             "last_error": str(exc),

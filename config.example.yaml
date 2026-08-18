@@ -13,7 +13,7 @@
 # 每个字段都能用 JOURNEYPILOT_<段>__<字段> 覆盖，例如
 # JOURNEYPILOT_DATABASE__PORT=55433。全部合法变量名：journeypilot config env。
 
-# 这份 YAML 的结构版本。加载器按它迁移旧结构；缺失按 1 处理。
+# 这份 YAML 的结构版本。不匹配当前版本就拒绝启动（没有迁移引擎），缺失同样拒绝。
 config_version: 2
 
 env: development

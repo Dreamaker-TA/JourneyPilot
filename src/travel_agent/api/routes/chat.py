@@ -781,6 +781,7 @@ async def chat_stream(
         command_coordinator: Optional[RunCommandCoordinator] = None
         process_cleanup_done = False
         lease_released = False
+        # 只有流在任何一个收口点之前就断了才会留下这个值；四个收口点各自改写它。
         stream_exit_reason = "stream_closed_before_terminal"
 
         async def converge_stream_exit(reason: str) -> None:
@@ -1186,6 +1187,7 @@ async def chat_stream(
                     "run_cost_summary": cost_summary,
                     "ts_ms": run_ts_ms(),
                 })
+                stream_exit_reason = "stream_ended_at_awaiting_input"
                 return
 
             assistant_content = strip_non_display_blocks(
@@ -1329,8 +1331,10 @@ async def chat_stream(
                     "run_cost_summary": cost_summary,
                     "ts_ms": run_ts_ms(),
                 })
+                stream_exit_reason = "stream_ended_at_completed"
                 return
 
+            stream_exit_reason = f"stream_ended_at_{run_status}"
             yield sse_event({
                 "type": "chat_complete",
                 "message_id": message_id,
@@ -1415,6 +1419,7 @@ async def chat_stream(
                     "run_cost_summary": cost_summary,
                     "ts_ms": run_ts_ms(),
                 })
+            stream_exit_reason = f"stream_ended_at_{verdict.terminal_status}"
 
         except asyncio.CancelledError:
             stream_exit_reason = "client_disconnected"
