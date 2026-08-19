@@ -34,6 +34,9 @@ interface ConversationListProps {
  * 轨道从上到下只有**一条**文字左缘。这几个数必须和 `rail.ts` 对齐 —— 会话行自己另取一套
  * （比如 `px-2.5` + 14px 图标，中心落在 21），展开态的轨道上就会出现两条左缘。
  *
+ * 分组标题、重命名输入、重命名报错这三处**不在行内**，量的是同一条左缘但坐标系差一个
+ * 组容器的 `px-2`：它们写 46px（同 `SidebarSearch`），落到轨道 54px。直接抄 54 会右偏 8px。
+ *
  * 字形本身仍是 14px（它是**内容**里的一枚标，不是一枚控件字形），槽把它居中。
  */
 const RECORD_SLOT = 'flex w-10 shrink-0 justify-center pt-[3px]';
@@ -156,14 +159,14 @@ export const ConversationList: React.FC<ConversationListProps> = ({ searchQuery 
   return (
     <div className="space-y-4 pb-2">
       {renameError && (
-        <div className="ml-[54px] mr-2 rounded-card bg-error/10 px-2.5 py-1.5 text-[11px] leading-snug text-error">
+        <div className="ml-[46px] mr-2 rounded-card bg-error/10 px-2.5 py-1.5 text-[11px] leading-snug text-error">
           {renameError}
         </div>
       )}
       {sections.map(([label, items]) => {
         return (
           <div key={label}>
-            <div className="py-1 pl-[54px] text-[11px] font-medium uppercase tracking-wider text-ink-secondary">
+            <div className="py-1 pl-[46px] text-[11px] font-medium uppercase tracking-wider text-ink-secondary">
               {label}
             </div>
             <div className="space-y-0.5">
@@ -192,7 +195,7 @@ export const ConversationList: React.FC<ConversationListProps> = ({ searchQuery 
                         )}
                       >
                         {isEditing ? (
-                          <div className="flex min-w-0 flex-1 items-center gap-1 py-1.5 pl-[54px] pr-2">
+                          <div className="flex min-w-0 flex-1 items-center gap-1 py-1.5 pl-[46px] pr-2">
                             <input
                               ref={inputRef}
                               data-testid="rename-input"
