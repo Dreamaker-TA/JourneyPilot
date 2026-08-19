@@ -23,3 +23,4 @@
 | [ADR-0008](ADR-0008-config-single-source.md) | 配置只有一处定义，来源可查 |
 | [ADR-0009](ADR-0009-ci-never-spends-on-providers.md) | CI 不调用真实付费 Provider |
 | [ADR-0010](ADR-0010-request-contract-control-plane.md) | 用唯一请求合同与确定性编排控制研究工作流 |
+| [ADR-0011](ADR-0011-intent-aware-candidate-pipeline.md) | 意图驱动研究与候选选择分层 |

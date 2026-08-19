@@ -23,6 +23,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
 from ...entities.state import TravelAgentState
+from ...entities.research_domain import ResearchDomain
+from ...entities.research_query_plan import ResearchQuery, ResearchQueryKind
 from ...models.router import get_model_router
 from ..utils import (
     append_recent_history,
@@ -56,6 +58,11 @@ from ...services.candidate_admission import provider_place_type_matches_candidat
 from ...services.constraint_applicability import active_hard_constraints, active_hard_constraint_ids
 from ...services.destination_scope import annotate_destination_distance
 from ...services.state_invalidation import generation_packet_key
+from ...services.research_query_planner import queries_by_ids
+from ...services.fallback_query_policy import (
+    FallbackQueryPolicy,
+    runtime_fallback_capacity,
+)
 from ...services.nominatim_place_search import is_concrete_lodging_place
 from ..research_packet_prompt import build_research_packet_system_prompt
 from ..worker_errors import format_worker_last_error
@@ -381,41 +388,6 @@ async def _enrich_amap_hotel_coordinates(
             hotel["longitude"] = longitude
 
 
-# ---------------------------------------------------------------------------
-# Nominatim 确定性住宿落地（deterministic non-CN lodging grounding）
-#
-# 海外酒店在 OpenStreetMap 覆盖良好，但过去只有模型自己撰写 global_place_search
-# 查询时才用得到：它通常写成单个酒店名加双语别名，命中 0 条，工具随即降级成
-# free_web_search，整个住宿域归零。这里镜像上面的 amap 预绑定：只用受控目的地字段
-# 在代码里拼一条 category 级查询，把 Provider 原样结果投影成 global_place_search
-# 形状的信封，交给既有 place-selection 修复路径物化 LodgingCandidate。
-#
-# 查询公式 "hotel in <受控目的地 name>" 是实测选出来的。受控目的地的 name 由
-# `/api/places` 以 accept-language=zh-CN,zh,en 落库（api/routes/places.py），所以
-# 海外城市在 state 里同样是中文名（大阪市 / 巴黎 / 曼谷 / 纽约）。零 LLM 探针
-# （limit=10，按国家码过滤，按 lodging provider 类别计数）：
-#
-#   公式                        大阪市 巴黎 曼谷 纽约 京都市 罗马
-#   'hotel <中文名>'               0    0    1    5    1     2
-#   'hotel <英文名>'               9    9    8   10    1    10
-#   '<中文名>酒店'                  2    9   10    6    3     5
-#   'hotel in <中文名>'  ← 采用    10   10   10   10   10    10
-#   'hotel in <英文名>'           10   10   10    2    10    10
-#   '<中文名> hotel'               0    0    1    5    1     2
-#
-# 复测过生产原样短名（PlaceIdentity.name 并不总等于表里的裸名，「纽约」行当年用的
-# 就是裸名）：'hotel in 纽约;紐約' 10/10、'hotel in 纽约' 10/10——生产多脚本短名与
-# 裸名等效，表值无需修正。
-#
-# 只有 "hotel in <中文名>" 在六城全部拿到满额住宿结果（Nominatim 的
-# "<类别> in <地点>" special-phrase 语法先解析地点再在其范围内找类别），而且它用的
-# 正是 state 真实携带的字段——英文名根本不在 state 里，且 "hotel in New York" 会
-# 退化成州级匹配（只剩 2 条郊区 guest_house）。
-#
-# 每个目的地只发一次 Provider 请求：nominatim_place_search 有 ~1.1s 全局速率门，
-# 一城一查是覆盖率与墙钟之间唯一站得住的点；limit=10 给下面的具体性过滤留余量。
-# ---------------------------------------------------------------------------
-
 _NOMINATIM_PLACE_SEARCH_LIMIT = 10
 _NOMINATIM_HOTELS_PER_CITY = 5
 
@@ -470,6 +442,7 @@ async def _bind_amap_lodging(
     available_tools: List[Dict[str, Any]],
     tool_context: Dict[str, Any],
     authoritative_tool_results: List[Dict[str, Any]],
+    query_text: str,
 ) -> bool:
     """Bind one CN destination's lodging identity from real amap POI data.
 
@@ -486,7 +459,7 @@ async def _bind_amap_lodging(
     try:
         env = await execute_tool(
             "maps_text_search",
-            {"keywords": f"{dest_name}酒店", "city": dest_name},
+            {"keywords": query_text, "city": dest_name},
             available_tools=available_tools,
             node_name=_NODE_NAME,
             activation_source="amap_hotel_search",
@@ -576,6 +549,7 @@ async def _bind_nominatim_lodging(
     available_tools: List[Dict[str, Any]],
     tool_context: Dict[str, Any],
     authoritative_tool_results: List[Dict[str, Any]],
+    query_text: str,
 ) -> bool:
     """Bind one non-CN destination's lodging identity from real Nominatim data.
 
@@ -599,7 +573,7 @@ async def _bind_nominatim_lodging(
         env = await execute_tool(
             "global_place_search",
             {
-                "query": f"hotel in {dest_name}",
+                "query": query_text,
                 "country_code": country_code,
                 "limit": _NOMINATIM_PLACE_SEARCH_LIMIT,
                 "destination_latitude": dest.get("latitude"),
@@ -669,6 +643,8 @@ async def discover_deterministic_hotels(
     available_tools: List[Dict[str, Any]],
     tool_context: Dict[str, Any],
     authoritative_tool_results: List[Dict[str, Any]],
+    planned_queries: List[ResearchQuery],
+    executed_query_ids: List[str],
 ) -> bool:
     """Ground lodging identity for every controlled destination from real Provider data.
 
@@ -701,45 +677,73 @@ async def discover_deterministic_hotels(
     }
     bound: List[str] = []
     unbound: List[str] = []
+    fallback_policy = FallbackQueryPolicy()
     for dest in destinations:
         if not isinstance(dest, Mapping):
             continue
         dest_name = str(dest.get("name") or "").strip()
         if not dest_name:
             continue
-        if str(dest.get("country_code") or "").lower() == "cn":
-            provider = "amap"
-            if "maps_text_search" in available_names:
+        destination_queries = [
+            query
+            for query in planned_queries
+            if query.destination_id == str(dest.get("place_id") or "")
+        ]
+        primary_queries = [
+            query
+            for query in destination_queries
+            if query.query_kind
+            in {
+                ResearchQueryKind.INTENT_PRIMARY,
+                ResearchQueryKind.STRUCTURAL,
+                ResearchQueryKind.TARGETED_REPAIR,
+            }
+        ]
+        fallback_queries = [
+            query
+            for query in destination_queries
+            if query.query_kind is ResearchQueryKind.GENERIC_FALLBACK
+        ]
+        injected = False
+        provider = (
+            "amap"
+            if str(dest.get("country_code") or "").lower() == "cn"
+            else "nominatim"
+        )
+        for query in [*primary_queries, *fallback_queries]:
+            if query.query_kind is ResearchQueryKind.GENERIC_FALLBACK:
+                research_window_open, run_budget_available = runtime_fallback_capacity()
+                if not fallback_policy.is_allowed(
+                    query,
+                    executed_query_ids=set(executed_query_ids),
+                    admitted_candidate_count=0,
+                    required_candidate_count=1,
+                    research_window_open=research_window_open,
+                    run_budget_available=run_budget_available,
+                ):
+                    continue
+            if provider == "amap" and "maps_text_search" in available_names:
+                executed_query_ids.append(query.query_id)
                 injected = await _bind_amap_lodging(
                     dest,
                     messages=messages,
                     available_tools=available_tools,
                     tool_context=tool_context,
                     authoritative_tool_results=authoritative_tool_results,
+                    query_text=query.query_text,
                 )
-            else:
-                logger.info(
-                    "[accommodation_researcher] amap skip: maps_text_search absent from %d tools (maps-like: %s)",
-                    len(available_tools),
-                    sorted(n for n in available_names if "maps_" in n or "amap" in n),
-                )
-                injected = False
-        else:
-            provider = "nominatim"
-            if "global_place_search" in available_names:
+            elif provider == "nominatim" and "global_place_search" in available_names:
+                executed_query_ids.append(query.query_id)
                 injected = await _bind_nominatim_lodging(
                     dest,
                     messages=messages,
                     available_tools=available_tools,
                     tool_context=tool_context,
                     authoritative_tool_results=authoritative_tool_results,
+                    query_text=query.query_text,
                 )
-            else:
-                logger.info(
-                    "[accommodation_researcher] nominatim skip: global_place_search absent from %d tools",
-                    len(available_tools),
-                )
-                injected = False
+            if injected:
+                break
         (bound if injected else unbound).append(f"{dest_name}/{provider}")
     logger.info(
         "[accommodation_researcher] deterministic lodging binding: bound=%s unbound=%s",
@@ -804,6 +808,20 @@ async def accommodation_researcher_node(
         constraint_pack=state.constraint_pack,
     )
     task_desc = assignment["objective"]
+    if state.research_query_plan is None:
+        raise ValueError("accommodation research requires a Research Query Plan")
+    planned_queries = [
+        query
+        for query in queries_by_ids(
+            state.research_query_plan,
+            assignment.get("research_query_ids") or [],
+        )
+        if query.domain is ResearchDomain.LODGING
+    ]
+    task_desc = (
+        f"{task_desc}；研究查询："
+        + "；".join(query.query_text for query in planned_queries)
+    )[:1000]
     recommended_tools = assignment.get("recommended_tools", [])
     excluded_tools = assignment.get("excluded_tools", [])
     excluded_candidate_ids = assignment.get("excluded_candidate_ids")
@@ -886,17 +904,22 @@ async def accommodation_researcher_node(
     if state.planning_generation is None:
         raise ValueError("accommodation research requires a planning generation")
     generation_id = state.planning_generation.generation_id
+    executed_query_ids: List[str] = []
     packet_state_key = generation_packet_key(output_key, generation_id)
     authoritative_packet_metadata = build_authoritative_research_packet_metadata(
         worker_kind=_NODE_NAME,
         run_id=run_id,
         generation_id=generation_id,
+        intent_spec_revision=state.intent_spec_revision,
+        research_query_plan_id=state.research_query_plan.query_plan_id,
+        executed_queries=[],
         task_id=output_key,
         constraint_pack_revision=state.constraint_pack_revision,
         fact_data_revision=state.fact_data_revision,
         query_context={
             "objective": task_desc,
             "controlled_trip_identity": state.controlled_trip_identity or {},
+            "research_round": state.refinement_count,
         },
         generated_at=datetime.datetime.now(datetime.timezone.utc),
     )
@@ -914,7 +937,17 @@ async def accommodation_researcher_node(
             available_tools=available_tools,
             tool_context=tool_context,
             authoritative_tool_results=authoritative_tool_results,
+            planned_queries=planned_queries,
+            executed_query_ids=executed_query_ids,
         )
+        authoritative_packet_metadata["executed_query_ids"] = list(
+            dict.fromkeys(executed_query_ids)
+        )
+        authoritative_packet_metadata["query_context"]["query_lineage"] = [
+            query.model_dump(mode="json")
+            for query in planned_queries
+            if query.query_id in set(executed_query_ids)
+        ]
         if deterministic_places_ready:
             raw_response = ""
         else:

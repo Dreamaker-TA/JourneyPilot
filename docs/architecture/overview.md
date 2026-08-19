@@ -37,14 +37,19 @@ PostgreSQL + pgvector（最终事实）        Redis（缓存与快照）
 1. **路由**：简单问题走快问快答；多日行程进研究工作流。
 2. **合同化**：一次归一化同时产生 clause ledger、`IntentSpec` 与 Constraint Pack，
    并封装为唯一 `RequestContract`。
-3. **编排**：从合同确定性投影 `ResearchBriefV2`、`CapabilityPlan` 与
-   `MinimumDeliveryDraft`；每个 hard intent 都有所有者与验收标准。
+3. **编排**：从合同确定性投影 `ResearchBriefV2`、`ResearchQueryPlan`、
+   `CapabilityPlan` 与 `MinimumDeliveryDraft`；每个 hard intent 都有所有者与验收标准。
 4. **授权**：用户在计划门确认后封存 Draft，同时封存 `RunDeadlineSnapshot` 与
    `RunBudgetSnapshot` —— 时间与钱的上限从这一刻起对这个 Run 固定。
-5. **研究**：并行 worker 通过 MCP 与 Provider 取回**带来源的候选**，每个
-   Research Packet 绑定当前 `PlanningGeneration`。
-6. **门**：确定性检查覆盖度、来源谱系与 generation，缺什么就发起定向补研究。
-7. **交付**：一次原子提交写出唯一的 `DeliveryBundle`，所有面向用户的界面都是它的投影。
+5. **研究**：并行 Worker 按 assignment 中的 Query ID 执行 Intent Primary 与 Structural
+   查询；只有前序查询不足且政策允许时才执行 Generic Fallback。每个 Research Packet
+   绑定当前 `PlanningGeneration`、Query Plan 和服务端生成的 Candidate Discovery Lineage。
+6. **候选门**：Admission 验证事实与硬 Constraint；Candidate Intent Evaluation、Ranking
+   和 Selection 分别判断意图匹配、分层顺序与本次候选集合。缺少高优先级意图候选时，
+   Candidate Gate 生成 Targeted Repair Query。
+7. **编排**：Itinerary Planner 只消费 `CandidateSelectionPlan` 允许的候选，不把整个
+   admitted Catalog 当成必须排入行程的清单。
+8. **交付**：一次原子提交写出唯一的 `DeliveryBundle`，所有面向用户的界面都是它的投影。
 
 计划门修改和运行中追加要求不直接改 prompt。它们先变成 `IntentAmendment`，
 回到同一个 Request Contract 边界，再按影响范围失效旧产物。

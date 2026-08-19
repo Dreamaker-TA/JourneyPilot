@@ -21,6 +21,7 @@ def invalidation_update(impact: AmendmentImpact) -> Dict[str, Any]:
         return projection
     composition = {
         **projection,
+        "candidate_selection_plan": None,
         "placement_skeleton": None,
         "trip_workspace_v2": None,
         "recommendation_quality": None,
@@ -35,6 +36,7 @@ def invalidation_update(impact: AmendmentImpact) -> Dict[str, Any]:
     ranking = {
         **composition,
         "recommendation_catalog": None,
+        "candidate_intent_evaluation_cache": {},
         "candidate_research_gaps": [],
         "candidate_gate_status": None,
         "candidate_gate_route": None,
@@ -47,6 +49,7 @@ def invalidation_update(impact: AmendmentImpact) -> Dict[str, Any]:
         **ranking,
         "research_brief": None,
         "capability_plan": None,
+        "research_query_plan": None,
         "execution_plan": [],
         "agent_assignments": {},
         "current_plan_step": 0,

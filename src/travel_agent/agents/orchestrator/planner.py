@@ -16,6 +16,10 @@ from ...services.capability_planning import (
     CAPABILITY_PLAN_POLICY_VERSION,
     build_capability_plan,
 )
+from ...services.research_query_planner import (
+    RESEARCH_QUERY_POLICY_VERSION,
+    build_research_query_plan,
+)
 
 
 def _attach_initial_provider_evidence_scopes(
@@ -65,10 +69,15 @@ async def planner_node(state: TravelAgentState) -> Dict[str, Any]:
         raise ValueError("capability planning requires a request contract and research brief")
     if state.planning_generation is None:
         raise ValueError("capability planning requires a planning generation")
+    query_plan = build_research_query_plan(
+        intent_spec=state.request_contract.intent_spec,
+        brief=state.research_brief,
+    )
     plan = build_capability_plan(
         request_contract=state.request_contract,
         brief=state.research_brief,
         plan_revision=state.planning_generation.plan_revision,
+        research_query_plan=query_plan,
     )
     assignments = {
         key: value.model_dump(mode="json") for key, value in plan.assignments.items()
@@ -76,11 +85,13 @@ async def planner_node(state: TravelAgentState) -> Dict[str, Any]:
     assignments = _attach_initial_provider_evidence_scopes(assignments, state)
     return {
         "capability_plan": plan,
+        "research_query_plan": query_plan,
         "execution_plan": plan.execution_plan,
         "current_plan_step": 0,
         "agent_assignments": assignments,
         "task_type": TaskType.TRAVEL_PLANNING,
         "policy_versions": {
             "capability_plan": CAPABILITY_PLAN_POLICY_VERSION,
+            "research_query_plan": RESEARCH_QUERY_POLICY_VERSION,
         },
     }

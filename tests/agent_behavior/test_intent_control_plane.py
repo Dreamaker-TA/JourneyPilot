@@ -32,6 +32,7 @@ from travel_agent.services.intent_normalization import (
     normalize_clauses,
 )
 from travel_agent.services.intent_revision import build_request_contract_revision
+from travel_agent.services.research_query_planner import build_research_query_plan
 from travel_agent.workflows import intent_amendments as intent_amendment_workflow
 from travel_agent.workflows.intent_amendments import apply_runtime_amendments
 
@@ -200,10 +201,15 @@ def test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents()
     assert not contract.has_unresolved_material_clauses
 
     brief = build_research_brief(contract, _identity())
+    query_plan = build_research_query_plan(
+        intent_spec=contract.intent_spec,
+        brief=brief,
+    )
     plan = build_capability_plan(
         request_contract=contract,
         brief=brief,
         plan_revision=generation.plan_revision,
+        research_query_plan=query_plan,
     )
     hard_ids = {
         item.intent_id
@@ -218,6 +224,11 @@ def test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents()
     assert hard_ids == owned_ids
     assert plan.execution_plan[-1] == ["itinerary_planner"]
     assert all(assignment.generation_id == generation.generation_id for assignment in plan.assignments.values())
+    assert {
+        query_id
+        for assignment in plan.assignments.values()
+        for query_id in assignment.research_query_ids
+    } == set(query_plan.query_index())
 
 
 @pytest.mark.asyncio

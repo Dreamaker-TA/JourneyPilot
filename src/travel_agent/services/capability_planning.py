@@ -20,6 +20,7 @@ from ..entities.research_brief import (
     ResearchBriefV2,
     SuccessCriterion,
 )
+from ..entities.research_query_plan import ResearchQueryPlan
 from ..entities.trip_input import ControlledTripIdentity
 from .product_requirements import required_physical_candidate_kinds
 
@@ -161,6 +162,7 @@ def build_capability_plan(
     request_contract: RequestContract,
     brief: ResearchBriefV2,
     plan_revision: int,
+    research_query_plan: ResearchQueryPlan,
 ) -> CapabilityPlan:
     active = request_contract.intent_spec.active_items
     agents: set[AgentName] = {
@@ -234,6 +236,11 @@ def build_capability_plan(
                     for value in objective.excluded_categories
                 )
             ),
+            research_query_ids=[
+                query.query_id
+                for query in research_query_plan.queries
+                if query.domain in {objective.domain for objective in objectives}
+            ],
             success_criteria=[
                 criterion
                 for objective in objectives

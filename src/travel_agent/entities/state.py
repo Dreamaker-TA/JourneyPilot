@@ -47,6 +47,9 @@ from .request_contract import (
     RequestContract,
 )
 from .research_brief import ResearchBriefV2
+from .research_query_plan import ResearchQueryPlan
+from .candidate_intent import CandidateIntentMatch
+from .candidate_selection import CandidateSelectionPlan
 from .weather_planning import DestinationGeoPoint
 from .itinerary_composition_v2 import ItineraryCompositionDraft, LocalConnectorGap
 from .provider_evidence import (
@@ -274,6 +277,11 @@ class TravelAgentState(BaseModel):
     planning_generation: Optional[PlanningGeneration] = None
     research_brief: Optional[ResearchBriefV2] = None
     capability_plan: Optional[CapabilityPlan] = None
+    research_query_plan: Optional[ResearchQueryPlan] = None
+    candidate_selection_plan: Optional[CandidateSelectionPlan] = None
+    candidate_intent_evaluation_cache: Dict[str, CandidateIntentMatch] = Field(
+        default_factory=dict
+    )
     # trip_summary_card: 稳定边界从结构化 brief 确定性投影的消费者卡片。
     # 不调用额外 LLM，不承载实时进度或原始推理。
     trip_summary_card: Dict[str, Any] = Field(default_factory=dict)
@@ -493,6 +501,37 @@ class TravelAgentState(BaseModel):
                 raise ValueError("request contract and planning generation differ")
             if self.intent_spec_revision != self.intent_spec.revision:
                 raise ValueError("state intent revision differs from intent specification")
+        if self.research_query_plan is not None:
+            if self.planning_generation is None or self.intent_spec is None:
+                raise ValueError("research query plan requires intent and generation state")
+            if (
+                self.research_query_plan.generation_id
+                != self.planning_generation.generation_id
+                or self.research_query_plan.intent_spec_revision
+                != self.intent_spec_revision
+            ):
+                raise ValueError("research query plan belongs to an obsolete intent generation")
+        if self.capability_plan is not None:
+            if self.research_query_plan is None:
+                raise ValueError("capability plan requires a research query plan")
+            known_query_ids = set(self.research_query_plan.query_index())
+            if any(
+                not set(assignment.research_query_ids) <= known_query_ids
+                for assignment in self.capability_plan.assignments.values()
+            ):
+                raise ValueError("capability assignment references an unknown research query")
+        if self.candidate_selection_plan is not None:
+            if self.recommendation_catalog is None:
+                raise ValueError("candidate selection plan requires a recommendation catalog")
+            if (
+                self.candidate_selection_plan.generation_id
+                != self.recommendation_catalog.generation_id
+                or self.candidate_selection_plan.intent_spec_revision
+                != self.recommendation_catalog.intent_spec_revision
+                or self.candidate_selection_plan.catalog_revision
+                != self.recommendation_catalog.fact_data_revision
+            ):
+                raise ValueError("candidate selection plan belongs to another catalog generation")
         draft = self.minimum_delivery_draft
         dependent_values = (
             self.run_deadline,

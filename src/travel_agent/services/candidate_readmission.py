@@ -604,12 +604,20 @@ def readmit_current_catalog_candidates(
                 )
         updated_packets.append(packet.model_copy(update={"candidates": candidates}))
 
-    refreshed_catalog = RecommendationCatalog(
-        generation_id=bundle.manifest.generation_id,
-        fact_data_revision=bundle.manifest.fact_data_revision,
-        weather_data_revision=bundle.manifest.weather_data_revision,
-        research_packets=updated_packets,
-        admission_results=admissions,
+    refreshed_catalog = bundle.workspace.recommendation_catalog.model_copy(
+        update={
+            "generation_id": bundle.manifest.generation_id,
+            "fact_data_revision": bundle.manifest.fact_data_revision,
+            "weather_data_revision": bundle.manifest.weather_data_revision,
+            "research_packets": updated_packets,
+            "admission_results": admissions,
+            "candidate_discovery_records": [
+                record
+                for packet in updated_packets
+                for record in packet.candidate_discovery_records
+            ],
+            "candidate_ranking_scores": [],
+        }
     )
     unique_impacts = {
         item.weather_impact_id: item for item in impacts

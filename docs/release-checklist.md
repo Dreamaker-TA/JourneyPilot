@@ -44,6 +44,12 @@ amd64/arm64 镜像、非 root 与 PDF 字体验证、容器扫描、SBOM。
 - [ ] plan gate 与运行中 supplement 都通过 `IntentAmendment` 回到 Request Contract
 - [ ] Packet、Catalog、Workspace、Manifest 的 `generation_id` 一致，旧代 Packet 不能进 Catalog
 - [ ] 后端与前端 Delivery contract 版本同步
+- [ ] `ResearchQueryPlan` 与 `CapabilityPlan.research_query_ids` 属于同一 generation 和 Intent revision
+- [ ] Generic Fallback 只在 Intent Primary、Structural 均执行且候选不足时调用
+- [ ] 显式排除类别没有进入 Provider Query，排除后的候选缺口没有被通用候选强行补齐
+- [ ] Candidate Discovery Lineage 来自服务端执行记录，不接受模型自报 Intent/Query ID
+- [ ] Admission、Intent Evaluation、Ranking 与 Selection 分层，软主题变化不改写 Admission
+- [ ] Composer 只读取 `CandidateSelectionPlan` 允许的候选
 
 ## 检索质量变化
 

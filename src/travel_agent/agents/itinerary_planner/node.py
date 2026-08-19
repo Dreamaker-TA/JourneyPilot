@@ -55,6 +55,7 @@ from ...services.authored_place_resolution import (
     resolve_authored_place,
 )
 from ...services.geo_dispersion import itinerary_dispersion
+from ...services.candidate_selection import catalog_for_candidate_selection
 from ...entities.state import TravelAgentState, bounded_repair_context
 from ...models.router import get_model_router
 from ...models.strict_json_schema import as_strict_schema
@@ -2079,6 +2080,31 @@ def _log_composition_dispersion(workspace: TripWorkspaceV2) -> None:
     logger.info("Composition dispersion: %s", " | ".join(measured))
 
 
+def _restore_full_catalog(
+    workspace: TripWorkspaceV2,
+    full_catalog: RecommendationCatalog | None,
+) -> TripWorkspaceV2:
+    if full_catalog is None:
+        return workspace
+    admissions = {
+        (result.candidate_id, result.selection_slot_id): result
+        for result in full_catalog.admission_results
+    }
+    admissions.update(
+        {
+            (result.candidate_id, result.selection_slot_id): result
+            for result in workspace.recommendation_catalog.admission_results
+            if result.selection_slot_id is not None
+        }
+    )
+    restored_catalog = full_catalog.model_copy(
+        update={"admission_results": list(admissions.values())}
+    )
+    return workspace.model_copy(
+        update={"recommendation_catalog": restored_catalog}
+    )
+
+
 def _anchor_day_ids(days: List[Any], passed: Dict[str, Any]) -> set[int]:
     """The Days that carry a long-distance anchor and are therefore travel-only."""
     return {
@@ -2691,6 +2717,18 @@ def _composition_phase(state: TravelAgentState) -> str:
 async def itinerary_planner_node(
     state: TravelAgentState, config: RunnableConfig
 ) -> Dict[str, Any]:
+    full_catalog = state.recommendation_catalog
+    if full_catalog is not None:
+        if state.candidate_selection_plan is None:
+            raise ValueError("itinerary composition requires a Candidate Selection Plan")
+        state = state.model_copy(
+            update={
+                "recommendation_catalog": catalog_for_candidate_selection(
+                    full_catalog,
+                    state.candidate_selection_plan,
+                )
+            }
+        )
     output_key, assignment = resolve_agent_assignment(
         state.agent_assignments or {}, _NODE_NAME, state.refinement_count
     )
@@ -2981,6 +3019,7 @@ async def itinerary_planner_node(
                 user_input_anchors=_draft_user_input_anchors(state),
                 reference_services=list(state.provider_reference_services),
             )
+            workspace = _restore_full_catalog(workspace, full_catalog)
             _log_composition_dispersion(workspace)
             return {
                 "messages": [AIMessage(content="精确相邻路线已物化为正式行程")],
@@ -3285,6 +3324,7 @@ async def itinerary_planner_node(
             user_input_anchors=_draft_user_input_anchors(state),
             reference_services=list(state.provider_reference_services),
         )
+        workspace = _restore_full_catalog(workspace, full_catalog)
         _log_composition_dispersion(workspace)
         logger.info(
             "ItineraryPlanner v2 complete key=%s days=%d entities=%d slots=%d",

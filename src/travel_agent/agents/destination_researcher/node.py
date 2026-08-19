@@ -40,6 +40,8 @@ from ...rag.retrieval_grader import RetrievalGrader, GradeRoute
 from ...rag.policy import RAGModePolicy, RAGPolicyInput
 from ...rag.summary import build_retrieval_summary
 from ...entities.place_identity import stable_place_id_amap_poi
+from ...entities.research_domain import ResearchDomain
+from ...entities.research_query_plan import ResearchQuery, ResearchQueryKind
 from ...utils.coordinates import amap_location_to_wgs84
 from ...services.nominatim_place_search import (
     NominatimPlaceSearchError,
@@ -83,6 +85,11 @@ from ...services.candidate_admission import provider_place_type_matches_candidat
 from ...services.delivery_projection import candidate_place_id
 from ...services.destination_scope import annotate_destination_distance
 from ...services.state_invalidation import generation_packet_key
+from ...services.research_query_planner import queries_by_ids
+from ...services.fallback_query_policy import (
+    FallbackQueryPolicy,
+    runtime_fallback_capacity,
+)
 from ...services.constraint_applicability import active_hard_constraints, active_hard_constraint_ids
 from ..research_packet_prompt import build_research_packet_system_prompt
 from ..worker_errors import format_worker_last_error
@@ -935,6 +942,7 @@ async def discover_amap_dining(
     destination_boundaries: List[Dict[str, Any]],
     tool_context: Dict[str, Any],
     authoritative_tool_results: List[Dict[str, Any]],
+    query_text: str,
 ) -> bool:
     """Deterministically ground CN dining from real amap POI data.
 
@@ -961,7 +969,7 @@ async def discover_amap_dining(
         try:
             env = await execute_tool(
                 "maps_text_search",
-                {"keywords": f"{city_hint}餐厅", "city": city_hint},
+                {"keywords": query_text, "city": city_hint},
                 available_tools=available_tools,
                 node_name=_NODE_NAME,
                 activation_source="amap_dining_search",
@@ -1065,6 +1073,8 @@ async def discover_and_resolve_required_places(
     destination_boundaries: List[Dict[str, Any]],
     tool_context: Dict[str, Any],
     authoritative_tool_results: List[Dict[str, Any]],
+    planned_queries: List[ResearchQuery],
+    executed_query_ids: List[str],
 ) -> None:
     """Deterministically close discovery -> stable Provider identity for scoped gaps."""
     required_kinds = list(dict.fromkeys(required_candidate_kinds or []))
@@ -1090,101 +1100,77 @@ async def discover_and_resolve_required_places(
         if boundary.get("country_code")
     }
     country_code = next(iter(country_codes)) if len(country_codes) == 1 else None
-    # ── Visit 确定性预绑定的查询公式（零 LLM 实测选出）──────────────────────
-    #
-    # 受控目的地边界的 name 是 /api/places 落库的短名（PlaceIdentity.name，
-    # accept-language=zh-CN,zh,en），不是 Nominatim 全地址串。逗号式
-    # "<类别>, <地点>" 会被 Nominatim 当成结构化地址逐段匹配，地点一旦是全串就几乎
-    # 全灭；"<类别> in <地点>" 是 special-phrase 语法，先解析地点再在其范围内找类别。
-    # 六城零 LLM 探针（limit=10，按国家码过滤，只数通过 visit 准入、非行政区划、
-    # 有真实名字的具体地点）：
-    #
-    #   公式                          大阪 巴黎 曼谷 纽约 京都 罗马  合计
-    #   'museum, <display_name>' 旧式   10    1    0    0    0    0    11
-    #   'museum, <短名>'                10    1   10    3   10    1    35
-    #   'museum in <短名>'   ← 采用     10   10   10   10   10   10    60
-    #   'attraction in <短名>'          10   10   10   10   10   10    60
-    #
-    # 两个 in-式并列满额，选 museum 不是因为条数而是因为逐条可用性：museum 100%
-    # 返回 tourism;museum，条条是有地址、能开门进去的场馆；attraction 返回的
-    # tourism;attraction 在 OSM 里是杂物抽屉，实测混进纪念铭牌（Site of the Beach
-    # Pneumatic Subway）、集合点指示牌（阪急BIGMAN）和错标（京都的 "Location de
-    # voiture" 租车行）。Visit 准入是排除法（services/candidate_admission.py:142-145），
-    # 这些杂物会照样过闸落进用户行程，而这条确定性路径没有模型在回路里挡它。
-    #
-    # 复测过生产原样短名（PlaceIdentity.name 并不总等于查询词）：'大阪市' 10/10、
-    # '京都市' 10/10、'纽约;紐約' 10/9——多脚本名也无需归一化。
+    fallback_policy = FallbackQueryPolicy()
+
+    def domain_queries(domain: ResearchDomain, destination_id: str) -> List[ResearchQuery]:
+        scoped = [
+            query
+            for query in planned_queries
+            if query.domain is domain and query.destination_id == destination_id
+        ]
+        return [
+            *[
+                query
+                for query in scoped
+                if query.query_kind
+                in {
+                    ResearchQueryKind.INTENT_PRIMARY,
+                    ResearchQueryKind.STRUCTURAL,
+                    ResearchQueryKind.TARGETED_REPAIR,
+                }
+            ],
+            *[
+                query
+                for query in scoped
+                if query.query_kind is ResearchQueryKind.GENERIC_FALLBACK
+            ],
+        ]
     if "visit" in required_kinds and country_code and len(destination_boundaries) == 1:
         boundary = destination_boundaries[0]
-        visit_arguments: Dict[str, Any] = {
-            "query": f"museum in {boundary.get('name', '')}",
-            "country_code": country_code,
-            "limit": 10,
-            "candidate_kind": "visit",
-            "aliases": [],
-        }
         destination_id = boundary.get("destination_id")
-        if destination_id:
-            visit_arguments["destination_place_id"] = destination_id
-        latitude = boundary.get("latitude")
-        longitude = boundary.get("longitude")
-        if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
-            visit_arguments["destination_latitude"] = latitude
-            visit_arguments["destination_longitude"] = longitude
-        visit_envelope = await execute_tool(
-            "global_place_search",
-            visit_arguments,
-            available_tools=available_tools,
-            node_name=_NODE_NAME,
-            activation_source="candidate_gate_deterministic_visit_identity",
-            **tool_context,
-        )
-        messages.append(
-            {
-                "role": "tool",
-                "content": compact_tool_content_for_model(visit_envelope),
+        for query in domain_queries(ResearchDomain.VISIT, str(destination_id or "")):
+            if query.query_kind is ResearchQueryKind.GENERIC_FALLBACK:
+                research_window_open, run_budget_available = runtime_fallback_capacity()
+                if not fallback_policy.is_allowed(
+                    query,
+                    executed_query_ids=set(executed_query_ids),
+                    admitted_candidate_count=0,
+                    required_candidate_count=1,
+                    research_window_open=research_window_open,
+                    run_budget_available=run_budget_available,
+                ):
+                    continue
+            visit_arguments: Dict[str, Any] = {
+                "query": query.query_text,
+                "country_code": country_code,
+                "limit": 10,
+                "candidate_kind": "visit",
+                "aliases": query.aliases,
             }
-        )
-        authoritative_tool_results.append(visit_envelope)
-        # 这条确定性路径没有模型在回路里，日志是它唯一的可归因面：绑定了几个、还是
-        # 一个都没绑上、以及没绑上时是 provider 失败还是区域内查不到。
-        visit_result = visit_envelope.get("sanitized_result")
-        visit_places = (
-            visit_result.get("results") if isinstance(visit_result, dict) else None
-        ) or []
-        destination_name = boundary.get("name", "")
-        if visit_envelope.get("status") != "success":
-            logger.warning(
-                "[destination_researcher] deterministic nominatim visit unbound for %s: %s",
-                destination_name,
-                visit_envelope.get("result_summary") or visit_envelope.get("status"),
+            if destination_id:
+                visit_arguments["destination_place_id"] = destination_id
+            latitude = boundary.get("latitude")
+            longitude = boundary.get("longitude")
+            if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+                visit_arguments["destination_latitude"] = latitude
+                visit_arguments["destination_longitude"] = longitude
+            visit_envelope = await execute_tool(
+                "global_place_search",
+                visit_arguments,
+                available_tools=available_tools,
+                node_name=_NODE_NAME,
+                activation_source=f"research_query:{query.query_id}",
+                **tool_context,
             )
-        elif visit_places:
-            logger.info(
-                "[destination_researcher] deterministic nominatim visit bound: %d places for %s (e.g. %s)",
-                len(visit_places),
-                destination_name,
-                next(
-                    (
-                        place.get("name")
-                        for place in visit_places
-                        if isinstance(place, dict) and place.get("name")
-                    ),
-                    "",
-                ),
-            )
-        else:
-            fallback_failure = (
-                visit_result.get("identity_fallback_failure")
-                if isinstance(visit_result, dict)
-                else None
-            )
-            logger.info(
-                "[destination_researcher] deterministic nominatim visit bound 0 places for %s: query=%r fallback=%s",
-                destination_name,
-                visit_arguments["query"],
-                (fallback_failure or {}).get("reason") or "none",
-            )
+            executed_query_ids.append(query.query_id)
+            messages.append({"role": "tool", "content": compact_tool_content_for_model(visit_envelope)})
+            authoritative_tool_results.append(visit_envelope)
+            visit_result = visit_envelope.get("sanitized_result")
+            visit_places = (
+                visit_result.get("results") if isinstance(visit_result, dict) else None
+            ) or []
+            if visit_places:
+                break
 
     # A Visit-only repair must not inherit the dining discovery path merely
     # because the overall trip has a food preference. Candidate Gate owns the
@@ -1193,69 +1179,86 @@ async def discover_and_resolve_required_places(
         return
 
     # CN: prefer amap POI grounding (mirrors lodging).
-    if await discover_amap_dining(
-        messages=messages,
-        available_tools=available_tools,
-        destination_boundaries=destination_boundaries,
-        tool_context=tool_context,
-        authoritative_tool_results=authoritative_tool_results,
-    ):
-        return
+    dining_queries = domain_queries(
+        ResearchDomain.DINING,
+        str(destination_boundaries[0].get("destination_id") or "")
+        if len(destination_boundaries) == 1
+        else "",
+    )
+    if dining_queries:
+        amap_query = dining_queries[0]
+        amap_attempted = (
+            _cn_only_destination_boundaries(destination_boundaries)
+            and "maps_text_search" in available_names
+        )
+        if amap_attempted:
+            executed_query_ids.append(amap_query.query_id)
+        if await discover_amap_dining(
+            messages=messages,
+            available_tools=available_tools,
+            destination_boundaries=destination_boundaries,
+            tool_context=tool_context,
+            authoritative_tool_results=authoritative_tool_results,
+            query_text=amap_query.query_text,
+        ):
+            return
 
     if discovery_name is None:
         return
 
-    # ── Dining 确定性预绑定的查询公式（零 LLM 实测选出）────────────────────────
-    #
-    # 与 Visit 同一条公式，同一个理由：``"<类别> in <地点>"`` 是 Nominatim 的
-    # special-phrase 语法，先解析地点再在其范围内找类别；逗号式会被当成结构化地址
-    # 逐段匹配。``restaurant`` 是 Nominatim 自带的 special phrase。六城零 LLM 探针
-    # （生产同路径 search_nominatim_raw + normalize_nominatim_place +
-    # is_concrete_dining_place，limit=10，按国家码过滤，用生产原样短名）：
-    #
-    #   公式                          大阪市 巴黎 曼谷 纽约;紐約 京都市 罗马  合计
-    #   'restaurant, <短名>' 逗号式       1    0    0     1      0    0    1/60
-    #   'restaurant in <短名>'  ← 采用   10   10   10    10     10   10   60/60
-    #
-    # 60 条全部返回 amenity;restaurant，具体性过滤（``_GENERIC_DINING_NAMES`` /
-    # ``_DINING_COLLECTION_TOKENS``）一条没拦。旧公式写死 ``ramen``，只有日本市场
-    # 撞得上；它连巴黎/罗马/曼谷的 0 命中都不是慢，而是查不到。
     if country_code and len(destination_boundaries) == 1:
         boundary = destination_boundaries[0]
-        identity_arguments: Dict[str, Any] = {
-            "query": f"restaurant in {boundary.get('name', '')}",
-            "country_code": country_code,
-            "limit": 10,
-            "candidate_kind": "dining",
-            "aliases": [],
-        }
         destination_id = boundary.get("destination_id")
-        if destination_id:
-            identity_arguments["destination_place_id"] = destination_id
-        latitude = boundary.get("latitude")
-        longitude = boundary.get("longitude")
-        if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
-            identity_arguments["destination_latitude"] = latitude
-            identity_arguments["destination_longitude"] = longitude
-        identity_envelope = await execute_tool(
-            "global_place_search",
-            identity_arguments,
-            available_tools=available_tools,
-            node_name=_NODE_NAME,
-            activation_source="candidate_gate_deterministic_identity_discovery",
-            **tool_context,
-        )
-        identity_payload = identity_envelope.get("sanitized_result") or {}
-        identity_results = (
-            identity_payload.get("results")
-            if isinstance(identity_payload, dict)
-            else None
-        )
-        selected = [
-            item
-            for item in (identity_results or [])[:3]
-            if isinstance(item, dict) and item.get("name") and item.get("place_id")
-        ]
+        selected: List[Dict[str, Any]] = []
+        identity_envelope: Dict[str, Any] = {}
+        for query in domain_queries(ResearchDomain.DINING, str(destination_id or "")):
+            if query.query_kind is ResearchQueryKind.GENERIC_FALLBACK:
+                research_window_open, run_budget_available = runtime_fallback_capacity()
+                if not fallback_policy.is_allowed(
+                    query,
+                    executed_query_ids=set(executed_query_ids),
+                    admitted_candidate_count=0,
+                    required_candidate_count=1,
+                    research_window_open=research_window_open,
+                    run_budget_available=run_budget_available,
+                ):
+                    continue
+            identity_arguments: Dict[str, Any] = {
+                "query": query.query_text,
+                "country_code": country_code,
+                "limit": 10,
+                "candidate_kind": "dining",
+                "aliases": query.aliases,
+            }
+            if destination_id:
+                identity_arguments["destination_place_id"] = destination_id
+            latitude = boundary.get("latitude")
+            longitude = boundary.get("longitude")
+            if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+                identity_arguments["destination_latitude"] = latitude
+                identity_arguments["destination_longitude"] = longitude
+            identity_envelope = await execute_tool(
+                "global_place_search",
+                identity_arguments,
+                available_tools=available_tools,
+                node_name=_NODE_NAME,
+                activation_source=f"research_query:{query.query_id}",
+                **tool_context,
+            )
+            executed_query_ids.append(query.query_id)
+            identity_payload = identity_envelope.get("sanitized_result") or {}
+            identity_results = (
+                identity_payload.get("results")
+                if isinstance(identity_payload, dict)
+                else None
+            )
+            selected = [
+                item
+                for item in (identity_results or [])[:3]
+                if isinstance(item, dict) and item.get("name") and item.get("place_id")
+            ]
+            if selected:
+                break
         # 一次批量 /lookup 取全部候选的类型化双语地址（两次 provider 调用，速率门
         # 由 nominatim_place_search 自带），再逐条发质量查询。
         locality_tokens_by_place = await resolve_dining_locality_tokens(selected)
@@ -1365,6 +1368,18 @@ async def destination_researcher_node(
         constraint_pack=state.constraint_pack,
     )
     task_desc = assignment["objective"]
+    if state.research_query_plan is None:
+        raise ValueError("destination research requires a Research Query Plan")
+    planned_queries = queries_by_ids(
+        state.research_query_plan,
+        assignment.get("research_query_ids") or [],
+    )
+    planned_queries = [
+        query
+        for query in planned_queries
+        if query.domain in {ResearchDomain.VISIT, ResearchDomain.DINING}
+    ]
+    rag_executed_query_ids: List[str] = []
     recommended_tools = assignment.get("recommended_tools", [])
     excluded_tools = assignment.get("excluded_tools", [])
     excluded_candidate_ids = assignment.get("excluded_candidate_ids")
@@ -1395,8 +1410,32 @@ async def destination_researcher_node(
         retrieval_summary = None
         rag_context_section, injected_rag_sources = "", {}
     else:
-        rag_docs, retrieval_summary = await _run_rag(
-            retriever, task_desc or user_query, corpus
+        rag_queries = [
+            query
+            for query in planned_queries
+            if query.query_kind
+            in {
+                ResearchQueryKind.INTENT_PRIMARY,
+                ResearchQueryKind.STRUCTURAL,
+                ResearchQueryKind.TARGETED_REPAIR,
+            }
+        ]
+        rag_results = [
+            await _run_rag(retriever, query.query_text, corpus)
+            for query in rag_queries
+        ]
+        rag_executed_query_ids = [query.query_id for query in rag_queries]
+        rag_docs = []
+        seen_docs: set[str] = set()
+        for docs, _summary in rag_results:
+            for doc in docs:
+                key = json.dumps(doc, ensure_ascii=False, sort_keys=True, default=str)
+                if key not in seen_docs:
+                    seen_docs.add(key)
+                    rag_docs.append(doc)
+        retrieval_summary = next(
+            (summary for _docs, summary in rag_results if summary is not None),
+            None,
         )
         rag_context_section, injected_rag_sources = _format_rag_context(retriever, rag_docs)
 
@@ -1466,17 +1505,27 @@ async def destination_researcher_node(
     if state.planning_generation is None:
         raise ValueError("destination research requires a planning generation")
     generation_id = state.planning_generation.generation_id
+    executed_query_ids = list(rag_executed_query_ids)
+    executed_queries = [
+        query.model_dump(mode="json")
+        for query in planned_queries
+        if query.query_id in set(executed_query_ids)
+    ]
     packet_state_key = generation_packet_key(output_key, generation_id)
     authoritative_packet_metadata = build_authoritative_research_packet_metadata(
         worker_kind=_NODE_NAME,
         run_id=run_id,
         generation_id=generation_id,
+        intent_spec_revision=state.intent_spec_revision,
+        research_query_plan_id=state.research_query_plan.query_plan_id,
+        executed_queries=executed_queries,
         task_id=output_key,
         constraint_pack_revision=state.constraint_pack_revision,
         fact_data_revision=state.fact_data_revision,
         query_context={
             "objective": task_desc,
             "controlled_trip_identity": state.controlled_trip_identity or {},
+            "research_round": state.refinement_count,
         },
         generated_at=datetime.datetime.now(datetime.timezone.utc),
     )
@@ -1510,7 +1559,17 @@ async def destination_researcher_node(
                 destination_boundaries=destination_boundaries,
                 tool_context=tool_context,
                 authoritative_tool_results=authoritative_tool_results,
+                planned_queries=planned_queries,
+                executed_query_ids=executed_query_ids,
             )
+        authoritative_packet_metadata["executed_query_ids"] = list(
+            dict.fromkeys(executed_query_ids)
+        )
+        authoritative_packet_metadata["query_context"]["query_lineage"] = [
+            query.model_dump(mode="json")
+            for query in planned_queries
+            if query.query_id in set(executed_query_ids)
+        ]
         messages.append({
             "role": "user",
             "content": build_destination_task_prompt(

@@ -219,6 +219,54 @@ Brief、Planner 与 Worker 只消费结构化合同，不再解释原始要求
 Tests:
 - `agent_behavior/test_intent_control_plane.py::test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents`
 
+### INV-RESEARCH-001：Intent Query 先于 Generic Fallback
+Owner: `services/research_query_planner.py`、`services/fallback_query_policy.py`、各 Research Worker
+Enforced by: assignment 只携带正式 Query ID；Worker 按 Intent Primary、Structural、
+Generic Fallback 顺序执行；Fallback 必须确认依赖 Query 已执行、候选仍不足、研究窗口与预算可用
+ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_worker_executes_intent_and_structural_queries_before_fallback`
+- `agent_behavior/test_intent_research_ranking_selection.py::test_fallback_candidate_is_penalized_and_targeted_repair_is_stable`
+
+### INV-RESEARCH-002：明确排除的类别不得进入 Provider Query
+Owner: `services/research_query_planner.py`、`services/fallback_query_policy.py`
+Enforced by: Query Plan 在生成 Provider 模板前合并 domain exclusions；Fallback Policy 在调用前复核
+ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_theme_changes_query_plan_and_museum_exclusion_blocks_fallback`
+
+### INV-CANDIDATE-001：Admission 与 Ranking 不得互相替代
+Owner: `services/candidate_admission.py`、`services/candidate_intent_evaluation.py`、
+`services/candidate_ranking.py`
+Enforced by: Admission 结果只由事实、来源和 Constraint 产生；Intent Match 与 Ranking 单独写入 Catalog
+ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_admission_is_stable_while_ranking_and_selection_change_with_theme`
+- `agent_behavior/test_intent_research_ranking_selection.py::test_semantic_exclusion_becomes_a_hard_ranking_violation`
+
+### INV-CANDIDATE-002：模型不得生成正式 Intent 或 Query Lineage
+Owner: `agents/research_packet_output.py`
+Enforced by: 模型输出 Schema 移除正式谱系字段；Packet Compiler 用服务端元数据覆盖并校验
+ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_packet_compiler_owns_and_merges_candidate_discovery_lineage`
+- `agent_behavior/test_intent_research_ranking_selection.py::test_semantic_evaluator_cannot_claim_a_match_without_evidence`
+
+### INV-CANDIDATE-003：通过 Admission 不产生 Placement 义务
+Owner: `services/candidate_selection.py`、`agents/itinerary_planner/node.py`
+Enforced by: Selection 只从 passed admissions 产生有限候选集合；Planner 用 Selection Plan 过滤 Catalog
+ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_admission_is_stable_while_ranking_and_selection_change_with_theme`
+
+### INV-CANDIDATE-004：同一 Identity Candidate 在多个 Query 中只出现一次
+Owner: `agents/research_packet_output.py` 的 Provider Identity 选项去重与 Packet 边界
+Enforced by: Provider place/route identity 生成稳定 Candidate ID；重复身份不能形成两个 Packet 候选，
+执行过的 Query、Intent 与 Origin 合并到一条 Candidate Discovery Record
+ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_packet_compiler_owns_and_merges_candidate_discovery_lineage`
+
 ---
 
 ## 流与会话

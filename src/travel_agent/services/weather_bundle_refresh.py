@@ -18,7 +18,6 @@ from ..entities.delivery_bundle import (
     EntityRef,
     EntityType,
     FactStoreSnapshot,
-    RecommendationCatalog,
     TripWorkspaceV2,
     WeatherContextSnapshot,
     WeatherCoverage,
@@ -400,17 +399,26 @@ def _rebind_catalog_for_snapshot(
     catalog = bundle.workspace.recommendation_catalog
     candidate_ids = tuple(catalog.candidate_index())
     if not candidate_ids:
-        refreshed_catalog = RecommendationCatalog(
-            generation_id=bundle.manifest.generation_id,
-            fact_data_revision=facts.fact_data_revision,
-            weather_data_revision=weather.weather_data_revision,
-            research_packets=[
+        refreshed_packets = [
                 packet.model_copy(
                     update={"fact_data_revision": facts.fact_data_revision}
                 )
                 for packet in catalog.research_packets
-            ],
-            admission_results=[],
+            ]
+        refreshed_catalog = catalog.model_copy(
+            update={
+                "generation_id": bundle.manifest.generation_id,
+                "fact_data_revision": facts.fact_data_revision,
+                "weather_data_revision": weather.weather_data_revision,
+                "research_packets": refreshed_packets,
+                "admission_results": [],
+                "candidate_discovery_records": [
+                    record
+                    for packet in refreshed_packets
+                    for record in packet.candidate_discovery_records
+                ],
+                "candidate_ranking_scores": [],
+            }
         )
         return (
             bundle.workspace.model_copy(

@@ -2853,12 +2853,8 @@ def materialize_trip_workspace(
             scoped = base.model_copy(update={"selection_slot_id": slot.selection_slot_id})
             admissions.append(scoped)
             admission_index[key] = scoped
-    catalog = RecommendationCatalog(
-        generation_id=catalog.generation_id,
-        fact_data_revision=catalog.fact_data_revision,
-        weather_data_revision=catalog.weather_data_revision,
-        research_packets=catalog.research_packets,
-        admission_results=admissions,
+    catalog = catalog.model_copy(
+        update={"admission_results": admissions}
     )
     return TripWorkspaceV2(
         run_id=run_id,

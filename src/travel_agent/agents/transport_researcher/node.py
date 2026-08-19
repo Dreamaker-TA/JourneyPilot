@@ -24,6 +24,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
 from ...entities.state import TravelAgentState
+from ...entities.research_domain import ResearchDomain
+from ...entities.research_query_plan import ResearchQueryKind
 from ...models.router import get_model_router
 from ..utils import (
     append_recent_history,
@@ -60,6 +62,7 @@ from ...entities.provider_evidence import (
 )
 from ...services.constraint_applicability import active_hard_constraints, active_hard_constraint_ids
 from ...services.state_invalidation import generation_packet_key
+from ...services.research_query_planner import queries_by_ids
 from ..research_packet_prompt import build_research_packet_system_prompt
 from ..worker_errors import format_worker_last_error
 from ...entities.place_identity import stable_place_id_12306
@@ -1890,6 +1893,24 @@ async def transport_researcher_node(
         constraint_pack=state.constraint_pack,
     )
     task_desc = assignment["objective"]
+    if state.research_query_plan is None:
+        raise ValueError("transport research requires a Research Query Plan")
+    planned_queries = [
+        query
+        for query in queries_by_ids(
+            state.research_query_plan,
+            assignment.get("research_query_ids") or [],
+        )
+        if query.domain
+        in {
+            ResearchDomain.LOCAL_TRANSPORT,
+            ResearchDomain.LONG_DISTANCE_TRANSPORT,
+        }
+    ]
+    task_desc = (
+        f"{task_desc}；研究查询："
+        + "；".join(query.query_text for query in planned_queries)
+    )[:1000]
     recommended_tools = assignment.get("recommended_tools", [])
     excluded_tools = assignment.get("excluded_tools", [])
     required_transport_classes = assignment.get("required_transport_classes")
@@ -2011,11 +2032,24 @@ async def transport_researcher_node(
     if state.planning_generation is None:
         raise ValueError("transport research requires a planning generation")
     generation_id = state.planning_generation.generation_id
+    executed_queries = [
+        query.model_dump(mode="json")
+        for query in planned_queries
+        if query.query_kind
+        in {
+            ResearchQueryKind.INTENT_PRIMARY,
+            ResearchQueryKind.STRUCTURAL,
+            ResearchQueryKind.TARGETED_REPAIR,
+        }
+    ]
     packet_state_key = generation_packet_key(output_key, generation_id)
     authoritative_packet_metadata = build_authoritative_research_packet_metadata(
         worker_kind=_NODE_NAME,
         run_id=run_id,
         generation_id=generation_id,
+        intent_spec_revision=state.intent_spec_revision,
+        research_query_plan_id=state.research_query_plan.query_plan_id,
+        executed_queries=executed_queries,
         task_id=output_key,
         constraint_pack_revision=state.constraint_pack_revision,
         fact_data_revision=state.fact_data_revision,
@@ -2028,6 +2062,7 @@ async def transport_researcher_node(
                 for scope in required_route_scopes
                 if scope.route_leg is not None
             ],
+            "research_round": state.refinement_count,
         },
         generated_at=datetime.datetime.now(datetime.timezone.utc),
     )

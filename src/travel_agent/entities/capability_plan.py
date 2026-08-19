@@ -28,11 +28,18 @@ class AgentAssignmentContract(StrictModel):
     research_objective_ids: List[str] = Field(default_factory=list)
     required_candidate_kinds: List[str] = Field(default_factory=list)
     excluded_categories: List[str] = Field(default_factory=list)
+    research_query_ids: List[str] = Field(default_factory=list)
     success_criteria: List[SuccessCriterion] = Field(default_factory=list)
     recommended_tools: List[str] = Field(default_factory=list)
     upstream_assignment_ids: List[str] = Field(default_factory=list)
     intent_spec_revision: int = Field(ge=1)
     constraint_pack_revision: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_assignment(self) -> "AgentAssignmentContract":
+        if len(self.research_query_ids) != len(set(self.research_query_ids)):
+            raise ValueError("assignment research query ids must be unique")
+        return self
 
 
 class CapabilityPlan(StrictModel):

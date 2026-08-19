@@ -17,23 +17,19 @@ from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Unio
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .candidate_discovery import CandidateDiscoveryRecord
+from .candidate_intent import CandidateIntentMatch
+from .candidate_ranking import CandidateRankingScore
+from .contract_base import StrictModel
+from .research_domain import ResearchDomain
 
-# These strings are the only signal a reader of a stored payload has about the
-# shape it is about to be parsed as, so a shape change must move them.  That did
-# not happen for the v3 generation: every row that fails to parse today still
-# carries ``journeypilot.delivery_bundle.v3``, fourteen distinct field-level
-# breakages coexisting under one stamp.  Bump the version string whenever the
-# shape below changes.
-DELIVERY_BUNDLE_CONTRACT_VERSION = "journeypilot.delivery_bundle.v8"
-TRIP_WORKSPACE_CONTRACT_VERSION = "journeypilot.trip_workspace.v8"
+
+DELIVERY_BUNDLE_CONTRACT_VERSION = "journeypilot.delivery_bundle.v9"
+TRIP_WORKSPACE_CONTRACT_VERSION = "journeypilot.trip_workspace.v9"
 FACT_SNAPSHOT_CONTRACT_VERSION = "journeypilot.fact_store_snapshot.v4"
 WEATHER_SNAPSHOT_CONTRACT_VERSION = "journeypilot.weather_context_snapshot.v2"
 RESEARCH_PACKET_CONTRACT_VERSION = "journeypilot.research_packet.v5"
 RECOMMENDATION_CATALOG_CONTRACT_VERSION = "journeypilot.recommendation_catalog.v6"
-
-
-class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class EntityType(str, Enum):
@@ -210,16 +206,6 @@ class UserInputAnchor(StrictModel):
         if self.input_kind == "intent_requirement" and not self.public_summary:
             raise ValueError("intent-requirement input requires a public summary")
         return self
-
-
-class ResearchDomain(str, Enum):
-    """The independent research surface a candidate, gap or entity belongs to."""
-
-    VISIT = "visit"
-    DINING = "dining"
-    LODGING = "lodging"
-    LOCAL_TRANSPORT = "local_transport"
-    LONG_DISTANCE_TRANSPORT = "long_distance_transport"
 
 
 class GateClass(str, Enum):
@@ -1219,7 +1205,14 @@ class CandidateResearchGap(StrictModel):
     reason: Literal[
         "missing_candidate",
         "missing_comparison_fact",
+        "missing_intent_candidate",
+        "insufficient_intent_evidence",
+        "selection_coverage_gap",
     ]
+    generation_id: str = Field(min_length=1)
+    intent_id: Optional[str] = None
+    query_id: Optional[str] = None
+    desired_candidate_count: Optional[int] = Field(default=None, ge=1)
     candidate_id: Optional[str] = None
     selection_slot_id: Optional[str] = None
     field_path: Optional[str] = None
@@ -1242,7 +1235,17 @@ class CandidateResearchGap(StrictModel):
 
     @model_validator(mode="after")
     def validate_scope(self) -> "CandidateResearchGap":
-        if self.reason != "missing_candidate" and self.candidate_id is None:
+        intent_reasons = {
+            "missing_intent_candidate",
+            "insufficient_intent_evidence",
+            "selection_coverage_gap",
+        }
+        if self.reason in intent_reasons and self.intent_id is None:
+            raise ValueError("intent-scoped gap requires intent id")
+        if (
+            self.reason not in {"missing_candidate", *intent_reasons}
+            and self.candidate_id is None
+        ):
             raise ValueError("candidate-scoped gap requires candidate id")
         if self.reason == "missing_comparison_fact" and self.field_path is None:
             raise ValueError("field-scoped candidate gap requires field path")
@@ -1317,8 +1320,15 @@ class RecommendationQualityState(StrictModel):
 class PersonalizationInfluence(StrictModel):
     influence_id: str = Field(min_length=1)
     target_ref: Union[EntityRef, SelectionSlotRef]
-    constraint_id: str = Field(min_length=1)
-    effect: Literal["candidate_filter", "option_ranking", "selection_reason"]
+    intent_id: str = Field(min_length=1)
+    constraint_id: Optional[str] = Field(default=None, min_length=1)
+    effect: Literal[
+        "candidate_filter",
+        "option_ranking",
+        "selection_reason",
+        "schedule_rule",
+        "output_requirement",
+    ]
     source_kind: Literal["current_request", "saved_preference", "trip_context"]
     display_text: str = Field(min_length=1)
 
@@ -1686,6 +1696,12 @@ class ResearchPacket(StrictModel):
     research_packet_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
     generation_id: str = Field(min_length=1)
+    intent_spec_revision: int = Field(ge=1)
+    research_query_plan_id: str = Field(min_length=1)
+    executed_query_ids: List[str] = Field(default_factory=list)
+    candidate_discovery_records: List[CandidateDiscoveryRecord] = Field(
+        default_factory=list
+    )
     task_id: str = Field(min_length=1)
     worker_kind: Literal[
         "destination_researcher",
@@ -1714,6 +1730,23 @@ class ResearchPacket(StrictModel):
         candidate_ids = [candidate.candidate_id for candidate in self.candidates]
         if len(candidate_ids) != len(set(candidate_ids)):
             raise ValueError("research packet candidate ids must be unique")
+        discovery_candidate_ids = [
+            record.candidate_id for record in self.candidate_discovery_records
+        ]
+        if len(discovery_candidate_ids) != len(set(discovery_candidate_ids)):
+            raise ValueError("candidate discovery records must be unique")
+        if set(discovery_candidate_ids) != set(candidate_ids):
+            raise ValueError("every research candidate requires one discovery record")
+        if any(
+            record.generation_id != self.generation_id
+            for record in self.candidate_discovery_records
+        ):
+            raise ValueError("candidate discovery record belongs to another generation")
+        if any(
+            not set(record.query_ids) <= set(self.executed_query_ids)
+            for record in self.candidate_discovery_records
+        ):
+            raise ValueError("candidate discovery record names an unexecuted query")
         allowed_kinds = {
             "destination_researcher": {"visit", "dining"},
             "accommodation_researcher": {"lodging"},
@@ -1933,10 +1966,17 @@ class RecommendationCatalog(StrictModel):
         RECOMMENDATION_CATALOG_CONTRACT_VERSION
     )
     generation_id: str = Field(min_length=1)
+    intent_spec_revision: int = Field(ge=1)
+    research_query_plan_id: str = Field(min_length=1)
     fact_data_revision: int = Field(ge=0)
     weather_data_revision: int = Field(ge=0)
     research_packets: List[ResearchPacket] = Field(default_factory=list)
     admission_results: List[CandidateAdmissionResult] = Field(default_factory=list)
+    candidate_discovery_records: List[CandidateDiscoveryRecord] = Field(
+        default_factory=list
+    )
+    candidate_intent_matches: List[CandidateIntentMatch] = Field(default_factory=list)
+    candidate_ranking_scores: List[CandidateRankingScore] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_catalog(self) -> "RecommendationCatalog":
@@ -1951,6 +1991,27 @@ class RecommendationCatalog(StrictModel):
             raise ValueError("research packet fact revision does not match recommendation catalog")
         if any(packet.generation_id != self.generation_id for packet in self.research_packets):
             raise ValueError("research packet generation does not match recommendation catalog")
+        if any(
+            packet.intent_spec_revision != self.intent_spec_revision
+            for packet in self.research_packets
+        ):
+            raise ValueError("research packet intent revision does not match catalog")
+        if any(
+            packet.research_query_plan_id != self.research_query_plan_id
+            for packet in self.research_packets
+        ):
+            raise ValueError("research packet query plan does not match catalog")
+        discovery_by_candidate = {
+            record.candidate_id: record for record in self.candidate_discovery_records
+        }
+        if set(discovery_by_candidate) != set(candidate_ids):
+            raise ValueError("catalog discovery lineage must cover every candidate")
+        if any(
+            record != discovery_by_candidate.get(record.candidate_id)
+            for packet in self.research_packets
+            for record in packet.candidate_discovery_records
+        ):
+            raise ValueError("catalog discovery lineage differs from research packets")
         keys: set[tuple[str, Optional[str]]] = set()
         candidate_index = {candidate.candidate_id: candidate for candidate in candidates}
         for admission in self.admission_results:
@@ -1971,6 +2032,24 @@ class RecommendationCatalog(StrictModel):
                 raise ValueError("passed admission did not check every active hard constraint")
             if set(admission.weather_impact_ids) != set(candidate.weather_impact_ids):
                 raise ValueError("candidate weather impact lineage differs from admission")
+        match_keys = [
+            (match.candidate_id, match.intent_id)
+            for match in self.candidate_intent_matches
+        ]
+        if len(match_keys) != len(set(match_keys)):
+            raise ValueError("candidate intent match is duplicated")
+        if any(candidate_id not in candidate_index for candidate_id, _ in match_keys):
+            raise ValueError("candidate intent match references a missing candidate")
+        ranking_ids = [score.candidate_id for score in self.candidate_ranking_scores]
+        if len(ranking_ids) != len(set(ranking_ids)):
+            raise ValueError("candidate ranking score is duplicated")
+        if any(candidate_id not in candidate_index for candidate_id in ranking_ids):
+            raise ValueError("candidate ranking references a missing candidate")
+        if any(
+            score.generation_id != self.generation_id
+            for score in self.candidate_ranking_scores
+        ):
+            raise ValueError("candidate ranking belongs to another generation")
         return self
 
     def candidate_index(self) -> Dict[str, ResearchCandidate]:

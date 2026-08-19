@@ -35,6 +35,8 @@ from ...entities.delivery_bundle import (
     ResearchDomain,
 )
 from ...entities.state import TravelAgentState, bounded_repair_context
+from ...entities.intent_spec import IntentStrength, IntentTarget
+from ...entities.candidate_intent import IntentMatchStatus
 from ...entities.provider_evidence import (
     build_provider_evidence_assignments,
     build_required_long_distance_legs,
@@ -56,11 +58,16 @@ from ...services.candidate_admission import (
     admit_candidate,
     normalize_lodging_price_evidence,
 )
+from ...services.candidate_intent_evaluation import evaluate_candidate_intents
+from ...services.candidate_ranking import rank_candidates
+from ...services.candidate_selection import build_candidate_selection_plan
+from ...models.router import get_model_router
 from ...services.constraint_applicability import (
     bind_candidate_constraint_gate_attestations,
 )
 from ...services.destination_scope import destination_points
 from ...services.product_requirements import required_physical_candidate_kinds
+from ...services.research_query_planner import append_targeted_repair_query
 from ...services.weather_impact_engine import (
     WeatherImpactEngine,
     risk_profile_from_constraint_pack,
@@ -351,11 +358,73 @@ def _packet_candidate_closure(
         {
             **packet.model_dump(mode="python"),
             "candidates": list(candidates),
+            "candidate_discovery_records": [
+                record
+                for record in packet.candidate_discovery_records
+                if record.candidate_id in candidate_ids
+            ],
             "source_records": sources,
             "fact_assertions": facts,
             "field_provenance": provenance,
         }
     )
+
+
+def _candidate_domain(candidate: ResearchCandidate) -> ResearchDomain:
+    if candidate.candidate_kind == "visit":
+        return ResearchDomain.VISIT
+    if candidate.candidate_kind == "dining":
+        return ResearchDomain.DINING
+    if candidate.candidate_kind == "lodging":
+        return ResearchDomain.LODGING
+    return (
+        ResearchDomain.LONG_DISTANCE_TRANSPORT
+        if candidate.transport_class == "long_distance"
+        else ResearchDomain.LOCAL_TRANSPORT
+    )
+
+
+def _apply_candidate_caps(
+    packets: Sequence[ResearchPacket],
+    per_domain_caps: Mapping[str, int],
+) -> list[ResearchPacket]:
+    origin_priority = {
+        "targeted_repair": 0,
+        "intent_query": 1,
+        "structural_query": 2,
+        "generic_fallback": 3,
+        "composer_authored_fallback": 4,
+    }
+    rows: list[tuple[int, str, ResearchDomain]] = []
+    for packet in packets:
+        discovery = {
+            record.candidate_id: record
+            for record in packet.candidate_discovery_records
+        }
+        for candidate in packet.candidates:
+            record = discovery[candidate.candidate_id]
+            priority = min(
+                origin_priority[origin.value]
+                for origin in record.origins
+            )
+            rows.append((priority, candidate.candidate_id, _candidate_domain(candidate)))
+    rows.sort()
+    kept: set[str] = set()
+    counts: dict[ResearchDomain, int] = defaultdict(int)
+    for _priority, candidate_id, domain in rows:
+        cap = max(int(per_domain_caps.get(domain.value, 0)), 0)
+        if counts[domain] >= cap:
+            continue
+        kept.add(candidate_id)
+        counts[domain] += 1
+    capped: list[ResearchPacket] = []
+    for packet in packets:
+        candidates = [
+            candidate for candidate in packet.candidates if candidate.candidate_id in kept
+        ]
+        if candidates:
+            capped.append(_packet_candidate_closure(packet, candidates))
+    return capped
 
 
 def _target_ref(candidate: ResearchCandidate) -> EntityRef | TransportLegRef:
@@ -601,6 +670,7 @@ def _candidate_gaps(
                 field_path,
             ),
             worker_kind=packet.worker_kind,
+            generation_id=packet.generation_id,
             reason="missing_comparison_fact",
             candidate_id=candidate.candidate_id,
             field_path=field_path,
@@ -623,6 +693,24 @@ def build_candidate_catalog(
             "missing_planning_generation",
             "candidate catalog requires a planning generation",
         )
+    if state.intent_spec is None or state.research_query_plan is None:
+        raise CandidateGateIntegrityError(
+            "missing_intent_research_contract",
+            "candidate catalog requires IntentSpec and ResearchQueryPlan",
+        )
+    if (
+        state.research_query_plan.generation_id
+        != state.planning_generation.generation_id
+        or state.research_query_plan.intent_spec_revision != state.intent_spec_revision
+    ):
+        raise CandidateGateIntegrityError(
+            "stale_research_query_plan",
+            "candidate catalog received a stale ResearchQueryPlan",
+        )
+    packets = _apply_candidate_caps(
+        packets,
+        state.research_query_plan.per_domain_candidate_caps,
+    )
     generation_id = state.planning_generation.generation_id
     risk_profile = risk_profile_from_constraint_pack(state.constraint_pack)
     engine = WeatherImpactEngine()
@@ -743,12 +831,19 @@ def build_candidate_catalog(
 
     catalog = RecommendationCatalog(
         generation_id=generation_id,
+        intent_spec_revision=state.intent_spec_revision,
+        research_query_plan_id=state.research_query_plan.query_plan_id,
         fact_data_revision=state.fact_data_revision,
         weather_data_revision=(
             state.weather_context.weather_data_revision if state.weather_context else 0
         ),
         research_packets=updated_packets,
         admission_results=admissions,
+        candidate_discovery_records=[
+            record
+            for packet in updated_packets
+            for record in packet.candidate_discovery_records
+        ],
     )
     return catalog, list({item.weather_impact_id: item for item in impacts}.values()), gaps
 
@@ -771,6 +866,74 @@ def _required_candidate_kinds(state: TravelAgentState) -> dict[str, set[str]]:
     """
     required = required_physical_candidate_kinds(state.controlled_trip_identity)
     return {"destination_researcher": required} if required else {}
+
+
+def _intent_research_gaps(
+    state: TravelAgentState,
+    catalog: RecommendationCatalog,
+    uncovered_intent_ids: Iterable[str],
+) -> list[CandidateResearchGap]:
+    if state.intent_spec is None or state.planning_generation is None:
+        return []
+    target_scope = {
+        IntentTarget.VISIT: ("destination_researcher", ResearchDomain.VISIT),
+        IntentTarget.DINING: ("destination_researcher", ResearchDomain.DINING),
+        IntentTarget.LODGING: ("accommodation_researcher", ResearchDomain.LODGING),
+        IntentTarget.LOCAL_TRANSPORT: (
+            "transport_researcher",
+            ResearchDomain.LOCAL_TRANSPORT,
+        ),
+        IntentTarget.LONG_DISTANCE_TRANSPORT: (
+            "transport_researcher",
+            ResearchDomain.LONG_DISTANCE_TRANSPORT,
+        ),
+    }
+    intent_index = {intent.intent_id: intent for intent in state.intent_spec.active_items}
+    destination_ids = [
+        str(destination.get("place_id") or "")
+        for destination in (state.controlled_trip_identity or {}).get(
+            "destinations", []
+        )
+        if isinstance(destination, Mapping) and destination.get("place_id")
+    ]
+    gaps: list[CandidateResearchGap] = []
+    for intent_id in sorted(set(uncovered_intent_ids)):
+        intent = intent_index.get(intent_id)
+        scope = target_scope.get(intent.target) if intent is not None else None
+        if (
+            intent is None
+            or scope is None
+            or (
+                intent.strength is not IntentStrength.HARD
+                and intent.priority < 70
+            )
+        ):
+            continue
+        matches = [
+            match
+            for match in catalog.candidate_intent_matches
+            if match.intent_id == intent_id
+        ]
+        reason = (
+            "insufficient_intent_evidence"
+            if any(match.status is IntentMatchStatus.UNKNOWN for match in matches)
+            else "missing_intent_candidate"
+        )
+        worker, domain = scope
+        destination_id = destination_ids[0] if destination_ids else None
+        gaps.append(
+            CandidateResearchGap(
+                gap_id=_gap_id(worker, reason, intent_id, destination_id or "all"),
+                worker_kind=worker,
+                generation_id=state.planning_generation.generation_id,
+                reason=reason,
+                intent_id=intent_id,
+                destination_id=destination_id,
+                desired_candidate_count=2,
+                research_domain=domain,
+            )
+        )
+    return gaps
 
 
 def _long_distance_gaps(
@@ -822,6 +985,7 @@ def _long_distance_gaps(
                 assignment.scope.scope_id,
             ),
             worker_kind="transport_researcher",
+            generation_id=state.planning_generation.generation_id,
             reason="missing_candidate",
             field_path="transport_class.long_distance",
             destination_id=assignment.scope.route_leg.to_place_id,
@@ -940,6 +1104,7 @@ def _itinerary_coverage_gaps(
                     destination_id,
                 ),
                 worker_kind="destination_researcher",
+                generation_id=state.planning_generation.generation_id,
                 reason="missing_candidate",
                 field_path="itinerary.destination_physical_stop",
                 destination_id=destination_id,
@@ -962,6 +1127,7 @@ def _itinerary_coverage_gaps(
                     shortfall,
                 ),
                 worker_kind="destination_researcher",
+                generation_id=state.planning_generation.generation_id,
                 reason="missing_candidate",
                 field_path="itinerary.day_coverage",
                 destination_id=destination_ids[0] if len(destination_ids) == 1 else None,
@@ -1332,6 +1498,8 @@ def _gap_research_exhausted(
 
 
 def _research_gap_priority(gap: CandidateResearchGap) -> int:
+    if gap.intent_id:
+        return 0
     field_path = gap.field_path or ""
     if field_path.startswith((
         "candidate_kind.",
@@ -1739,6 +1907,47 @@ async def candidate_gate_node(
             message=str(exc),
         )
 
+    if state.intent_spec is None:
+        return _catalog_contract_update(
+            state,
+            reason_code="missing_intent_spec",
+            message="candidate evaluation requires an IntentSpec",
+            base_update={"recommendation_catalog": catalog},
+        )
+    matches, evaluation_cache = await evaluate_candidate_intents(
+        catalog=catalog,
+        intent_spec=state.intent_spec,
+        llm=get_model_router().get_fast(),
+        cache=state.candidate_intent_evaluation_cache,
+    )
+    ranking_scores = rank_candidates(
+        catalog=catalog,
+        intent_spec=state.intent_spec,
+        matches=matches,
+    )
+    catalog = catalog.model_copy(
+        update={
+            "candidate_intent_matches": matches,
+            "candidate_ranking_scores": ranking_scores,
+        }
+    )
+    destination_count = len(
+        [
+            destination
+            for destination in (state.controlled_trip_identity or {}).get(
+                "destinations", []
+            )
+            if isinstance(destination, Mapping)
+        ]
+    )
+    selection_plan = build_candidate_selection_plan(
+        catalog=catalog,
+        intent_spec=state.intent_spec,
+        ranking_scores=ranking_scores,
+        duration_days=_trip_duration_days(state),
+        destination_count=destination_count,
+    )
+
     packet_workers = {
         candidate.candidate_id: packet.worker_kind
         for packet in catalog.research_packets
@@ -1765,6 +1974,8 @@ async def candidate_gate_node(
 
     base_update: Dict[str, Any] = {
         "recommendation_catalog": catalog,
+        "candidate_selection_plan": selection_plan,
+        "candidate_intent_evaluation_cache": evaluation_cache,
         "weather_impacts": {impact.weather_impact_id: impact for impact in impacts},
     }
     required_workers = _required_workers(state)
@@ -1776,6 +1987,7 @@ async def candidate_gate_node(
             CandidateResearchGap(
                 gap_id=_gap_id(worker, "missing_candidate"),
                 worker_kind=worker,
+                generation_id=state.planning_generation.generation_id,
                 reason="missing_candidate",
             )
         )
@@ -1792,6 +2004,7 @@ async def candidate_gate_node(
                 CandidateResearchGap(
                     gap_id=_gap_id(worker, "missing_candidate", candidate_kind),
                     worker_kind=worker,
+                    generation_id=state.planning_generation.generation_id,
                     reason="missing_candidate",
                     field_path=f"candidate_kind.{candidate_kind}",
                 )
@@ -1802,12 +2015,18 @@ async def candidate_gate_node(
         catalog,
         required_workers,
     )
-    gaps.extend([*long_distance_gaps, *itinerary_coverage_gaps])
+    intent_gaps = _intent_research_gaps(
+        state,
+        catalog,
+        selection_plan.uncovered_intent_ids,
+    )
+    gaps.extend([*long_distance_gaps, *itinerary_coverage_gaps, *intent_gaps])
     blocked_workers = sorted(
         set(missing_workers)
         | coverage_workers
         | {gap.worker_kind for gap in long_distance_gaps}
         | {gap.worker_kind for gap in itinerary_coverage_gaps}
+        | {gap.worker_kind for gap in intent_gaps}
     )
 
     # The research boundary is global.  Check it before any placement skeleton
@@ -2037,6 +2256,7 @@ async def candidate_gate_node(
                         CandidateResearchGap(
                             gap_id=pending.gap_id,
                             worker_kind="transport_researcher",
+                            generation_id=state.planning_generation.generation_id,
                             reason="missing_candidate",
                             field_path=f"itinerary.connector.{pending.gap_id}",
                             destination_id=pending.destination_id,
@@ -2246,6 +2466,60 @@ async def candidate_gate_node(
     deterministically_rejected_ids = _deterministically_rejected_candidate_ids(
         catalog, packet_workers, worker
     )
+    targeted_query_ids: list[str] | None = None
+    if (
+        primary_gap.intent_id is not None
+        and primary_gap.destination_id is not None
+        and state.intent_spec is not None
+        and state.research_query_plan is not None
+    ):
+        intent = next(
+            (
+                item
+                for item in state.intent_spec.active_items
+                if item.intent_id == primary_gap.intent_id
+            ),
+            None,
+        )
+        if intent is not None:
+            destination_name = next(
+                (
+                    str(destination.get("name") or "")
+                    for destination in (state.controlled_trip_identity or {}).get(
+                        "destinations", []
+                    )
+                    if isinstance(destination, Mapping)
+                    and destination.get("place_id") == primary_gap.destination_id
+                ),
+                primary_gap.destination_id,
+            )
+            updated_query_plan, targeted_query = append_targeted_repair_query(
+                state.research_query_plan,
+                intent=intent,
+                destination_id=primary_gap.destination_id,
+                destination_name=destination_name,
+                domain=domain,
+                desired_candidate_count=primary_gap.desired_candidate_count or 2,
+            )
+            primary_gap = primary_gap.model_copy(
+                update={"query_id": targeted_query.query_id}
+            )
+            gaps = [
+                primary_gap if gap.gap_id == primary_gap.gap_id else gap
+                for gap in gaps
+            ]
+            researching_gaps = [
+                primary_gap.model_copy(update={"status": "researching"})
+                if gap.gap_id == primary_gap.gap_id
+                else gap
+                for gap in researching_gaps
+            ]
+            scoped_gaps = [
+                primary_gap if gap.gap_id == primary_gap.gap_id else gap
+                for gap in scoped_gaps
+            ]
+            targeted_query_ids = [targeted_query.query_id]
+            base_update["research_query_plan"] = updated_query_plan
     gap_summary = [gap.model_dump(mode="json") for gap in scoped_gaps]
     long_distance_instruction = _long_distance_instruction(long_distance_legs)
     connector_instruction = (
@@ -2288,6 +2562,11 @@ async def candidate_gate_node(
         "excluded_tools": excluded_tools,
         "failure_signatures": accumulated_signatures,
         "require_current_candidate": True,
+        **(
+            {"research_query_ids": targeted_query_ids}
+            if targeted_query_ids is not None
+            else {}
+        ),
         **(
             {"excluded_candidate_ids": deterministically_rejected_ids}
             if deterministically_rejected_ids

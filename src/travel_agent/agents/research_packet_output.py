@@ -233,28 +233,24 @@ _PLACE_ENTITY_TYPE = {
     "lodging": EntityType.LODGING_STAY,
 }
 def _drop_fields_the_model_must_not_author(schema: dict[str, Any]) -> None:
-    """Remove from a ResearchPacket-derived schema what the model never writes.
-
-    ``query_context`` is server-owned lineage — ``_server_owned_packet_metadata``
-    says so in as many words ("models never author these fields"), and all three
-    production workers pass the server's copy, so a model-written one would be
-    overwritten if it arrived at all.  ``anchor_travel_minutes`` has no writer
-    and no reader anywhere in this repository: one definition, one mirrored TS
-    type, zero uses.  ``snapshot`` is now written from the Tool Gateway
-    transcript by ``_ground_retrieved_sources_in_the_transcript``, which is the
-    only place that can honour "verbatim".
-
-    All three are free-form mappings, and the strict structured-output subset
-    has no way to express "arbitrary keys".  So offering them to the model costs
-    output tokens, buys nothing, and is the difference between a schema a strict
-    provider accepts and one it rejects outright.
-    """
+    """Remove server-owned fields from the model output contract."""
 
     properties = schema.get("properties")
-    if isinstance(properties, dict) and properties.pop("query_context", None):
+    server_fields = {
+        "query_context",
+        "intent_spec_revision",
+        "research_query_plan_id",
+        "executed_query_ids",
+        "candidate_discovery_records",
+    }
+    if isinstance(properties, dict):
+        for field_name in server_fields:
+            properties.pop(field_name, None)
         required = schema.get("required")
         if isinstance(required, list):
-            schema["required"] = [name for name in required if name != "query_context"]
+            schema["required"] = [
+                name for name in required if name not in server_fields
+            ]
     definitions = schema.get("$defs", {})
     for definition_name, field_name in (
         ("LodgingCandidate", "anchor_travel_minutes"),
@@ -303,6 +299,9 @@ def build_authoritative_research_packet_metadata(
     worker_kind: ResearchWorkerKind,
     run_id: str,
     generation_id: str,
+    intent_spec_revision: int,
+    research_query_plan_id: str,
+    executed_queries: Sequence[Mapping[str, Any]],
     task_id: str,
     constraint_pack_revision: int,
     fact_data_revision: int,
@@ -319,9 +318,19 @@ def build_authoritative_research_packet_metadata(
         "generation_id": generation_id,
         "task_id": task_id,
         "worker_kind": worker_kind,
+        "intent_spec_revision": intent_spec_revision,
+        "research_query_plan_id": research_query_plan_id,
+        "executed_query_ids": [
+            str(query.get("query_id") or "")
+            for query in executed_queries
+            if query.get("query_id")
+        ],
         "constraint_pack_revision": constraint_pack_revision,
         "fact_data_revision": fact_data_revision,
-        "query_context": dict(query_context),
+        "query_context": {
+            **dict(query_context),
+            "query_lineage": [dict(query) for query in executed_queries],
+        },
         "generated_at": generated_at.isoformat(),
     }
 
@@ -2685,6 +2694,107 @@ def _bind_authoritative_packet_metadata(
             candidate["research_packet_id"] = packet_id
 
 
+def _bind_candidate_discovery_lineage(payload: dict[str, Any]) -> None:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return
+    query_context = payload.get("query_context")
+    query_rows = (
+        query_context.get("query_lineage")
+        if isinstance(query_context, Mapping)
+        else []
+    )
+    query_rows = [row for row in (query_rows or []) if isinstance(row, Mapping)]
+    executed_ids = {
+        str(query_id)
+        for query_id in payload.get("executed_query_ids") or []
+        if str(query_id)
+    }
+    origin_by_kind = {
+        "intent_primary": "intent_query",
+        "structural": "structural_query",
+        "evidence_enrichment": "structural_query",
+        "generic_fallback": "generic_fallback",
+        "targeted_repair": "targeted_repair",
+    }
+    source_by_id = {
+        str(source.get("source_record_id") or ""): source
+        for source in payload.get("source_records") or []
+        if isinstance(source, Mapping)
+    }
+    research_round = 0
+    if isinstance(query_context, Mapping):
+        try:
+            research_round = max(int(query_context.get("research_round") or 0), 0)
+        except (TypeError, ValueError):
+            research_round = 0
+    records = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        candidate_kind = str(candidate.get("candidate_kind") or "")
+        domain_values = (
+            {"visit"}
+            if candidate_kind == "visit"
+            else {"dining"}
+            if candidate_kind == "dining"
+            else {"lodging"}
+            if candidate_kind == "lodging"
+            else {
+                "long_distance_transport"
+                if candidate.get("transport_class") == "long_distance"
+                else "local_transport"
+            }
+        )
+        relevant = [
+            row
+            for row in query_rows
+            if str(row.get("query_id") or "") in executed_ids
+            and str(row.get("domain") or "") in domain_values
+        ]
+        query_ids = list(
+            dict.fromkeys(str(row["query_id"]) for row in relevant)
+        )
+        intent_ids = list(
+            dict.fromkeys(
+                str(intent_id)
+                for row in relevant
+                for intent_id in row.get("intent_ids") or []
+                if str(intent_id)
+            )
+        )
+        origins = list(
+            dict.fromkeys(
+                origin_by_kind.get(str(row.get("query_kind") or ""), "structural_query")
+                for row in relevant
+            )
+        )
+        if not origins:
+            raise ResearchPacketOutputError(
+                "research candidate has no server-owned executed query lineage"
+            )
+        provider_audit_ids = list(
+            dict.fromkeys(
+                str(source.get("tool_audit_id") or "")
+                for source_id in candidate.get("source_record_ids") or []
+                if (source := source_by_id.get(str(source_id))) is not None
+                and source.get("tool_audit_id")
+            )
+        )
+        records.append(
+            {
+                "candidate_id": str(candidate.get("candidate_id") or ""),
+                "generation_id": str(payload.get("generation_id") or ""),
+                "query_ids": query_ids,
+                "intent_ids": intent_ids,
+                "origins": origins,
+                "provider_audit_ids": provider_audit_ids,
+                "discovered_at_rounds": [research_round],
+            }
+        )
+    payload["candidate_discovery_records"] = records
+
+
 def _bind_external_tool_source_registry(
     schema: dict[str, Any],
     authoritative_external_tool_source_ids: Sequence[str],
@@ -4083,6 +4193,7 @@ def parse_research_packet_output(
             source.model_dump(mode="python")
             for source in compiled_tool_sources.values()
         ]
+    _bind_candidate_discovery_lineage(payload)
     try:
         packet = ResearchPacket.model_validate(payload)
     except ValidationError as exc:

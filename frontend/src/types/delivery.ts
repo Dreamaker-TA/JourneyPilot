@@ -1,5 +1,5 @@
-export const DELIVERY_BUNDLE_CONTRACT_VERSION = 'journeypilot.delivery_bundle.v8' as const;
-export const TRIP_WORKSPACE_CONTRACT_VERSION = 'journeypilot.trip_workspace.v8' as const;
+export const DELIVERY_BUNDLE_CONTRACT_VERSION = 'journeypilot.delivery_bundle.v9' as const;
+export const TRIP_WORKSPACE_CONTRACT_VERSION = 'journeypilot.trip_workspace.v9' as const;
 export const FACT_SNAPSHOT_CONTRACT_VERSION = 'journeypilot.fact_store_snapshot.v4' as const;
 export const WEATHER_SNAPSHOT_CONTRACT_VERSION = 'journeypilot.weather_context_snapshot.v2' as const;
 export const RESEARCH_PACKET_CONTRACT_VERSION = 'journeypilot.research_packet.v5' as const;
@@ -384,8 +384,9 @@ export interface SelectionSlot {
 export interface PersonalizationInfluence {
   influence_id: string;
   target_ref: EntityRef | { selection_slot_id: string };
-  constraint_id: string;
-  effect: 'candidate_filter' | 'option_ranking' | 'selection_reason';
+  intent_id: string;
+  constraint_id: string | null;
+  effect: 'candidate_filter' | 'option_ranking' | 'selection_reason' | 'schedule_rule' | 'output_requirement';
   source_kind: 'current_request' | 'saved_preference' | 'trip_context';
   display_text: string;
 }
@@ -497,11 +498,61 @@ export type ResearchCandidate = CandidateBase & (
   | { candidate_kind: 'transport'; route_id: string; transport_class: TransportLeg['transport_class']; selected_mode: TransportMode; from_endpoint: TransportEndpoint; to_endpoint: TransportEndpoint; departure_at: string | null; arrival_at: string | null; duration_minutes: number; distance_meters: number | null; total_cost_cny: number | null; segments: TransportSegment[]; booking_status: TransportLeg['booking_status'] }
 );
 
+export type ResearchDomain = 'visit' | 'dining' | 'lodging' | 'local_transport' | 'long_distance_transport';
+
+export interface CandidateDiscoveryRecord {
+  candidate_id: string;
+  generation_id: string;
+  query_ids: string[];
+  intent_ids: string[];
+  origins: Array<'intent_query' | 'structural_query' | 'generic_fallback' | 'targeted_repair' | 'composer_authored_fallback'>;
+  provider_audit_ids: string[];
+  discovered_at_rounds: number[];
+}
+
+export interface CandidateIntentMatch {
+  candidate_id: string;
+  intent_id: string;
+  status: 'matched' | 'not_matched' | 'violated' | 'unknown' | 'not_applicable';
+  score: number | null;
+  method: 'deterministic' | 'semantic_batch_evaluation';
+  supporting_fact_assertion_ids: string[];
+  supporting_source_record_ids: string[];
+  reason_code: string;
+  public_reason: string | null;
+}
+
+export interface CandidateRankingScore {
+  candidate_id: string;
+  generation_id: string;
+  hard_eligible: boolean;
+  hard_violation_intent_ids: string[];
+  matched_intent_ids: string[];
+  unknown_intent_ids: string[];
+  high_priority_coverage_score: number;
+  semantic_fit: number;
+  evidence_confidence: number;
+  budget_fit: number;
+  weather_fit: number;
+  constraint_fit: number;
+  regional_fit: number;
+  diversity_potential: number;
+  generic_fallback_penalty: number;
+  redundancy_penalty: number;
+  travel_cost_penalty: number;
+  ranking_tuple: number[];
+  policy_version: string;
+}
+
 export interface ResearchPacket {
   contract_version: typeof RESEARCH_PACKET_CONTRACT_VERSION;
   research_packet_id: string;
   run_id: string;
   generation_id: string;
+  intent_spec_revision: number;
+  research_query_plan_id: string;
+  executed_query_ids: string[];
+  candidate_discovery_records: CandidateDiscoveryRecord[];
   task_id: string;
   worker_kind: 'destination_researcher' | 'accommodation_researcher' | 'transport_researcher';
   constraint_pack_revision: number;
@@ -517,6 +568,8 @@ export interface ResearchPacket {
 export interface RecommendationCatalog {
   contract_version: typeof RECOMMENDATION_CATALOG_CONTRACT_VERSION;
   generation_id: string;
+  intent_spec_revision: number;
+  research_query_plan_id: string;
   fact_data_revision: number;
   weather_data_revision: number;
   research_packets: ResearchPacket[];
@@ -535,6 +588,32 @@ export interface RecommendationCatalog {
     evaluated_weather_revision: number;
     weather_impact_ids: string[];
   }>;
+  candidate_discovery_records: CandidateDiscoveryRecord[];
+  candidate_intent_matches: CandidateIntentMatch[];
+  candidate_ranking_scores: CandidateRankingScore[];
+}
+
+export interface CandidateSelectionPlan {
+  schema_version: 'journeypilot.candidate_selection.v1';
+  selection_plan_id: string;
+  generation_id: string;
+  intent_spec_revision: number;
+  catalog_revision: number;
+  entries: Array<{
+    candidate_id: string;
+    domain: ResearchDomain;
+    destination_id: string;
+    role: 'required_primary' | 'primary' | 'alternative' | 'fallback';
+    rank: number;
+    covered_intent_ids: string[];
+    selection_reasons: string[];
+    eligible_for_composition: boolean;
+  }>;
+  covered_intent_ids: string[];
+  uncovered_intent_ids: string[];
+  policy_version: string;
+  selection_seed: number | null;
+  content_hash: string;
 }
 
 export interface TripWorkspaceV2 {
