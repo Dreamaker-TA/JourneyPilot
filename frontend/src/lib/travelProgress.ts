@@ -3,8 +3,9 @@ import { deriveStages } from './agentStages';
 
 const AGENT_LABELS: Record<string, { label: string; summary: string }> = {
   scope_clarifier: { label: '确认旅行边界', summary: '检查目的地、日期、同行人和硬约束是否足够明确' },
-  scope_brief_generator: { label: '整理旅行简报', summary: '把对话整理成可执行的旅行任务' },
-  constraint_normalizer: { label: '梳理旅行要求', summary: '把预算、饮食、行动能力和交通偏好变成可执行要求' },
+  request_contract_normalizer: { label: '整理需求合同', summary: '把本次要求和个人约束归一为可追踪的任务合同' },
+  research_brief_builder: { label: '生成调研简报', summary: '把需求合同确定性投影成各领域调研目标' },
+  intent_amendment_router: { label: '处理新增要求', summary: '判断新增要求的影响范围并更新当前计划' },
   destination_geo_resolver: { label: '确认目的地', summary: '解析目的地位置、时区和旅行范围' },
   weather_context_builder: { label: '准备天气信息', summary: '在安排前准备预报或季节参考' },
   planner: { label: '制定计划', summary: '把旅行需求拆成目的地、交通、住宿和每日安排' },

@@ -34,8 +34,9 @@ export const STAGE_DEFS: StageDef[] = [
 /** 后端 agent_name → 责任阶段（固定映射）。未列出的（如 fast_answer）不计入工作流。 */
 const AGENT_TO_STAGE: Record<string, StageId> = {
   scope_clarifier: 'planning',
-  scope_brief_generator: 'planning',
-  constraint_normalizer: 'planning',
+  request_contract_normalizer: 'planning',
+  research_brief_builder: 'planning',
+  intent_amendment_router: 'planning',
   destination_geo_resolver: 'planning',
   weather_context_builder: 'planning',
   trip_summary_card_brief: 'planning',
@@ -52,7 +53,9 @@ const AGENT_TO_STAGE: Record<string, StageId> = {
   delivery_finalizer: 'synthesis',
   智能调度: 'planning',
   需求确认: 'planning',
-  需求提炼: 'planning',
+  需求合同: 'planning',
+  调研简报: 'planning',
+  要求更新: 'planning',
   任务规划: 'planning',
   任务分发: 'planning',
   目的地调研: 'research',

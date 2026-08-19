@@ -38,6 +38,15 @@ from .delivery_bundle import (
     TerminalAttribution,
 )
 from .run_budget import RunBudgetSnapshot
+from .capability_plan import CapabilityPlan
+from .intent_spec import IntentSpec
+from .planning_generation import PlanningGeneration
+from .request_contract import (
+    IntentAmendment,
+    IntentAmendmentRejection,
+    RequestContract,
+)
+from .research_brief import ResearchBriefV2
 from .weather_planning import DestinationGeoPoint
 from .itinerary_composition_v2 import ItineraryCompositionDraft, LocalConnectorGap
 from .provider_evidence import (
@@ -62,29 +71,45 @@ def _merge_dicts(a: Dict, b: Dict) -> Dict:
     return {**a, **b}
 
 
+def _merge_dicts_allow_clear(a: Dict, b: Dict) -> Dict:
+    if not b:
+        return {}
+    return {**a, **b}
+
+
 def _merge_lists(a: List[Any], b: List[Any]) -> List[Any]:
     """Append-only list reducer for lightweight bridge summaries."""
     return list(a or []) + list(b or [])
 
 
-def _merge_supplements(a: List[Dict[str, str]], b: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """按 ``command_id`` 去重的追加要求。
-
-    并行 ``Send`` 扇出里每个 worker 拿到的是同一份入参 state，于是都判定这条要求还没并入，
-    都把它加进自己返回的更新里。纯 append 的 reducer 会把它存下 N 份，此后每个下游提示里
-    那句「本次运行追加要求」就出现 N 遍。
-    """
-
-    merged: List[Dict[str, str]] = []
+def _replace_amendments(
+    _a: List[IntentAmendment], b: List[IntentAmendment]
+) -> List[IntentAmendment]:
+    merged: List[IntentAmendment] = []
     seen: set[str] = set()
-    for item in list(a or []) + list(b or []):
-        command_id = str(item.get("command_id") or "").strip() if isinstance(item, dict) else ""
+    for item in list(b or []):
+        amendment = IntentAmendment.model_validate(item)
+        command_id = amendment.command_id
         if command_id:
             if command_id in seen:
                 continue
             seen.add(command_id)
-        merged.append(item)
+        merged.append(amendment)
     return merged
+
+
+def _merge_unique_strings(a: List[str], b: List[str]) -> List[str]:
+    return list(dict.fromkeys([*(a or []), *(b or [])]))
+
+
+def _merge_amendment_rejections(
+    a: List[IntentAmendmentRejection], b: List[IntentAmendmentRejection]
+) -> List[IntentAmendmentRejection]:
+    merged: Dict[str, IntentAmendmentRejection] = {}
+    for item in [*(a or []), *(b or [])]:
+        rejection = IntentAmendmentRejection.model_validate(item)
+        merged[rejection.command_id] = rejection
+    return list(merged.values())
 
 
 def _merge_reference_services(
@@ -134,16 +159,6 @@ def _prefer_pending_choice(
 def _prefer_latest_dict(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Prefer the latest non-empty control payload."""
     return b or a
-
-
-def _take_latest_allow_clear(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Last-write-wins including an explicit ``None`` clear.
-
-    plan_revision 只被两个单节点串行写入：plan_gate 写入修改载体（dict），planner
-    消费后写回 None 清空。非 fan-out 字段，故 last-write-wins 安全，且允许 None 覆盖
-    （prefer-latest 的 ``b or a`` 无法清空）。
-    """
-    return b
 
 
 def _take_latest_value_allow_clear(_a: Any, b: Any) -> Any:
@@ -247,17 +262,18 @@ class TravelAgentState(BaseModel):
     user_id: str = LOCAL_USER_ID
     user_query: str = ""
     run_id: str = ""
-    # P1-A 当前唯一基础旅行身份。Scope/Brief/Planner 不再从 raw user_query
+    # 当前唯一基础旅行身份。Scope/Brief/Planner 不再从 raw user_query
     # 重复猜测这些字段。
     controlled_trip_identity: Dict[str, Any] = Field(default_factory=dict)
     controlled_trip_identity_revision: int = Field(default=0, ge=0)
     route_decision: Dict[str, Any] = Field(default_factory=dict)
     # ── Scope 阶段 ──────────────────────────────────────────────────────────
-    # research_brief: Scope 阶段输出的结构化研究简报（JSON 字符串）
-    # 格式: {"objective": "...", "destination": "...", "duration_days": N,
-    #        "budget": "...", "travel_style": "...", "constraints": [...],
-    #        "dimensions_to_cover": [...]}
-    research_brief: Optional[str] = None
+    request_contract: Optional[RequestContract] = None
+    intent_spec: Optional[IntentSpec] = None
+    intent_spec_revision: int = Field(default=0, ge=0)
+    planning_generation: Optional[PlanningGeneration] = None
+    research_brief: Optional[ResearchBriefV2] = None
+    capability_plan: Optional[CapabilityPlan] = None
     # trip_summary_card: 稳定边界从结构化 brief 确定性投影的消费者卡片。
     # 不调用额外 LLM，不承载实时进度或原始推理。
     trip_summary_card: Dict[str, Any] = Field(default_factory=dict)
@@ -301,14 +317,13 @@ class TravelAgentState(BaseModel):
     execution_plan: List[List[str]] = Field(default_factory=list)
     current_plan_step: int = 0
 
-    # agent_assignments: planner_node 输出的结构化任务分配
-    # 格式: {"agent_name": {"task": "...", "recommended_tools": [...]}}
+    # agent_assignments: planner_node 输出的结构化任务合同。
     agent_assignments: Dict[str, Any] = Field(default_factory=dict)
 
     # ── Worker 输出 ─────────────────────────────────────────────────────────
-    agent_status: Annotated[Dict[str, str], _merge_dicts] = Field(default_factory=dict)
+    agent_status: Annotated[Dict[str, str], _merge_dicts_allow_clear] = Field(default_factory=dict)
     # artifact gate separates scheduling completion from current-contract acceptance.
-    artifact_status: Annotated[Dict[str, str], _merge_dicts] = Field(default_factory=dict)
+    artifact_status: Annotated[Dict[str, str], _merge_dicts_allow_clear] = Field(default_factory=dict)
     artifact_gate_route: Optional[str] = None
     # v2 Research Worker 的唯一业务产物。key 与 execution plan worker key 对齐，
     # 补研轮次使用后缀，不存在通用文本信封的兼容读取。
@@ -385,12 +400,30 @@ class TravelAgentState(BaseModel):
     pending_user_choice: Annotated[Optional[Dict[str, Any]], _prefer_pending_choice] = None
     plan_gate_decision: Annotated[Optional[Dict[str, Any]], _prefer_latest_dict] = None
     plan_gate_revision_count: int = 0
-    # 计划批准门修改载体：plan_gate_node 写入 {"mode": "edit"|"supplement",
-    # "content": ..., "base_plan_text": ...}，planner 消费后清空（置 None）。prefer-latest
-    # reducer 与 plan_gate_decision 一致——门是单节点写入，不参与 fan-out 合并。
-    plan_revision: Annotated[Optional[Dict[str, Any]], _take_latest_allow_clear] = None
-    # 运行中追加的辅助规划要求；由 run control 在下一个节点边界注入，基础旅行身份不在此字段内。
-    supplemental_requirements: Annotated[List[Dict[str, str]], _merge_supplements] = Field(default_factory=list)
+    plan_gate_amendment: Annotated[
+        Optional[IntentAmendment], _take_latest_value_allow_clear
+    ] = None
+    pending_intent_amendments: Annotated[
+        List[IntentAmendment], _replace_amendments
+    ] = Field(default_factory=list)
+    intent_amendment_resume_node: Annotated[
+        Optional[str], _take_latest_value_allow_clear
+    ] = None
+    intent_amendment_route: Annotated[
+        Optional[str], _take_latest_value_allow_clear
+    ] = None
+    applied_intent_amendment_ids: Annotated[
+        List[str], _merge_unique_strings
+    ] = Field(default_factory=list)
+    rejected_intent_amendments: Annotated[
+        List[IntentAmendmentRejection], _merge_amendment_rejections
+    ] = Field(default_factory=list)
+    prompt_versions: Annotated[Dict[str, str], _merge_dicts] = Field(
+        default_factory=dict
+    )
+    policy_versions: Annotated[Dict[str, str], _merge_dicts] = Field(
+        default_factory=dict
+    )
 
     # ── 用户上下文 ──────────────────────────────────────────────────────────
     # 这里**没有** ``user_profile_summary``：用户偏好与系统画像抵达模型的通道只有一条，
@@ -422,7 +455,7 @@ class TravelAgentState(BaseModel):
     # 深度路径是下面那个 ``session_compacted_this_turn``（单写入点 / 单读取点）。
     # session_compacted_this_turn: 本轮**刚刚**压缩过（区别于 session_compressed 的
     # 「这个会话历史上压缩过」）。唯一的写入点是 scope_clarifier 压缩成功那一支，
-    # 唯一的读取点是 constraint_normalizer —— 它要据此在上下文透镜里印那句
+    # 唯一的读取点是 request_contract_normalizer —— 它要据此在上下文透镜里印那句
     # 「较早的对话已整理」，而透镜的报告只能由它来发（只有它手里有 pack）。
     session_compacted_this_turn: Annotated[bool, _or_bool] = False
 
@@ -451,6 +484,15 @@ class TravelAgentState(BaseModel):
         malformed or older checkpoint must not resume with a fresh eight-minute
         budget attached to an unrelated Draft.
         """
+        if self.request_contract is not None:
+            if self.intent_spec is None or self.planning_generation is None:
+                raise ValueError("request contract requires intent and planning generation state")
+            if self.request_contract.intent_spec != self.intent_spec:
+                raise ValueError("state intent specification differs from request contract")
+            if self.request_contract.generation_id != self.planning_generation.generation_id:
+                raise ValueError("request contract and planning generation differ")
+            if self.intent_spec_revision != self.intent_spec.revision:
+                raise ValueError("state intent revision differs from intent specification")
         draft = self.minimum_delivery_draft
         dependent_values = (
             self.run_deadline,
@@ -462,9 +504,14 @@ class TravelAgentState(BaseModel):
                 raise ValueError("completion state requires a minimum delivery draft")
             return self
         draft_generation_matches = (
-            draft.controlled_trip_identity_revision == self.controlled_trip_identity_revision
+            self.planning_generation is not None
+            and draft.planning_generation_id == self.planning_generation.generation_id
+            and draft.controlled_trip_identity_revision == self.controlled_trip_identity_revision
             and draft.constraint_pack_revision == self.constraint_pack_revision
             and draft.plan_revision == self.plan_gate_revision_count
+            and draft.intent_spec_revision == self.intent_spec_revision
+            and self.intent_spec is not None
+            and draft.intent_spec_hash == self.intent_spec.content_hash
         )
         # An unsealed seed may be visible for the single graph transition
         # between a constraint/identity revision and the deterministic Draft

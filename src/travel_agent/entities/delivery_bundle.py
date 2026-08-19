@@ -24,12 +24,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # carries ``journeypilot.delivery_bundle.v3``, fourteen distinct field-level
 # breakages coexisting under one stamp.  Bump the version string whenever the
 # shape below changes.
-DELIVERY_BUNDLE_CONTRACT_VERSION = "journeypilot.delivery_bundle.v7"
-TRIP_WORKSPACE_CONTRACT_VERSION = "journeypilot.trip_workspace.v7"
+DELIVERY_BUNDLE_CONTRACT_VERSION = "journeypilot.delivery_bundle.v8"
+TRIP_WORKSPACE_CONTRACT_VERSION = "journeypilot.trip_workspace.v8"
 FACT_SNAPSHOT_CONTRACT_VERSION = "journeypilot.fact_store_snapshot.v4"
 WEATHER_SNAPSHOT_CONTRACT_VERSION = "journeypilot.weather_context_snapshot.v2"
-RESEARCH_PACKET_CONTRACT_VERSION = "journeypilot.research_packet.v4"
-RECOMMENDATION_CATALOG_CONTRACT_VERSION = "journeypilot.recommendation_catalog.v5"
+RESEARCH_PACKET_CONTRACT_VERSION = "journeypilot.research_packet.v5"
+RECOMMENDATION_CATALOG_CONTRACT_VERSION = "journeypilot.recommendation_catalog.v6"
 
 
 class StrictModel(BaseModel):
@@ -184,11 +184,13 @@ class UserInputAnchor(StrictModel):
     input_kind: Literal[
         "controlled_identity",
         "hard_constraint",
+        "intent_requirement",
         "preference",
         "fixed_transport",
         "planning_authorization",
     ]
     constraint_id: Optional[str] = None
+    intent_id: Optional[str] = None
     public_summary: Optional[str] = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
@@ -199,8 +201,14 @@ class UserInputAnchor(StrictModel):
             raise ValueError("hard-constraint user input requires a public summary")
         if self.input_kind != "hard_constraint" and self.constraint_id is not None:
             raise ValueError("only hard-constraint input may name a constraint id")
-        if self.input_kind != "hard_constraint" and self.public_summary is not None:
-            raise ValueError("only hard-constraint input may define a public summary")
+        if self.input_kind == "intent_requirement" and not self.intent_id:
+            raise ValueError("intent-requirement input requires an intent id")
+        if self.input_kind != "intent_requirement" and self.intent_id is not None:
+            raise ValueError("only intent-requirement input may name an intent id")
+        if self.input_kind not in {"hard_constraint", "intent_requirement"} and self.public_summary is not None:
+            raise ValueError("only contract inputs may define a public summary")
+        if self.input_kind == "intent_requirement" and not self.public_summary:
+            raise ValueError("intent-requirement input requires a public summary")
         return self
 
 
@@ -313,12 +321,16 @@ class MinimumDeliveryDraft(StrictModel):
 
     draft_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
+    planning_generation_id: str = Field(min_length=1)
     controlled_trip_identity_revision: int = Field(ge=0)
+    intent_spec_revision: int = Field(ge=1)
+    intent_spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     constraint_pack_revision: int = Field(ge=0)
     plan_revision: int = Field(ge=0)
     policy_version: str = Field(min_length=1)
     day_shells: List[MinimumDeliveryDayShell] = Field(min_length=1)
     preserved_constraint_ids: List[str] = Field(default_factory=list)
+    preserved_hard_intent_ids: List[str] = Field(default_factory=list)
     user_input_anchors: List[UserInputAnchor] = Field(default_factory=list)
     planning_authorized: bool = False
     planning_authorized_at: Optional[datetime] = None
@@ -1673,6 +1685,7 @@ class ResearchPacket(StrictModel):
     contract_version: Literal[RESEARCH_PACKET_CONTRACT_VERSION] = RESEARCH_PACKET_CONTRACT_VERSION
     research_packet_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
+    generation_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
     worker_kind: Literal[
         "destination_researcher",
@@ -1919,6 +1932,7 @@ class RecommendationCatalog(StrictModel):
     contract_version: Literal[RECOMMENDATION_CATALOG_CONTRACT_VERSION] = (
         RECOMMENDATION_CATALOG_CONTRACT_VERSION
     )
+    generation_id: str = Field(min_length=1)
     fact_data_revision: int = Field(ge=0)
     weather_data_revision: int = Field(ge=0)
     research_packets: List[ResearchPacket] = Field(default_factory=list)
@@ -1935,6 +1949,8 @@ class RecommendationCatalog(StrictModel):
             raise ValueError("candidate identity cannot be duplicated across research packets")
         if any(packet.fact_data_revision != self.fact_data_revision for packet in self.research_packets):
             raise ValueError("research packet fact revision does not match recommendation catalog")
+        if any(packet.generation_id != self.generation_id for packet in self.research_packets):
+            raise ValueError("research packet generation does not match recommendation catalog")
         keys: set[tuple[str, Optional[str]]] = set()
         candidate_index = {candidate.candidate_id: candidate for candidate in candidates}
         for admission in self.admission_results:
@@ -2261,6 +2277,7 @@ class WeatherProposalDecision(StrictModel):
 class TripWorkspaceV2(StrictModel):
     contract_version: Literal[TRIP_WORKSPACE_CONTRACT_VERSION] = TRIP_WORKSPACE_CONTRACT_VERSION
     run_id: str = Field(min_length=1)
+    generation_id: str = Field(min_length=1)
     workspace_revision: int = Field(ge=0)
     itinerary: StructuredItineraryV2
     recommendation_catalog: RecommendationCatalog
@@ -2272,6 +2289,8 @@ class TripWorkspaceV2(StrictModel):
     @model_validator(mode="after")
     def validate_candidate_lineage(self) -> "TripWorkspaceV2":
         catalog = self.recommendation_catalog
+        if catalog.generation_id != self.generation_id:
+            raise ValueError("workspace and recommendation catalog generations differ")
         candidates = catalog.candidate_index()
         admissions = catalog.admission_index()
         anchor_ids = [item.anchor_id for item in self.user_input_anchors]
@@ -2621,6 +2640,7 @@ class SourceIndexProjection(StrictModel):
 class DeliveryRevisionManifest(StrictModel):
     contract_version: Literal[DELIVERY_BUNDLE_CONTRACT_VERSION] = DELIVERY_BUNDLE_CONTRACT_VERSION
     run_id: str = Field(min_length=1)
+    generation_id: str = Field(min_length=1)
     bundle_id: str = Field(min_length=1)
     workspace_revision: int = Field(ge=0)
     fact_data_revision: int = Field(ge=0)
@@ -2725,6 +2745,8 @@ class DeliveryBundle(StrictModel):
             raise ValueError("bundle snapshots do not match manifest revisions")
         if self.workspace.run_id != self.manifest.run_id:
             raise ValueError("workspace run id does not match manifest")
+        if self.workspace.generation_id != self.manifest.generation_id:
+            raise ValueError("workspace generation does not match manifest")
         expected_contract_versions = {
             "workspace": self.workspace.contract_version,
             "facts": self.fact_snapshot.contract_version,

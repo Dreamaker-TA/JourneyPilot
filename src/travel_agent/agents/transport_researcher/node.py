@@ -59,6 +59,7 @@ from ...entities.provider_evidence import (
     parse_provider_evidence_assignments,
 )
 from ...services.constraint_applicability import active_hard_constraints, active_hard_constraint_ids
+from ...services.state_invalidation import generation_packet_key
 from ..research_packet_prompt import build_research_packet_system_prompt
 from ..worker_errors import format_worker_last_error
 from ...entities.place_identity import stable_place_id_12306
@@ -75,7 +76,7 @@ from ...tools.temporal import (
     TemporalPreflightStatus,
     evaluate_temporal_request,
 )
-from ...utils.brief_helpers import build_brief_context_for_agent
+from ...utils.brief_helpers import build_assignment_context
 from .prompts import TASK_TEMPLATE
 
 if TYPE_CHECKING:
@@ -1876,34 +1877,27 @@ async def transport_researcher_node(
     user_query = state.user_query or ""
     run_id = state.run_id
 
-    # ── 解析 research_brief ────────────────────────────────────────────────
-    research_brief_context = build_brief_context_for_agent("transport_researcher", state.research_brief)
-
     upstream_packet_context = format_research_packet_context(state.research_packets)
 
     # ── 任务分配（支持精炼轮次 round suffix）─────────────────────────────
     output_key, assignment = resolve_agent_assignment(
         state.agent_assignments or {}, _NODE_NAME, state.refinement_count
     )
-    if isinstance(assignment, dict):
-        task_desc = assignment.get("task", user_query)
-        recommended_tools = assignment.get("recommended_tools", [])
-        excluded_tools = assignment.get("excluded_tools", [])
-        required_transport_classes = assignment.get("required_transport_classes")
-        connector_gaps = assignment.get("connector_gaps")
-        excluded_candidate_ids = assignment.get("excluded_candidate_ids")
-        require_current_candidate = bool(assignment.get("require_current_candidate"))
-    else:
-        task_desc = str(assignment) if assignment else user_query
-        recommended_tools = []
-        excluded_tools = []
-        required_transport_classes = None
-        connector_gaps = None
-        excluded_candidate_ids = None
-        require_current_candidate = False
-        output_key = _NODE_NAME
+    research_brief_context = build_assignment_context(
+        assignment=assignment,
+        brief=state.research_brief,
+        intent_spec=state.intent_spec,
+        constraint_pack=state.constraint_pack,
+    )
+    task_desc = assignment["objective"]
+    recommended_tools = assignment.get("recommended_tools", [])
+    excluded_tools = assignment.get("excluded_tools", [])
+    required_transport_classes = assignment.get("required_transport_classes")
+    connector_gaps = assignment.get("connector_gaps")
+    excluded_candidate_ids = assignment.get("excluded_candidate_ids")
+    require_current_candidate = bool(assignment.get("require_current_candidate"))
     provider_assignments = parse_provider_evidence_assignments(
-        assignment if isinstance(assignment, dict) else {},
+        assignment,
         expected_worker=_NODE_NAME,
         expected_run_id=run_id,
         expected_constraint_pack_revision=state.constraint_pack_revision,
@@ -2014,14 +2008,19 @@ async def transport_researcher_node(
     tool_schemas = [t["schema"] for t in available_tools if "schema" in t]
     tool_cache = dict(state.tool_cache) if state.tool_cache else {}
     tool_context = build_tool_context_from_state(state)
+    if state.planning_generation is None:
+        raise ValueError("transport research requires a planning generation")
+    generation_id = state.planning_generation.generation_id
+    packet_state_key = generation_packet_key(output_key, generation_id)
     authoritative_packet_metadata = build_authoritative_research_packet_metadata(
         worker_kind=_NODE_NAME,
         run_id=run_id,
+        generation_id=generation_id,
         task_id=output_key,
         constraint_pack_revision=state.constraint_pack_revision,
         fact_data_revision=state.fact_data_revision,
         query_context={
-            "task": task_desc,
+            "objective": task_desc,
             "controlled_trip_identity": state.controlled_trip_identity or {},
             "connector_gaps": connector_gaps or [],
             "required_route_legs": [
@@ -2123,7 +2122,7 @@ async def transport_researcher_node(
 
         return {
             "messages": [AIMessage(content=f"已核验 {len(packet.candidates)} 个交通候选")],
-            "research_packets": {output_key: packet},
+            "research_packets": {packet_state_key: packet},
             "agent_status": {output_key: "completed"},
             "tool_cache": tool_cache,
             "provider_evidence_outcomes": provider_evidence_outcomes(
@@ -2175,7 +2174,7 @@ async def transport_researcher_node(
             "agent_status": {output_key: "failed"},
         }
         if failure_packet is not None:
-            result["research_packets"] = {output_key: failure_packet}
+            result["research_packets"] = {packet_state_key: failure_packet}
         result["provider_evidence_outcomes"] = outcomes
         # A reference service was observed before this round failed, and the
         # failure does not unobserve it: the disclosure is exactly what a failed

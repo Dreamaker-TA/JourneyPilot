@@ -612,6 +612,7 @@ def _public_workspace(
     return {
         "contract_version": workspace.contract_version,
         "run_id": workspace.run_id,
+        "generation_id": workspace.generation_id,
         "workspace_revision": workspace.workspace_revision,
         "itinerary": _public_itinerary(workspace.itinerary, view),
         "selection_slots": [
@@ -632,6 +633,7 @@ def _public_workspace(
 _PUBLIC_MANIFEST_KEYS = (
     "contract_version",
     "run_id",
+    "generation_id",
     "bundle_id",
     "workspace_revision",
     "fact_data_revision",
@@ -645,6 +647,7 @@ def public_manifest(bundle: DeliveryBundle) -> Dict[str, Any]:
     return {
         "contract_version": manifest.contract_version,
         "run_id": manifest.run_id,
+        "generation_id": manifest.generation_id,
         "bundle_id": manifest.bundle_id,
         "workspace_revision": manifest.workspace_revision,
         "fact_data_revision": manifest.fact_data_revision,

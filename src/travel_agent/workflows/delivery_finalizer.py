@@ -266,6 +266,7 @@ def assemble_delivery_bundle(state: TravelAgentState) -> DeliveryBundle:
     bundle = DeliveryBundle(
         manifest=DeliveryRevisionManifest(
             run_id=workspace.run_id,
+            generation_id=workspace.generation_id,
             bundle_id=bundle_id,
             workspace_revision=workspace.workspace_revision,
             fact_data_revision=facts.fact_data_revision,

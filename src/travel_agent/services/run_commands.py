@@ -96,6 +96,7 @@ class RunCommandCoordinator:
         self._poll_seconds = max(0.2, poll_seconds)
         self._poller = PeriodicTask(f"run_commands:{run_id}", self._poll_loop)
         handle.supplement_applied_sink = self._on_supplements_applied
+        handle.supplement_rejected_sink = self._on_supplements_rejected
 
     async def poll_once(self) -> List[RunCommand]:
         """取走这一轮的待处理命令并投递到 handle。返回被 claim 的命令。"""
@@ -128,6 +129,7 @@ class RunCommandCoordinator:
 
     async def stop(self) -> None:
         self._handle.supplement_applied_sink = None
+        self._handle.supplement_rejected_sink = None
         await self._poller.stop()
         await self._release_unapplied_claims()
 
@@ -166,11 +168,19 @@ class RunCommandCoordinator:
             cancel_consumed=status == TripRunStatus.CANCELLED.value,
         )
 
-    async def _on_supplements_applied(self, command_ids: List[str], node: str) -> None:
+    async def _on_supplements_applied(
+        self,
+        command_ids: List[str],
+        node: str,
+        result: Dict[str, Any],
+    ) -> None:
         await self._store.settle(
             command_ids,
             status=RunCommandStatus.CONSUMED,
-            result={"applied_at_node": node},
+            result={
+                **result,
+                "applied_at_node": node,
+            },
         )
         for command_id in command_ids:
             try:
@@ -183,6 +193,43 @@ class RunCommandCoordinator:
             except Exception as exc:
                 logger.warning(
                     "追加要求生效事件写入失败 run_id=%s command_id=%s error=%s",
+                    self._run_id,
+                    command_id,
+                    exc,
+                )
+
+    async def _on_supplements_rejected(
+        self,
+        command_ids: List[str],
+        node: str,
+        result: Dict[str, Any],
+    ) -> None:
+        reason_code = str(result.get("reason_code") or "supplement_rejected")
+        await self._store.settle(
+            command_ids,
+            status=RunCommandStatus.REJECTED,
+            error_code=reason_code,
+            result={
+                **result,
+                "rejected_at_node": node,
+            },
+        )
+        for command_id in command_ids:
+            try:
+                await self._trip_run_store.append_event_once(
+                    self._run_id,
+                    "run.supplement_rejected",
+                    {
+                        "command_id": command_id,
+                        "node": node,
+                        "reason_code": reason_code,
+                        "requires_new_run": bool(result.get("requires_new_run")),
+                    },
+                    idempotency_key=f"{self._run_id}:supplement_rejected:{command_id}",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "追加要求拒绝事件写入失败 run_id=%s command_id=%s error=%s",
                     self._run_id,
                     command_id,
                     exc,

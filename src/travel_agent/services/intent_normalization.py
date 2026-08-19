@@ -1,0 +1,473 @@
+"""Normalize request clauses into strict intent and constraint drafts."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Literal, Optional
+
+from pydantic import Field, ValidationError, model_validator
+
+from ..entities.delivery_bundle import StrictModel
+from ..entities.intent_spec import (
+    AlternativeIntentValue,
+    CadenceIntentValue,
+    CategoryIntentValue,
+    CountIntentValue,
+    IntentImpactStage,
+    IntentKind,
+    IntentStrength,
+    IntentTarget,
+    IntentValue,
+    OutputRequirementValue,
+    ScalarIntentValue,
+    VerificationMode,
+)
+from ..entities.request_contract import ClauseDisposition
+from ..models.strict_json_schema import as_strict_schema
+from ..utils.json_helpers import safe_parse_json
+
+
+INTENT_NORMALIZATION_PROMPT_VERSION = "request_contract_normalization.v1"
+
+
+class ConstraintParamsDraft(StrictModel):
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    per: Optional[Literal["night", "day", "total"]] = None
+    allergens: List[str] = Field(default_factory=list)
+    avoid_overnight: Optional[bool] = None
+    earliest_departure_local: Optional[str] = None
+    latest_arrival_local: Optional[str] = None
+    preferred_local_modes: List[str] = Field(default_factory=list)
+    excluded_local_modes: List[str] = Field(default_factory=list)
+    locked_local_mode: Optional[str] = None
+    required_facilities: List[str] = Field(default_factory=list)
+    max_continuous_walk_minutes: Optional[int] = Field(default=None, ge=1)
+    avoid_long_stairs: Optional[bool] = None
+    prefer: List[str] = Field(default_factory=list)
+    unknown_facility_policy: Optional[Literal["needs_confirmation"]] = None
+
+    def compact(self) -> Dict[str, object]:
+        return self.model_dump(exclude_none=True, exclude_defaults=True)
+
+
+class NormalizedConstraintDraft(StrictModel):
+    category: Literal[
+        "food_allergy",
+        "budget_cap",
+        "elderly_mobility",
+        "child_friendly",
+        "transport_constraint",
+        "accommodation_preference",
+        "pace_preference",
+        "destination_preference",
+        "dietary_restriction",
+        "health_condition",
+        "other",
+    ]
+    value: str = Field(min_length=1, max_length=300)
+    params: ConstraintParamsDraft = Field(default_factory=ConstraintParamsDraft)
+
+
+class IntentDraft(StrictModel):
+    kind: IntentKind
+    target: IntentTarget
+    strength: IntentStrength
+    priority: int = Field(ge=0, le=100)
+    value: IntentValue
+    verification_mode: VerificationMode
+    impact_stages: List[IntentImpactStage] = Field(min_length=1)
+    public_summary: str = Field(min_length=1, max_length=300)
+
+
+class NormalizedClauseDraft(StrictModel):
+    clause_id: str = Field(min_length=1)
+    disposition: ClauseDisposition
+    reason_code: Optional[str] = None
+    intents: List[IntentDraft] = Field(default_factory=list)
+    constraints: List[NormalizedConstraintDraft] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_mapping(self) -> "NormalizedClauseDraft":
+        if self.disposition is ClauseDisposition.MAPPED_TO_INTENT and not self.intents:
+            raise ValueError("mapped clause requires an intent draft")
+        if self.disposition is not ClauseDisposition.MAPPED_TO_INTENT and self.intents:
+            raise ValueError("only mapped clauses may contain intent drafts")
+        if self.disposition in {
+            ClauseDisposition.UNSUPPORTED,
+            ClauseDisposition.UNRESOLVED,
+        } and not self.reason_code:
+            raise ValueError("unsupported or unresolved clause requires a reason code")
+        return self
+
+
+class RequestContractNormalizationResult(StrictModel):
+    clauses: List[NormalizedClauseDraft] = Field(min_length=1)
+
+
+@dataclass(frozen=True)
+class SourceClause:
+    clause_id: str
+    source_ref_id: str
+    source_kind: str
+    source_text: str
+    span_start: int
+    span_end: int
+
+
+_BOUNDARY = re.compile(r"[^，,。；;！？!?\n]+")
+_MATERIAL_CUES = (
+    "要",
+    "不要",
+    "不能",
+    "必须",
+    "安排",
+    "规划",
+    "每天",
+    "每个",
+    "最多",
+    "至少",
+    "重点",
+    "解释",
+    "方案",
+    "avoid",
+    "must",
+    "every",
+    "at most",
+    "at least",
+)
+
+
+def split_source_clauses(
+    sources: Iterable[tuple[str, str, str]],
+) -> List[SourceClause]:
+    clauses: List[SourceClause] = []
+    for source_ref_id, source_kind, text in sources:
+        for match in _BOUNDARY.finditer(text or ""):
+            raw = match.group(0)
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            leading = len(raw) - len(raw.lstrip())
+            start = match.start() + leading
+            end = start + len(stripped)
+            digest = _short_hash(source_ref_id, str(start), str(end), stripped)
+            clauses.append(
+                SourceClause(
+                    clause_id=f"clause_{digest}",
+                    source_ref_id=source_ref_id,
+                    source_kind=source_kind,
+                    source_text=stripped,
+                    span_start=start,
+                    span_end=end,
+                )
+            )
+    return clauses
+
+
+def is_material_clause(text: str) -> bool:
+    lowered = text.lower()
+    return any(cue in lowered for cue in _MATERIAL_CUES)
+
+
+def _short_hash(*parts: str) -> str:
+    from hashlib import sha256
+
+    return sha256("\0".join(parts).encode("utf-8")).hexdigest()[:24]
+
+
+def _normalization_prompt(
+    clauses: List[SourceClause], controlled_identity: Dict[str, object]
+) -> List[Dict[str, str]]:
+    payload = [
+        {
+            "clause_id": item.clause_id,
+            "source_kind": item.source_kind,
+            "text": item.source_text,
+        }
+        for item in clauses
+    ]
+    system = (
+        "你是 JourneyPilot 请求合同规范化器。逐条处理输入 clause，不得遗漏、合并或新增 clause。"
+        "仅把本次任务要求写成 Intent；目的地、日期、出发地等已经存在于 controlled identity 的事实标记为 controlled_identity。"
+        "旅行安全、预算、交通、住宿和行动能力要求同时写入 constraints；数量、频率、主题、排除、"
+        "顺序、输出字段和多方案要求属于 Intent。冲突和无法可靠理解的指令标记 unresolved，不得猜测。"
+        "source_kind 只用于确定优先级，不得改写。只输出符合 JSON Schema 的对象。"
+    )
+    user = json.dumps(
+        {"controlled_identity": controlled_identity, "clauses": payload},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+async def normalize_clauses(
+    *,
+    clauses: List[SourceClause],
+    controlled_identity: Dict[str, object],
+    llm: object,
+) -> RequestContractNormalizationResult:
+    if not clauses:
+        raise ValueError("request normalization requires at least one clause")
+    schema = as_strict_schema(RequestContractNormalizationResult.model_json_schema())
+    try:
+        raw = await llm.ainvoke(
+            _normalization_prompt(clauses, controlled_identity),
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "request_contract_normalization",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+            temperature=0,
+        )
+        parsed = safe_parse_json(raw, strip_think_tags=True)
+        result = RequestContractNormalizationResult.model_validate(parsed)
+        _validate_clause_coverage(result, clauses)
+        return _enforce_material_dispositions(result, clauses)
+    except (ValidationError, TypeError, ValueError, RuntimeError):
+        return RequestContractNormalizationResult(
+            clauses=[_fallback_clause(item, controlled_identity) for item in clauses]
+        )
+
+
+def _validate_clause_coverage(
+    result: RequestContractNormalizationResult, clauses: List[SourceClause]
+) -> None:
+    expected = [item.clause_id for item in clauses]
+    actual = [item.clause_id for item in result.clauses]
+    if actual != expected:
+        raise ValueError("normalizer must return every clause once and in source order")
+
+
+def _enforce_material_dispositions(
+    result: RequestContractNormalizationResult,
+    clauses: List[SourceClause],
+) -> RequestContractNormalizationResult:
+    normalized: List[NormalizedClauseDraft] = []
+    for source, draft in zip(clauses, result.clauses):
+        if is_material_clause(source.source_text) and draft.disposition in {
+            ClauseDisposition.BACKGROUND_CONTEXT,
+            ClauseDisposition.NON_ACTIONABLE,
+        }:
+            normalized.append(
+                NormalizedClauseDraft(
+                    clause_id=draft.clause_id,
+                    disposition=ClauseDisposition.UNRESOLVED,
+                    reason_code="material_clause_not_mapped",
+                )
+            )
+        else:
+            normalized.append(draft)
+    return RequestContractNormalizationResult(clauses=normalized)
+
+
+def _fallback_clause(
+    clause: SourceClause, controlled_identity: Dict[str, object]
+) -> NormalizedClauseDraft:
+    text = clause.source_text
+    lowered = text.lower()
+    identity_tokens = _identity_tokens(controlled_identity)
+    mentions_identity = any(token and token in text for token in identity_tokens)
+
+    intents: List[IntentDraft] = []
+    if match := re.search(r"(?:每天|每日).{0,10}(?:最多|不超过)\s*(\d+)\s*(?:个|处|家)", text):
+        intents.append(
+            _intent(
+                IntentKind.QUANTITY,
+                IntentTarget.ITINERARY,
+                IntentStrength.HARD,
+                CountIntentValue(operator="at_most", count=int(match.group(1)), unit="day"),
+                "每天主要安排数量受上限约束",
+                ["composition"],
+                VerificationMode.DETERMINISTIC,
+            )
+        )
+    elif match := re.search(r"(?:每天|每日).{0,10}(?:至少)\s*(\d+)\s*(?:个|处|家)", text):
+        intents.append(
+            _intent(
+                IntentKind.QUANTITY,
+                IntentTarget.ITINERARY,
+                IntentStrength.HARD,
+                CountIntentValue(operator="at_least", count=int(match.group(1)), unit="day"),
+                "每天主要安排数量有最低要求",
+                ["research", "composition"],
+                VerificationMode.DETERMINISTIC,
+            )
+        )
+    if "每天" in text or "每日" in text:
+        intents.append(
+            _intent(
+                IntentKind.CADENCE,
+                _target_for_text(text),
+                IntentStrength.HARD,
+                CadenceIntentValue(
+                    frequency="once_per_day",
+                    time_window=_time_window(text),
+                    required_attributes=_attributes(text),
+                ),
+                text,
+                ["research", "composition"],
+                VerificationMode.MIXED,
+            )
+        )
+    if any(token in lowered for token in ("不要", "不去", "避开", "禁止", "avoid", "no ")):
+        intents.append(
+            _intent(
+                IntentKind.MUST_EXCLUDE,
+                _target_for_text(text),
+                IntentStrength.HARD,
+                CategoryIntentValue(categories=[text]),
+                text,
+                ["research", "admission", "composition"],
+                VerificationMode.MIXED,
+            )
+        )
+    if any(token in text for token in ("重点", "主题", "摄影", "建筑", "文化")):
+        intents.append(
+            _intent(
+                IntentKind.THEME,
+                IntentTarget.VISIT,
+                IntentStrength.SOFT,
+                CategoryIntentValue(categories=[text]),
+                text,
+                ["research", "ranking", "composition"],
+                VerificationMode.SEMANTIC,
+            )
+        )
+    if any(token in text for token in ("解释", "说明", "列出", "标注")):
+        intents.append(
+            _intent(
+                IntentKind.OUTPUT_REQUIREMENT,
+                IntentTarget.DELIVERY,
+                IntentStrength.HARD,
+                OutputRequirementValue(required_field=text, applies_to="each_item"),
+                text,
+                ["projection"],
+                VerificationMode.MIXED,
+            )
+        )
+    if match := re.search(r"([二两三四五六七八九十\d]+)\s*套.{0,12}方案", text):
+        count = _chinese_number(match.group(1))
+        if count >= 2:
+            intents.append(
+                _intent(
+                    IntentKind.ALTERNATIVES,
+                    IntentTarget.DELIVERY,
+                    IntentStrength.HARD,
+                    AlternativeIntentValue(count=count),
+                    text,
+                    ["composition", "projection"],
+                    VerificationMode.DETERMINISTIC,
+                )
+            )
+    if not intents and any(token in text for token in ("规划", "行程", "安排")):
+        intents.append(
+            _intent(
+                IntentKind.OBJECTIVE,
+                IntentTarget.TRIP,
+                IntentStrength.HARD,
+                ScalarIntentValue(value=text),
+                text,
+                ["research", "composition", "projection"],
+                VerificationMode.MIXED,
+            )
+        )
+    if intents:
+        return NormalizedClauseDraft(
+            clause_id=clause.clause_id,
+            disposition=ClauseDisposition.MAPPED_TO_INTENT,
+            intents=_dedupe_drafts(intents),
+            constraints=[],
+        )
+    if mentions_identity:
+        return NormalizedClauseDraft(
+            clause_id=clause.clause_id,
+            disposition=ClauseDisposition.CONTROLLED_IDENTITY,
+        )
+    if is_material_clause(text):
+        return NormalizedClauseDraft(
+            clause_id=clause.clause_id,
+            disposition=ClauseDisposition.UNRESOLVED,
+            reason_code="normalization_failed",
+        )
+    return NormalizedClauseDraft(
+        clause_id=clause.clause_id,
+        disposition=ClauseDisposition.BACKGROUND_CONTEXT,
+    )
+
+
+def _intent(
+    kind: IntentKind,
+    target: IntentTarget,
+    strength: IntentStrength,
+    value: IntentValue,
+    summary: str,
+    impact_stages: List[IntentImpactStage],
+    verification: VerificationMode,
+) -> IntentDraft:
+    return IntentDraft(
+        kind=kind,
+        target=target,
+        strength=strength,
+        priority=90 if strength is IntentStrength.HARD else 60,
+        value=value,
+        verification_mode=verification,
+        impact_stages=impact_stages,
+        public_summary=summary[:300],
+    )
+
+
+def _identity_tokens(identity: Dict[str, object]) -> List[str]:
+    tokens: List[str] = []
+    origin = identity.get("origin")
+    if isinstance(origin, dict):
+        tokens.extend(str(origin.get(key) or "") for key in ("name", "display_name"))
+    for destination in identity.get("destinations") or []:
+        if isinstance(destination, dict):
+            tokens.extend(
+                str(destination.get(key) or "") for key in ("name", "display_name")
+            )
+    tokens.extend(str(identity.get(key) or "") for key in ("start_date", "end_date"))
+    return [token for token in tokens if token]
+
+
+def _target_for_text(text: str) -> IntentTarget:
+    if any(token in text for token in ("咖啡", "餐", "美食", "早餐", "午餐", "晚餐")):
+        return IntentTarget.DINING
+    if any(token in text for token in ("酒店", "住宿", "房间", "民宿")):
+        return IntentTarget.LODGING
+    if any(token in text for token in ("交通", "地铁", "公交", "步行", "打车")):
+        return IntentTarget.LOCAL_TRANSPORT
+    return IntentTarget.VISIT
+
+
+def _time_window(text: str) -> Optional[str]:
+    for value in ("上午", "中午", "下午", "傍晚", "晚上", "morning", "afternoon", "evening"):
+        if value in text.lower():
+            return value
+    return None
+
+
+def _attributes(text: str) -> List[str]:
+    return [value for value in ("安静", "无障碍", "亲子", "本地", "室内") if value in text]
+
+
+def _chinese_number(value: str) -> int:
+    if value.isdigit():
+        return int(value)
+    return {"二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}.get(value, 0)
+
+
+def _dedupe_drafts(items: List[IntentDraft]) -> List[IntentDraft]:
+    unique: Dict[str, IntentDraft] = {}
+    for item in items:
+        key = json.dumps(item.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        unique.setdefault(key, item)
+    return list(unique.values())

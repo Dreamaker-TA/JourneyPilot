@@ -19,6 +19,10 @@ from travel_agent.entities.trip_run import (
     run_command_digest,
 )
 from travel_agent.entities.state import TravelAgentState
+from travel_agent.entities.request_contract import (
+    AmendmentImpact,
+    IntentAmendmentRejection,
+)
 from travel_agent.services.run_commands import (
     PAST_SUPPLEMENT_STAGE,
     RUN_ENDED_BEFORE_CONSUMPTION,
@@ -194,7 +198,7 @@ async def test_durable_cancel_reaches_the_boundary_without_any_notification(
         )
 
 
-async def test_supplement_lands_in_state_and_is_consumed_once(wired, run_id) -> None:
+async def test_supplement_is_consumed_only_after_contract_normalization(wired, run_id) -> None:
     handle, store, runs, coordinator = wired
     command, _ = await store.enqueue(
         run_id,
@@ -204,21 +208,31 @@ async def test_supplement_lands_in_state_and_is_consumed_once(wired, run_id) -> 
     await coordinator.poll_once()
 
     async def node(state: TravelAgentState) -> Dict[str, Any]:
-        # 节点读到的就是这条要求 —— 而它必须**同时**随更新落盘，后续节点才看得见。
-        assert [item["content"] for item in state.supplemental_requirements] == [
+        assert [item.content for item in state.pending_intent_amendments] == [
             "想吃本地早餐"
         ]
-        return {"refinement_count": 1}
+        return {
+            "pending_intent_amendments": [],
+            "applied_intent_amendment_ids": [command.command_id],
+            "intent_spec_revision": 2,
+            "planning_generation": type(
+                "Generation", (), {"generation_id": "generation_2"}
+            )(),
+        }
 
-    update = await with_run_control("planner", node)(
+    update = await with_run_control("request_contract_normalizer", node)(
         TravelAgentState(run_id=run_id, user_message="x")
     )
 
-    assert update["supplemental_requirements"] == [
-        {"command_id": command.command_id, "category": "food", "content": "想吃本地早餐"}
-    ]
+    assert update["pending_intent_amendments"] == []
+    assert update["applied_intent_amendment_ids"] == [command.command_id]
     assert store.commands[command.command_id].status is RunCommandStatus.CONSUMED
-    assert store.commands[command.command_id].result == {"applied_at_node": "planner"}
+    assert store.commands[command.command_id].result == {
+        "outcome": "applied",
+        "applied_at_node": "request_contract_normalizer",
+        "intent_spec_revision": 2,
+        "generation_id": "generation_2",
+    }
     assert [event_type for _run, event_type, _payload in runs.events] == [
         "run.supplement_applied"
     ]
@@ -250,11 +264,57 @@ async def test_a_failed_node_keeps_the_supplement_for_the_next_boundary(
         command.command_id
     ]
 
-    update = await with_run_control("dispatcher", lambda state: {})(
+    update = await with_run_control(
+        "request_contract_normalizer",
+        lambda state: {
+            "pending_intent_amendments": [],
+            "applied_intent_amendment_ids": [command.command_id],
+        },
+    )(
         TravelAgentState(run_id=run_id, user_message="x")
     )
-    assert update["supplemental_requirements"][0]["content"] == "慢一点"
+    assert update["applied_intent_amendment_ids"] == [command.command_id]
     assert store.commands[command.command_id].status is RunCommandStatus.CONSUMED
+
+
+async def test_router_rejection_settles_the_durable_supplement(wired, run_id) -> None:
+    handle, store, runs, coordinator = wired
+    command, _ = await store.enqueue(
+        run_id,
+        RunCommandType.SUPPLEMENT,
+        {"category": "other", "content": "把目的地改成苏州"},
+    )
+    await coordinator.poll_once()
+
+    async def reject(state: TravelAgentState) -> Dict[str, Any]:
+        assert state.pending_intent_amendments[0].command_id == command.command_id
+        return {
+            "pending_intent_amendments": [],
+            "rejected_intent_amendments": [
+                IntentAmendmentRejection(
+                    command_id=command.command_id,
+                    impact=AmendmentImpact.IDENTITY_CHANGE,
+                    reason_code="identity_change_requires_new_run",
+                    requires_new_run=True,
+                )
+            ],
+            "intent_amendment_route": "dispatcher",
+        }
+
+    await with_run_control("intent_amendment_router", reject)(
+        TravelAgentState(run_id=run_id, user_message="x")
+    )
+
+    settled = store.commands[command.command_id]
+    assert settled.status is RunCommandStatus.REJECTED
+    assert settled.error_code == "identity_change_requires_new_run"
+    assert settled.result["outcome"] == "rejected"
+    assert settled.result["impact"] == "identity_change"
+    assert settled.result["requires_new_run"] is True
+    assert handle.pending_supplements() == []
+    assert [event_type for _run, event_type, _payload in runs.events] == [
+        "run.supplement_rejected"
+    ]
 
 
 async def test_a_replayed_supplement_does_not_enter_state_twice(wired, run_id) -> None:
@@ -271,11 +331,11 @@ async def test_a_replayed_supplement_does_not_enter_state_twice(wired, run_id) -
     # 标记 consumed 之后崩溃、重启再投递一次：state 里已经有这个 command_id。
     handle.add_supplement("other", "带孩子", command_id=command.command_id)
     replayed_state = state.model_copy(
-        update={"supplemental_requirements": first["supplemental_requirements"]}
+        update={"pending_intent_amendments": first["pending_intent_amendments"]}
     )
     second = await with_run_control("dispatcher", lambda s: {})(replayed_state)
 
-    assert "supplemental_requirements" not in second
+    assert "pending_intent_amendments" not in second
 
 
 async def test_supplement_after_delivery_is_rejected_not_left_pending(
@@ -339,25 +399,42 @@ def test_notification_is_only_a_wake_up(run_id) -> None:
         run_control_registry.clear()
 
 
-def test_parallel_workers_do_not_store_the_same_supplement_twice():
+def test_parallel_workers_do_not_store_the_same_amendment_twice():
     """并行 Send 扇出里三个 worker 拿到同一份入参 state，都会判定这条要求还没并入。
 
     纯 append 的 reducer 会把它存下三份，此后每个下游提示里那句「本次运行追加要求」
     就出现三遍。
     """
 
-    from travel_agent.entities.state import _merge_supplements
+    from travel_agent.entities.request_contract import IntentAmendment
+    from travel_agent.entities.state import _replace_amendments
 
-    supplement = {"command_id": "cmd-1", "category": "food", "content": "清真"}
-    merged = _merge_supplements([], [supplement, supplement, supplement])
+    amendment = IntentAmendment(
+        command_id="cmd-1",
+        category="food",
+        content="清真",
+        source_kind="run_supplement",
+    )
+    merged = _replace_amendments([], [amendment, amendment, amendment])
 
-    assert merged == [supplement]
+    assert merged == [amendment]
 
 
-def test_merging_supplements_keeps_order_and_distinct_commands():
-    from travel_agent.entities.state import _merge_supplements
+def test_replacing_amendments_keeps_order_and_distinct_commands():
+    from travel_agent.entities.request_contract import IntentAmendment
+    from travel_agent.entities.state import _replace_amendments
 
-    first = {"command_id": "cmd-1", "content": "a"}
-    second = {"command_id": "cmd-2", "content": "b"}
+    first = IntentAmendment(
+        command_id="cmd-1",
+        category="other",
+        content="a",
+        source_kind="run_supplement",
+    )
+    second = IntentAmendment(
+        command_id="cmd-2",
+        category="other",
+        content="b",
+        source_kind="run_supplement",
+    )
 
-    assert _merge_supplements([first], [second, first]) == [first, second]
+    assert _replace_amendments([first], [second, first]) == [second, first]

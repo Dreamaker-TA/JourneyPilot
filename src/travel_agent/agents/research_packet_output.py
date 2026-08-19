@@ -302,6 +302,7 @@ def build_authoritative_research_packet_metadata(
     *,
     worker_kind: ResearchWorkerKind,
     run_id: str,
+    generation_id: str,
     task_id: str,
     constraint_pack_revision: int,
     fact_data_revision: int,
@@ -310,11 +311,12 @@ def build_authoritative_research_packet_metadata(
 ) -> dict[str, Any]:
     """Create server-owned Packet lineage; models never author these fields."""
     digest = hashlib.sha256(
-        f"{run_id}\0{task_id}\0{worker_kind}".encode("utf-8")
+        f"{run_id}\0{generation_id}\0{task_id}\0{worker_kind}".encode("utf-8")
     ).hexdigest()[:20]
     return {
         "research_packet_id": f"packet_{worker_kind}_{digest}",
         "run_id": run_id,
+        "generation_id": generation_id,
         "task_id": task_id,
         "worker_kind": worker_kind,
         "constraint_pack_revision": constraint_pack_revision,

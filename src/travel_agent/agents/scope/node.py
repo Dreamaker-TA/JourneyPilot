@@ -1,22 +1,7 @@
-"""
-Scope 阶段节点 (Domain Layer)
-
-包含两个节点：
-1. clarifier_node: Scope 入口——装配记忆上下文、必要时压缩，并守住「受控旅行身份必须
-   存在」这条前提
-2. brief_generator_node: 从受控旅行身份确定性派生 Research Brief
-
-工作流路由：
-  START → clarifier_node → brief_generator_node
-  brief_generator_node → destination_geo_resolver → weather_context_builder → planner → ...
-
-两个节点都不再调模型。旅行事实（目的地、日期、同行、风格）由用户在界面上确认后作为
-受控身份进入，Scope 阶段只负责把它翻译成下游统一依据，不推断、不追问。
-"""
+"""Scope entry guard and session-compaction boundary."""
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -48,60 +33,6 @@ class ScopeIdentityError(RuntimeError):
         super().__init__(
             f"run {run_id or '<unknown>'} reached scope without a controlled trip identity"
         )
-
-
-_RESEARCH_BRIEF_FIELDS = {
-    "objective",
-    "destination",
-    "duration_days",
-    "budget",
-    "travel_style",
-    "travel_party",
-    "departure_city",
-    "departure_city_status",
-    "departure_time",
-    "constraints",
-    "dimensions_to_cover",
-}
-_RESEARCH_DIMENSIONS = {
-    "目的地概览",
-    "景点推荐",
-    "美食推荐",
-    "交通建议",
-    "住宿建议",
-    "签证信息",
-    "文化礼仪",
-    "实时天气",
-    "行程规划",
-    "预算估算",
-}
-
-
-def _validate_research_brief_payload(value: Any) -> Dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("research brief must be an object")
-    missing = sorted(_RESEARCH_BRIEF_FIELDS - value.keys())
-    if missing:
-        raise ValueError(f"research brief missing fields: {', '.join(missing)}")
-    if not str(value.get("objective") or "").strip():
-        raise ValueError("research brief requires objective")
-    if not str(value.get("destination") or "").strip():
-        raise ValueError("research brief requires destination")
-    duration = value.get("duration_days")
-    if duration is not None and (type(duration) is not int or duration <= 0):
-        raise ValueError("research brief duration_days must be a positive integer or null")
-    if value.get("departure_city_status") not in {"provided", "not_decided"}:
-        raise ValueError("research brief has invalid departure_city_status")
-    for field in ("budget", "travel_style", "travel_party", "departure_city", "departure_time"):
-        if value.get(field) is not None and not isinstance(value.get(field), str):
-            raise ValueError(f"research brief {field} must be a string or null")
-    for field in ("constraints", "dimensions_to_cover"):
-        items = value.get(field)
-        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
-            raise ValueError(f"research brief {field} must be a string list")
-    if any(item not in _RESEARCH_DIMENSIONS for item in value["dimensions_to_cover"]):
-        raise ValueError("research brief has unsupported dimensions_to_cover")
-    return value
 
 
 async def _measure_session_size(
@@ -154,8 +85,8 @@ async def _check_and_handle_compaction_deep(
     Deep 模式入口：检测是否需要压缩上下文，返回需要更新到 state 的压缩字段。
 
     上下文透镜的 ``context_report`` **不在这里发**：这个节点跑在
-    ``constraint_normalizer`` 之前，此刻还没有 pack，也就无从知道本轮到底有哪几条
-    信息会进 prompt。它现在由 ``constraint_normalizer_node`` 发（见那里）。
+    Request Contract 归一化之前，此刻还没有 pack，也就无从知道本轮到底有哪几条
+    信息会进 prompt。该报告由后续的归一化节点发送。
     """
     # 压缩判断只看会话轴（历史消息 + anchor + 基础 system prompt），偏好与画像的
     # 开销落在 worker 的 prompt 上，不在这条轴上累积 —— 把它们算进阈值会让压缩在
@@ -190,7 +121,7 @@ async def _check_and_handle_compaction_deep(
                 "session_anchor": result.anchor.to_dict(),
                 "session_compressed": True,
                 # 上下文透镜要印「较早的对话已整理」，而发那份报告的是下游的
-                # constraint_normalizer（只有它手里才有 pack）。这个布尔是那句话
+                # request_contract_normalizer（只有它手里才有 pack）。这个布尔是那句话
                 # 唯一的传递方式：一个写入点（这里）、一个读取点（那里）。
                 "session_compacted_this_turn": True,
             }
@@ -233,56 +164,5 @@ async def clarifier_node(state: TravelAgentState, config: Optional[RunnableConfi
         logger.error("Clarifier: run %s 缺少受控旅行身份，拒绝继续", state.run_id or "<unknown>")
         raise ScopeIdentityError(state.run_id or "")
 
-    logger.info("Clarifier: 受控旅行身份已确认，进入 brief_generator")
-    return {"next_agent": "brief_generator", **compaction_updates}
-
-
-async def brief_generator_node(state: TravelAgentState) -> Dict[str, Any]:
-    """
-    Scope 阶段 — 步骤 2：Research Brief 生成
-
-    从受控旅行身份确定性派生结构化 JSON 简报，作为后续所有 Agent 工作的统一依据
-    （"北极星"）。不调模型：身份里已经有目的地、日期、同行与风格，抽取无从抽取，
-    推断只会引入一个可以说谎的环节。
-
-    身份缺失由 `clarifier_node` 的 fail-closed 守卫在上游拦下，走不到这里。
-    """
-    identity = state.controlled_trip_identity
-    if not identity:
-        raise ScopeIdentityError(state.run_id or "")
-
-    destinations = identity.get("destinations") or []
-    names = [str(item.get("name") or item.get("display_name") or "") for item in destinations]
-    origin = identity.get("origin") or {}
-    party = identity.get("party") or {}
-    style = identity.get("style") or {}
-    start_date = str(identity.get("start_date") or "")
-    end_date = str(identity.get("end_date") or "")
-    try:
-        from datetime import date
-
-        duration_days = (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1
-    except ValueError:
-        duration_days = None
-    constraints = []
-    if party.get("elderly_companions"):
-        constraints.append("老人同行")
-    if party.get("accessibility_required"):
-        constraints.append("需要无障碍")
-    brief = {
-        "objective": f"为确认路线 {' → '.join(names)} 制定可执行旅行计划",
-        "destination": " → ".join(names),
-        "duration_days": duration_days,
-        "budget": None,
-        "travel_style": str(style.get("primary") or "未指定"),
-        "travel_party": f"{int(party.get('adults') or 1)} 位成人、{int(party.get('children') or 0)} 位儿童",
-        "departure_city": str(origin.get("name") or origin.get("display_name") or ""),
-        "departure_city_status": "provided",
-        "departure_time": f"{start_date} 至 {end_date}",
-        "constraints": constraints,
-        "dimensions_to_cover": ["目的地概览", "交通建议", "住宿建议", "行程规划", "预算估算"],
-        "controlled_trip_identity": identity,
-    }
-    _validate_research_brief_payload(brief)
-    logger.info("BriefGenerator: 由受控身份派生简报 - destination=%s", brief["destination"])
-    return {"research_brief": json.dumps(brief, ensure_ascii=False), "next_agent": None}
+    logger.info("Clarifier: 受控旅行身份已确认，进入请求合同归一化")
+    return {"next_agent": "request_contract_normalizer", **compaction_updates}

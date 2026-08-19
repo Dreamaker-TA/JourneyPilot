@@ -1,9 +1,9 @@
-export const DELIVERY_BUNDLE_CONTRACT_VERSION = 'journeypilot.delivery_bundle.v7' as const;
-export const TRIP_WORKSPACE_CONTRACT_VERSION = 'journeypilot.trip_workspace.v7' as const;
+export const DELIVERY_BUNDLE_CONTRACT_VERSION = 'journeypilot.delivery_bundle.v8' as const;
+export const TRIP_WORKSPACE_CONTRACT_VERSION = 'journeypilot.trip_workspace.v8' as const;
 export const FACT_SNAPSHOT_CONTRACT_VERSION = 'journeypilot.fact_store_snapshot.v4' as const;
 export const WEATHER_SNAPSHOT_CONTRACT_VERSION = 'journeypilot.weather_context_snapshot.v2' as const;
-export const RESEARCH_PACKET_CONTRACT_VERSION = 'journeypilot.research_packet.v4' as const;
-export const RECOMMENDATION_CATALOG_CONTRACT_VERSION = 'journeypilot.recommendation_catalog.v5' as const;
+export const RESEARCH_PACKET_CONTRACT_VERSION = 'journeypilot.research_packet.v5' as const;
+export const RECOMMENDATION_CATALOG_CONTRACT_VERSION = 'journeypilot.recommendation_catalog.v6' as const;
 
 export type EntityType =
   | 'visit_stop'
@@ -41,8 +41,10 @@ export interface UserInputAnchor {
   anchor_id: string;
   field_path: string;
   value: unknown;
-  input_kind: 'controlled_identity' | 'hard_constraint' | 'preference' | 'fixed_transport' | 'planning_authorization';
+  input_kind: 'controlled_identity' | 'hard_constraint' | 'intent_requirement' | 'preference' | 'fixed_transport' | 'planning_authorization';
   constraint_id: string | null;
+  intent_id: string | null;
+  public_summary: string | null;
 }
 
 export type TransportMode =
@@ -499,6 +501,7 @@ export interface ResearchPacket {
   contract_version: typeof RESEARCH_PACKET_CONTRACT_VERSION;
   research_packet_id: string;
   run_id: string;
+  generation_id: string;
   task_id: string;
   worker_kind: 'destination_researcher' | 'accommodation_researcher' | 'transport_researcher';
   constraint_pack_revision: number;
@@ -513,6 +516,7 @@ export interface ResearchPacket {
 
 export interface RecommendationCatalog {
   contract_version: typeof RECOMMENDATION_CATALOG_CONTRACT_VERSION;
+  generation_id: string;
   fact_data_revision: number;
   weather_data_revision: number;
   research_packets: ResearchPacket[];
@@ -536,6 +540,7 @@ export interface RecommendationCatalog {
 export interface TripWorkspaceV2 {
   contract_version: typeof TRIP_WORKSPACE_CONTRACT_VERSION;
   run_id: string;
+  generation_id: string;
   workspace_revision: number;
   itinerary: StructuredItineraryV2;
   recommendation_catalog: RecommendationCatalog;
@@ -748,6 +753,7 @@ export interface MapProjection {
 export interface DeliveryRevisionManifest {
   contract_version: typeof DELIVERY_BUNDLE_CONTRACT_VERSION;
   run_id: string;
+  generation_id: string;
   bundle_id: string;
   workspace_revision: number;
   fact_data_revision: number;
@@ -794,6 +800,7 @@ export interface PublicWeatherAdjustment {
 export interface PublicTripWorkspace {
   contract_version: typeof TRIP_WORKSPACE_CONTRACT_VERSION;
   run_id: string;
+  generation_id: string;
   workspace_revision: number;
   itinerary: PublicStructuredItineraryV2;
   selection_slots: SelectionSlot[];

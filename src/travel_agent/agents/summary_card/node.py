@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Iterable
 
 from ...entities.state import TravelAgentState
@@ -10,11 +9,22 @@ from ...entities.trip_summary_card import TripSummaryCard, TripSummaryFact
 
 
 def _brief_dict(state: TravelAgentState) -> Dict[str, Any]:
-    try:
-        parsed = json.loads(state.research_brief or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        parsed = {}
-    return parsed if isinstance(parsed, dict) else {}
+    brief = state.research_brief
+    if brief is None:
+        return {}
+    identity = brief.controlled_trip_identity
+    return {
+        "destination": " → ".join(
+            item.name or item.display_name for item in identity.destinations
+        ),
+        "duration_days": identity.duration_days,
+        "departure_city": identity.origin.name or identity.origin.display_name,
+        "departure_city_status": "provided",
+        "constraints": [
+            item.public_summary for item in (state.intent_spec.active_items if state.intent_spec else [])
+        ],
+        "travel_style": identity.style.primary,
+    }
 
 
 def _as_text(value: Any, limit: int) -> str:

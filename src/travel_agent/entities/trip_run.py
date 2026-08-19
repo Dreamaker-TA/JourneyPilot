@@ -734,6 +734,17 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         _as_int(draft.get("controlled_trip_identity_revision"))
         == _as_int(data.get("controlled_trip_identity_revision"))
     )
+    planning_generation = _as_mapping(data.get("planning_generation"))
+    intent_spec = _as_mapping(data.get("intent_spec"))
+    intent_generation_valid = bool(
+        planning_generation.get("generation_id")
+        and draft.get("planning_generation_id")
+        == planning_generation.get("generation_id")
+        and _as_int(draft.get("intent_spec_revision"))
+        == _as_int(data.get("intent_spec_revision"))
+        == _as_int(intent_spec.get("revision"))
+        and draft.get("intent_spec_hash") == intent_spec.get("content_hash")
+    )
     constraint_revision_valid = (
         isinstance(data.get("constraint_pack"), dict)
         and _as_int(draft.get("constraint_pack_revision"))
@@ -744,6 +755,7 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         and draft.get("draft_id")
         and draft.get("run_id")
         and str(draft.get("run_id")) == str(data.get("run_id") or draft.get("run_id"))
+        and intent_generation_valid
         and _as_int(draft.get("plan_revision"))
         == _as_int(data.get("plan_gate_revision_count"))
         and deadline.get("draft_id") == draft.get("draft_id")
@@ -821,6 +833,7 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         },
         "eligibility_contract": {
             "controlled_identity_valid": controlled_identity_valid,
+            "intent_generation_valid": intent_generation_valid,
             "constraint_revision_valid": constraint_revision_valid,
             "sealed_draft_valid": sealed_draft_valid,
             "formal_bundle_capable": formal_bundle_capable,

@@ -401,6 +401,7 @@ def _rebind_catalog_for_snapshot(
     candidate_ids = tuple(catalog.candidate_index())
     if not candidate_ids:
         refreshed_catalog = RecommendationCatalog(
+            generation_id=bundle.manifest.generation_id,
             fact_data_revision=facts.fact_data_revision,
             weather_data_revision=weather.weather_data_revision,
             research_packets=[
@@ -423,6 +424,7 @@ def _rebind_catalog_for_snapshot(
 
     staging_manifest = DeliveryRevisionManifest(
         run_id=bundle.manifest.run_id,
+        generation_id=bundle.manifest.generation_id,
         bundle_id=bundle.manifest.bundle_id,
         workspace_revision=bundle.manifest.workspace_revision,
         fact_data_revision=facts.fact_data_revision,
@@ -527,6 +529,7 @@ def _build_refreshed_bundle(
     staging_for_proposals = DeliveryBundle.model_construct(
         manifest=DeliveryRevisionManifest(
             run_id=bundle.manifest.run_id,
+            generation_id=bundle.manifest.generation_id,
             bundle_id=bundle.manifest.bundle_id,
             workspace_revision=workspace.workspace_revision,
             fact_data_revision=facts.fact_data_revision,
@@ -574,6 +577,7 @@ def _build_refreshed_bundle(
     refreshed = DeliveryBundle(
         manifest=DeliveryRevisionManifest(
             run_id=bundle.manifest.run_id,
+            generation_id=bundle.manifest.generation_id,
             bundle_id=bundle_id,
             workspace_revision=workspace.workspace_revision,
             fact_data_revision=facts.fact_data_revision,

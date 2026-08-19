@@ -21,6 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Type
 
 from langgraph.errors import GraphInterrupt
 
+from ..entities.request_contract import IntentAmendment, IntentAmendmentRejection
 from ..entities.run_budget import RunBudgetSnapshot
 from .run_budget import RunBudgetLedger, ledger_for, peek_ledger, seed_run_budget
 from .run_deadline import (
@@ -198,7 +199,8 @@ class RunCancelled(Exception):
 
 
 #: 一批 supplement 落进 state 之后调用：把对应的 durable command 标成 consumed。
-SupplementAppliedSink = Callable[[List[str], str], Awaitable[None]]
+SupplementAppliedSink = Callable[[List[str], str, Dict[str, Any]], Awaitable[None]]
+SupplementRejectedSink = Callable[[List[str], str, Dict[str, Any]], Awaitable[None]]
 
 
 @dataclass
@@ -212,6 +214,7 @@ class RunControlHandle:
     #: 有新的 durable command 时被 set，让协调器立刻去读表而不必等下一个轮询周期。
     wake_event: asyncio.Event = field(default_factory=asyncio.Event)
     supplement_applied_sink: Optional[SupplementAppliedSink] = None
+    supplement_rejected_sink: Optional[SupplementRejectedSink] = None
 
     def request_stop(self, reason: RunStopReason = "user_cancel") -> None:
         self.stop_reason = reason
@@ -240,7 +243,13 @@ class RunControlHandle:
 
         return list(self.supplements)
 
-    async def mark_supplements_applied(self, command_ids: List[str], *, node: str) -> None:
+    async def mark_supplements_applied(
+        self,
+        command_ids: List[str],
+        *,
+        node: str,
+        result: Dict[str, Any],
+    ) -> None:
         applied = {str(value) for value in command_ids if str(value).strip()}
         if not applied:
             return
@@ -248,7 +257,27 @@ class RunControlHandle:
             item for item in self.supplements if item.get("command_id") not in applied
         ]
         if self.supplement_applied_sink is not None:
-            await self.supplement_applied_sink(sorted(applied), node)
+            await self.supplement_applied_sink(sorted(applied), node, result)
+
+    async def mark_supplements_rejected(
+        self,
+        command_ids: List[str],
+        *,
+        node: str,
+        result: Dict[str, Any],
+    ) -> None:
+        rejected = {str(value) for value in command_ids if str(value).strip()}
+        if not rejected:
+            return
+        self.supplements = [
+            item
+            for item in self.supplements
+            if item.get("command_id") not in rejected
+        ]
+        if self.supplement_rejected_sink is not None:
+            await self.supplement_rejected_sink(
+                sorted(rejected), node, result
+            )
 
 
 class RunControlRegistry:
@@ -618,6 +647,8 @@ _RESEARCH_WORKER_NODES = {
 # minute the research workers have already lost.
 _COMPOSITION_WORKER_NODES = {"itinerary_planner"}
 _DEADLINE_BLOCKED_WORKER_NODES = _RESEARCH_WORKER_NODES | _COMPOSITION_WORKER_NODES
+_REQUEST_CONTRACT_NORMALIZER = "request_contract_normalizer"
+_INTENT_AMENDMENT_ROUTER = "intent_amendment_router"
 
 
 def _worker_window_closed(node_name: str, observation: DeadlineObservation) -> bool:
@@ -718,31 +749,58 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                     "agent_status": {node_name: "ignored_after_delivery"},
                 }
             claimed_supplements = handle.pending_supplements() if handle is not None else []
-            fresh_supplements: List[Dict[str, str]] = []
-            supplements_merged = bool(claimed_supplements) and hasattr(state, "model_copy")
-            if supplements_merged:
-                existing = list(getattr(state, "supplemental_requirements", None) or [])
-                # 命令至少消费一次，所以去重的判据要在 state 里：同一条要求被重复 claim 时
-                # （标记 consumed 之后崩溃）不该在调研提示里出现第二遍。
-                merged_ids = {
-                    str(item.get("command_id"))
-                    for item in existing
-                    if item.get("command_id")
-                }
-                fresh_supplements = [
-                    item
-                    for item in claimed_supplements
-                    if str(item.get("command_id")) not in merged_ids
-                ]
-                if fresh_supplements:
-                    state = state.model_copy(
-                        update={"supplemental_requirements": [*existing, *fresh_supplements]}
-                    )
+            existing_amendments = list(
+                getattr(state, "pending_intent_amendments", None) or []
+            )
+            existing_ids = {item.command_id for item in existing_amendments}
+            fresh_amendments = [
+                IntentAmendment(
+                    command_id=str(item["command_id"]),
+                    category=str(item.get("category") or "other"),
+                    content=str(item.get("content") or "").strip(),
+                    source_kind="run_supplement",
+                )
+                for item in claimed_supplements
+                if str(item.get("command_id") or "") not in existing_ids
+                and str(item.get("content") or "").strip()
+            ]
+            if fresh_amendments and hasattr(state, "model_copy"):
+                state = state.model_copy(
+                    update={
+                        "pending_intent_amendments": [
+                            *existing_amendments,
+                            *fresh_amendments,
+                        ]
+                    }
+                )
             await emit_node_lifecycle("started", node=node_name)
-            result = fn(state, *args, **kwargs)
-            if inspect.isawaitable(result):
-                result = await result
-            supplements_landed = supplements_merged
+            divert_to_amendment_router = bool(
+                fresh_amendments
+                and getattr(state, "request_contract", None) is not None
+                and node_name
+                not in {_REQUEST_CONTRACT_NORMALIZER, _INTENT_AMENDMENT_ROUTER}
+            )
+            if divert_to_amendment_router:
+                result = {
+                    "intent_amendment_resume_node": node_name,
+                }
+            else:
+                result = fn(state, *args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+            applied_amendment_ids = set(
+                result.get("applied_intent_amendment_ids") or []
+                if isinstance(result, dict)
+                else []
+            )
+            rejected_amendments = [
+                IntentAmendmentRejection.model_validate(item)
+                for item in (
+                    result.get("rejected_intent_amendments") or []
+                    if isinstance(result, dict)
+                    else []
+                )
+            ]
             if (
                 handle is not None
                 and handle.delivery_ready_event.is_set()
@@ -755,19 +813,18 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                     "run_deadline": getattr(state, "run_deadline", None),
                     "agent_status": {node_name: "ignored_after_delivery"},
                 }
-                # 这个更新被丢掉了，追加要求也就没有生效。留在 handle 里等下一个边界，
-                # 或者由运行终结时的收口判成 rejected —— 不许标成已消费。
-                supplements_landed = False
-            elif fresh_supplements and isinstance(result, dict):
-                # 只并进节点入参不算「纳入 state」：LangGraph 落盘的是节点**返回**的更新。
-                # 追加要求要随这次更新进 checkpoint，后续节点才看得见（append-only reducer）。
+                applied_amendment_ids.clear()
+            elif (
+                fresh_amendments
+                and isinstance(result, dict)
+                and node_name
+                not in {_REQUEST_CONTRACT_NORMALIZER, _INTENT_AMENDMENT_ROUTER}
+            ):
                 result = dict(result)
-                result["supplemental_requirements"] = [
-                    *(result.get("supplemental_requirements") or []),
-                    *fresh_supplements,
+                result["pending_intent_amendments"] = [
+                    *(result.get("pending_intent_amendments") or []),
+                    *fresh_amendments,
                 ]
-            elif fresh_supplements:
-                supplements_landed = False
             if (
                 handle is not None
                 and node_name == "delivery_finalizer"
@@ -787,15 +844,26 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                 result["run_deadline"] = observe_run_deadline(
                     getattr(state, "run_deadline")
                 )[0]
-            if handle is not None and supplements_landed:
+            claimed_applied_ids = [
+                str(item.get("command_id"))
+                for item in claimed_supplements
+                if str(item.get("command_id") or "") in applied_amendment_ids
+            ]
+            if handle is not None and claimed_applied_ids:
                 try:
+                    generation = result.get("planning_generation")
                     await handle.mark_supplements_applied(
-                        [
-                            str(item.get("command_id"))
-                            for item in claimed_supplements
-                            if item.get("command_id")
-                        ],
+                        claimed_applied_ids,
                         node=node_name,
+                        result={
+                            "outcome": "applied",
+                            "intent_spec_revision": result.get(
+                                "intent_spec_revision"
+                            ),
+                            "generation_id": getattr(
+                                generation, "generation_id", None
+                            ),
+                        },
                     )
                 except Exception as settle_err:
                     # 标记生效失败不能吃掉节点已经算出来的结果：那是几分钟的模型与工具
@@ -806,6 +874,35 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                         node_name,
                         settle_err,
                     )
+            if handle is not None and rejected_amendments:
+                for rejection in rejected_amendments:
+                    try:
+                        await handle.mark_supplements_rejected(
+                            [rejection.command_id],
+                            node=node_name,
+                            result={
+                                "outcome": (
+                                    "rejected_late"
+                                    if rejection.reason_code
+                                    in {
+                                        "research_window_closed",
+                                        "composition_window_closed",
+                                        "delivery_already_committed",
+                                    }
+                                    else "rejected"
+                                ),
+                                "impact": rejection.impact.value,
+                                "reason_code": rejection.reason_code,
+                                "requires_new_run": rejection.requires_new_run,
+                            },
+                        )
+                    except Exception as settle_err:
+                        logger.warning(
+                            "追加要求拒绝结论写入失败 run_id=%s node=%s error=%s",
+                            run_id,
+                            node_name,
+                            settle_err,
+                        )
             await emit_node_lifecycle(
                 "completed",
                 node=node_name,

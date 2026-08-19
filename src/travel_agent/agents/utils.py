@@ -119,12 +119,6 @@ def inject_agent_context(system_content: str, state: Any, agent_label: str = "")
         if weather_text:
             system_content += "\n\n" + weather_text
 
-    supplements = getattr(state, "supplemental_requirements", None) or []
-    if supplements:
-        lines = [f"- [{item.get('category', 'other')}] {item.get('content', '')}" for item in supplements if item.get("content")]
-        if lines:
-            system_content += "\n\n【本次运行追加要求】\n" + "\n".join(lines)
-
     return system_content
 
 
@@ -369,15 +363,23 @@ def resolve_agent_assignment(
 
     返回 (output_key, assignment_dict)：
     - output_key: 存储输出时使用的 key（base_name 或 base_name_rN）
-    - assignment_dict: 任务配置 {"task": ..., "recommended_tools": [...]}
+    - assignment_dict: 完整的 capability assignment 合同
     """
     # 优先查找当前精炼轮次对应的后缀 key。
     # 语义约定：首轮无后缀；第一次补充为 _r2；第二次补充为 _r3。
     # 因此 refinement_count=1 -> _r2，refinement_count=2 -> _r3。
+    def require_assignment(key: str) -> Tuple[str, Dict[str, Any]]:
+        assignment = agent_assignments.get(key)
+        if not isinstance(assignment, dict) or not str(
+            assignment.get("objective") or ""
+        ).strip():
+            raise ValueError(f"missing capability assignment for {key}")
+        return key, assignment
+
     if refinement_count > 0:
         round_key = make_round_name(base_name, refinement_count + 1)
         if round_key in agent_assignments:
-            return round_key, agent_assignments[round_key]
+            return require_assignment(round_key)
 
     # 查找任意轮次的 round-suffixed key（按数字轮次倒序，取最新）
     matching_keys_with_round = []
@@ -389,11 +391,10 @@ def resolve_agent_assignment(
     if matching_keys_with_round:
         matching_keys_with_round.sort(key=lambda x: x[0], reverse=True)
         latest_key = matching_keys_with_round[0][1]
-        return latest_key, agent_assignments[latest_key]
+        return require_assignment(latest_key)
 
     # 使用 base_name
-    assignment = agent_assignments.get(base_name, {})
-    return base_name, assignment
+    return require_assignment(base_name)
 
 
 def resolve_scoped_research_output_key(
@@ -411,10 +412,11 @@ def resolve_scoped_research_output_key(
         return resolved_key
     rounds: List[int] = []
     for key in research_packets:
-        if key == base_name:
+        task_key = key.split("@", 1)[0]
+        if task_key == base_name:
             rounds.append(1)
             continue
-        match = re.fullmatch(rf"{re.escape(base_name)}_r(\d+)", key)
+        match = re.fullmatch(rf"{re.escape(base_name)}_r(\d+)", task_key)
         if match:
             rounds.append(int(match.group(1)))
     return make_round_name(base_name, max(rounds, default=1) + 1)

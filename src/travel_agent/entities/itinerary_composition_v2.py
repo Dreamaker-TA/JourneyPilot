@@ -2854,6 +2854,7 @@ def materialize_trip_workspace(
             admissions.append(scoped)
             admission_index[key] = scoped
     catalog = RecommendationCatalog(
+        generation_id=catalog.generation_id,
         fact_data_revision=catalog.fact_data_revision,
         weather_data_revision=catalog.weather_data_revision,
         research_packets=catalog.research_packets,
@@ -2861,6 +2862,7 @@ def materialize_trip_workspace(
     )
     return TripWorkspaceV2(
         run_id=run_id,
+        generation_id=catalog.generation_id,
         workspace_revision=workspace_revision,
         itinerary=itinerary,
         recommendation_catalog=catalog,

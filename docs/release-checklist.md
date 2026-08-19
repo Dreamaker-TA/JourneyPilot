@@ -37,6 +37,14 @@ amd64/arm64 镜像、非 root 与 PDF 字体验证、容器扫描、SBOM。
 - [ ] `config.example.yaml`
 - [ ] 一份 `journeypilot doctor --json` 的示例输出
 
+## 规划合同
+
+- [ ] clause ledger 覆盖每条实质性输入，没有静默丢弃的 hard intent
+- [ ] `CapabilityPlan` 为每个活跃 hard intent 指定所有者与 success criteria
+- [ ] plan gate 与运行中 supplement 都通过 `IntentAmendment` 回到 Request Contract
+- [ ] Packet、Catalog、Workspace、Manifest 的 `generation_id` 一致，旧代 Packet 不能进 Catalog
+- [ ] 后端与前端 Delivery contract 版本同步
+
 ## 检索质量变化
 
 默认数据库不再构建 zhparser（[ADR-0007](adr/ADR-0007-core-default-enhancements-optional.md)）。

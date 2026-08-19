@@ -145,12 +145,13 @@ Tests:
 - `db/test_run_commands.py::test_a_claim_left_by_a_dead_process_is_redelivered`
 
 ### INV-CMD-005：一条追加要求只进 state 一次
-Owner: `entities/state._merge_supplements`
-Enforced by: 按 `command_id` 去重的 reducer —— 并行 Send 扇出里每个 worker 拿到的是
-同一份入参 state，都会判定这条要求还没并入
+Owner: `entities/state._replace_amendments`
+Enforced by: 追加要求先成为带 `command_id` 的 `IntentAmendment`，reducer 按 id
+去重；它只在 Request Contract 归一化成功后才被标记 consumed
 Tests:
-- `test_run_command_contract.py::test_parallel_workers_do_not_store_the_same_supplement_twice`
-- `test_run_command_contract.py::test_merging_supplements_keeps_order_and_distinct_commands`
+- `test_run_command_contract.py::test_parallel_workers_do_not_store_the_same_amendment_twice`
+- `test_run_command_contract.py::test_replacing_amendments_keeps_order_and_distinct_commands`
+- `test_run_command_contract.py::test_supplement_is_consumed_only_after_contract_normalization`
 
 ### INV-JOB-002：丢了租约的 worker 不写结果
 Owner: `services/background_jobs.py` 的 `_renew_lease`、
@@ -169,6 +170,54 @@ Tests:
 - `db/test_background_jobs.py::test_a_claimed_job_is_not_claimable_until_its_lease_expires`
 - `db/test_background_jobs.py::test_attempts_run_out_into_dead`
 - `test_memory_extraction_job.py::*`
+
+---
+
+## 意图与编排
+
+### INV-INTENT-001：每条实质性输入都有明确去向
+Owner: `services/intent_normalization.py`、`services/intent_revision.py`
+Enforced by: 每条 clause 只能映射到 Intent、受控身份、unsupported 或 unresolved；
+实质性 clause 不得被当作 background/non-actionable 静默丢弃
+Tests:
+- `agent_behavior/test_intent_control_plane.py::test_material_clause_cannot_be_silently_classified_as_background`
+
+### INV-INTENT-002：每个活跃 hard intent 都有能力所有者
+Owner: `services/capability_planning.py`、`workflows/travel_planning._validate_plan_gate_contract`
+Enforced by: 确定性能力计划为每个 hard intent 分配 assignment 与 success criteria；
+缺少所有者时计划门拒绝放行
+Tests:
+- `agent_behavior/test_intent_control_plane.py::test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents`
+
+### INV-INTENT-003：旧 generation 产物不得进入当前 Catalog
+Owner: `services/state_invalidation.py`、`agents/orchestrator/candidate_gate.py`、
+`entities/delivery_bundle.py`
+Enforced by: Research Packet key 携带 generation；Candidate Gate 过滤并拒绝旧代 Packet；
+Catalog、Workspace、Manifest 的 generation 必须一致
+Tests:
+- `agent_behavior/test_intent_control_plane.py::test_latest_packets_rejects_an_obsolete_generation`
+
+### INV-INTENT-004：supplement 不得绕过 Request Contract Normalizer
+Owner: `workflows/intent_amendments.py`、`agents/orchestrator/intent_amendment_router.py`、
+`workflows/run_control.py`
+Enforced by: plan gate 与运行中 supplement 都先转为 `IntentAmendment`；研究相关
+修改失效当前代产物并返回同一归一化节点，身份变更必须新建 Run
+Tests:
+- `test_run_command_contract.py::*`
+- `agent_behavior/test_intent_control_plane.py::*`
+
+### INV-PLAN-001：相同 Request Contract 必须得到相同执行图
+Owner: `services/capability_planning.py`
+Enforced by: Research Brief、assignment 与 execution plan 只由纯函数投影，Planner 不调 LLM
+Tests:
+- `agent_behavior/test_intent_control_plane.py::test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents`
+
+### INV-INTENT-005：Intent 与 Constraint 只归一化一次
+Owner: `agents/scope/request_contract_normalizer.py`
+Enforced by: 同一批 clause 的一次结构化调用同时产生 Intent 与 Constraint draft；
+Brief、Planner 与 Worker 只消费结构化合同，不再解释原始要求
+Tests:
+- `agent_behavior/test_intent_control_plane.py::test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents`
 
 ---
 

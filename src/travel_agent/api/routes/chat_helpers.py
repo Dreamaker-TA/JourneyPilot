@@ -28,7 +28,7 @@ async def load_user_profile(user_profile_memory, user_id: str):
     """加载用户画像对象；取不到就是 ``None``。
 
     **这里不再拼任何「画像摘要」字符串。** 画像抵达模型的通道只有一条：
-    Constraint Pack 在 ``constraint_normalizer`` 里自己去读 ``UserProfileMemory``
+    Constraint Pack 的统一装配入口自己读取 ``UserProfileMemory``
     （``panels/constraint.py::_map_manual_profile`` 映六组偏好、``_auto_portrait_block``
     映系统画像）。此前这里还会把偏好与画像拼成一段散文塞进 state，只有快路径读它 ——
     于是同一份节奏 / 预算在快路径上是一句不参与仲裁的散文、在深度路径上是 pack 里可被
@@ -255,5 +255,4 @@ def strip_thinking_text(content: str) -> str:
             break
 
     return content
-
 

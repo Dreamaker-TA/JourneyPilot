@@ -11,8 +11,9 @@ AGENT_DISPLAY_NAMES: Final[Dict[str, str]] = {
     # 编排基础设施节点
     "supervisor":               "智能调度",
     "scope_clarifier":          "需求确认",
-    "scope_brief_generator":    "需求提炼",
-    "constraint_normalizer":    "约束整理",
+    "request_contract_normalizer": "需求合同",
+    "research_brief_builder":   "调研简报",
+    "intent_amendment_router":  "要求更新",
     "trip_summary_card_brief": "旅行摘要",
     "destination_geo_resolver": "目的地定位",
     "weather_context_builder":  "天气事实",
@@ -43,8 +44,9 @@ STEP_DISPLAY_NAMES: Final[Dict[str, str]] = {
     # 节点级步骤
     "supervisor":               "智能调度",
     "scope_clarifier":          "需求确认",
-    "scope_brief_generator":    "需求提炼",
-    "constraint_normalizer":    "整理出行约束",
+    "request_contract_normalizer": "整理需求合同",
+    "research_brief_builder":   "生成调研简报",
+    "intent_amendment_router":  "处理新增要求",
     "trip_summary_card_brief": "整理旅行摘要",
     "destination_geo_resolver": "确认目的地坐标",
     "weather_context_builder":  "获取规划天气",

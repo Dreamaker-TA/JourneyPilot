@@ -105,6 +105,7 @@ def _mutation_bundle(
     return DeliveryBundle(
         manifest=DeliveryRevisionManifest(
             run_id=current.manifest.run_id,
+            generation_id=workspace.generation_id,
             bundle_id=bundle_id,
             workspace_revision=workspace.workspace_revision,
             fact_data_revision=fact_snapshot.fact_data_revision,

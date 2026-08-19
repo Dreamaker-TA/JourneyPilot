@@ -1,8 +1,6 @@
 """Deterministic, checkpointable Minimum Delivery Draft construction.
 
-This module deliberately consumes only the controlled trip identity and the
-already-normalized hard constraints.  It never reads a Candidate, Fact,
-Provider response, Planner response, or raw user text.
+This module consumes only the controlled identity and normalized request contract.
 """
 
 from __future__ import annotations
@@ -18,11 +16,12 @@ from ..entities.delivery_bundle import (
     UserInputAnchor,
 )
 from ..entities.trip_input import ControlledTripIdentity
+from ..entities.intent_spec import IntentItem, IntentStrength
 from .run_budget import build_run_budget_snapshot
 from .run_deadline import build_run_deadline_snapshot, utc_now
 
 
-MINIMUM_DELIVERY_POLICY_VERSION = "minimum_delivery.v1"
+MINIMUM_DELIVERY_POLICY_VERSION = "minimum_delivery.v2"
 
 
 def _canonical_hash(payload: Dict[str, Any]) -> str:
@@ -111,7 +110,8 @@ def _day_shells(identity: ControlledTripIdentity) -> list[MinimumDeliveryDayShel
 def _anchors(
     identity_payload: Dict[str, Any],
     hard_constraints: Iterable[Dict[str, Any]],
-) -> tuple[list[UserInputAnchor], list[str]]:
+    hard_intents: Iterable[IntentItem],
+) -> tuple[list[UserInputAnchor], list[str], list[str]]:
     anchors = [
         UserInputAnchor(
             anchor_id=_stable_id("anchor_identity", identity_payload),
@@ -170,28 +170,49 @@ def _anchors(
                 public_summary=public_summary,
             )
         )
-    return anchors, constraint_ids
+    intent_ids: list[str] = []
+    for intent in hard_intents:
+        intent_ids.append(intent.intent_id)
+        anchors.append(
+            UserInputAnchor(
+                anchor_id=_stable_id("anchor_intent", intent.intent_id),
+                field_path=f"intent_spec.active_items.{intent.intent_id}",
+                value=intent.value.model_dump(mode="json"),
+                input_kind="intent_requirement",
+                intent_id=intent.intent_id,
+                public_summary=intent.public_summary,
+            )
+        )
+    return anchors, constraint_ids, intent_ids
 
 
 def _draft_material(
     *,
     run_id: str,
+    generation_id: str,
     identity_revision: int,
+    intent_revision: int,
+    intent_hash: str,
     constraint_revision: int,
     plan_revision: int,
     day_shells: list[MinimumDeliveryDayShell],
     anchors: list[UserInputAnchor],
     constraint_ids: list[str],
+    hard_intent_ids: list[str],
     policy_version: str,
 ) -> Dict[str, Any]:
     return {
         "run_id": run_id,
+        "planning_generation_id": generation_id,
         "controlled_trip_identity_revision": identity_revision,
+        "intent_spec_revision": intent_revision,
+        "intent_spec_hash": intent_hash,
         "constraint_pack_revision": constraint_revision,
         "plan_revision": plan_revision,
         "policy_version": policy_version,
         "day_shells": [item.model_dump(mode="json") for item in day_shells],
         "preserved_constraint_ids": constraint_ids,
+        "preserved_hard_intent_ids": hard_intent_ids,
         "user_input_anchors": [item.model_dump(mode="json") for item in anchors],
     }
 
@@ -210,21 +231,36 @@ def build_minimum_delivery_draft(
     if not raw_identity:
         return None
     identity = ControlledTripIdentity.model_validate(raw_identity)
+    generation = getattr(state, "planning_generation", None)
+    intent_spec = getattr(state, "intent_spec", None)
+    if generation is None or intent_spec is None:
+        raise ValueError("minimum delivery draft requires a normalized request generation")
     identity_payload = identity.model_dump(mode="json")
     identity_revision = _identity_revision(state, identity_payload)
     constraint_revision = int(getattr(state, "constraint_pack_revision", 0) or 0)
-    plan_revision = int(getattr(state, "plan_gate_revision_count", 0) or 0)
+    plan_revision = generation.plan_revision
     hard_constraints = _active_hard_constraints(getattr(state, "constraint_pack", None))
-    anchors, constraint_ids = _anchors(identity_payload, hard_constraints)
+    hard_intents = [
+        item
+        for item in intent_spec.active_items
+        if item.strength is IntentStrength.HARD
+    ]
+    anchors, constraint_ids, hard_intent_ids = _anchors(
+        identity_payload, hard_constraints, hard_intents
+    )
     shells = _day_shells(identity)
     material = _draft_material(
         run_id=str(getattr(state, "run_id", "") or ""),
+        generation_id=generation.generation_id,
         identity_revision=identity_revision,
+        intent_revision=intent_spec.revision,
+        intent_hash=intent_spec.content_hash,
         constraint_revision=constraint_revision,
         plan_revision=plan_revision,
         day_shells=shells,
         anchors=anchors,
         constraint_ids=constraint_ids,
+        hard_intent_ids=hard_intent_ids,
         policy_version=policy_version,
     )
     if not material["run_id"]:

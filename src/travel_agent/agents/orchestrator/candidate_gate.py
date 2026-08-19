@@ -229,13 +229,18 @@ def _failure_signals(packet: ResearchPacket | None) -> list[ProviderFailureSigna
     return list({signal.signature: signal for signal in signals}.values())
 
 
-def _latest_packets(packets: Dict[str, ResearchPacket]) -> Dict[str, ResearchPacket]:
+def _latest_packets(
+    packets: Dict[str, ResearchPacket], *, generation_id: str
+) -> Dict[str, ResearchPacket]:
     latest: dict[str, tuple[int, ResearchPacket]] = {}
     for key, packet in packets.items():
-        base = strip_round_suffix(key)
+        if packet.generation_id != generation_id:
+            continue
+        task_key = key.split("@", 1)[0]
+        base = strip_round_suffix(task_key)
         if base not in _RESEARCH_WORKERS:
             continue
-        match = _ROUND_SUFFIX.search(key)
+        match = _ROUND_SUFFIX.search(task_key)
         round_number = int(match.group(1)) if match else 1
         current = latest.get(base)
         if current is None or round_number >= current[0]:
@@ -251,13 +256,26 @@ def _catalog_packets(state: TravelAgentState) -> list[ResearchPacket]:
     that already passed before the scoped gap was researched. Preserve unique
     candidates and let the current packet win on identity collisions.
     """
-    current = _latest_packets(state.research_packets)
+    if state.planning_generation is None:
+        raise CandidateGateIntegrityError(
+            "missing_planning_generation",
+            "candidate gate requires a planning generation",
+        )
+    generation_id = state.planning_generation.generation_id
+    current = _latest_packets(
+        state.research_packets,
+        generation_id=generation_id,
+    )
     packets = [
         _packet_candidate_closure(packet, packet.candidates)
         for packet in current.values()
     ]
     previous = state.recommendation_catalog
-    if previous is None or previous.fact_data_revision != state.fact_data_revision:
+    if (
+        previous is None
+        or previous.generation_id != generation_id
+        or previous.fact_data_revision != state.fact_data_revision
+    ):
         return packets
 
     current_ids_by_worker = {
@@ -268,6 +286,7 @@ def _catalog_packets(state: TravelAgentState) -> list[ResearchPacket]:
     for packet in previous.research_packets:
         if (
             packet.worker_kind not in current
+            or packet.generation_id != generation_id
             or packet.constraint_pack_revision != state.constraint_pack_revision
             or packet.fact_data_revision != state.fact_data_revision
         ):
@@ -599,6 +618,12 @@ def build_candidate_catalog(
     """Build a deterministic catalog from current packets and Gate-owned observations."""
 
     packets = list(packets) if packets is not None else _catalog_packets(state)
+    if state.planning_generation is None:
+        raise CandidateGateIntegrityError(
+            "missing_planning_generation",
+            "candidate catalog requires a planning generation",
+        )
+    generation_id = state.planning_generation.generation_id
     risk_profile = risk_profile_from_constraint_pack(state.constraint_pack)
     engine = WeatherImpactEngine()
     updated_packets: list[ResearchPacket] = []
@@ -615,6 +640,12 @@ def build_candidate_catalog(
 
     for packet in packets:
         worker = packet.worker_kind
+        if packet.generation_id != generation_id:
+            raise CandidateGateIntegrityError(
+                "stale_planning_generation",
+                f"{worker} packet belongs to another planning generation",
+                worker_kind=worker,
+            )
         if packet.constraint_pack_revision != state.constraint_pack_revision:
             raise CandidateGateIntegrityError(
                 "stale_constraint_revision",
@@ -711,6 +742,7 @@ def build_candidate_catalog(
         updated_packets.append(packet.model_copy(update={"candidates": updated_candidates}))
 
     catalog = RecommendationCatalog(
+        generation_id=generation_id,
         fact_data_revision=state.fact_data_revision,
         weather_data_revision=(
             state.weather_context.weather_data_revision if state.weather_context else 0
@@ -1892,10 +1924,11 @@ async def candidate_gate_node(
                 )
             assignments = dict(state.agent_assignments)
             assignments["itinerary_planner"] = {
+                **dict(assignments.get("itinerary_planner") or {}),
                 "required_candidate_kinds": sorted(
                     required_candidate_kinds.get("destination_researcher", set())
                 ),
-                "task": (
+                "objective": (
                     "只选择已准入 Visit/Dining/Lodging 与日期匹配的 long-distance 主方案，"
                     "生成不含任何市内 Transport placement 的排期骨架；不得猜路线或端点。"
                 ),
@@ -2044,10 +2077,11 @@ async def candidate_gate_node(
         if state.placement_skeleton is not None:
             final_assignments = dict(state.agent_assignments)
             final_assignments["itinerary_planner"] = {
+                **dict(final_assignments.get("itinerary_planner") or {}),
                 "required_candidate_kinds": sorted(
                     required_candidate_kinds.get("destination_researcher", set())
                 ),
-                "task": "只用 placement skeleton 与通过质量门的 exact Provider routes 物化正式行程。",
+                "objective": "只用 placement skeleton 与通过质量门的 exact Provider routes 物化正式行程。",
             }
             base_update["agent_assignments"] = final_assignments
         if not blocked_workers:
@@ -2242,7 +2276,8 @@ async def candidate_gate_node(
         connector_payloads.append(payload)
     assignments = dict(state.agent_assignments)
     assignments[worker] = {
-        "task": (
+        **dict(assignments.get(worker) or {}),
+        "objective": (
             "仅补查以下候选准入缺口；必须保留硬约束、避开已失败 Provider，"
             "并使用独立真实来源。缺少可验证事实时明确返回缺口，不得自产 evidence。"
             f"{connector_instruction}{long_distance_instruction}"

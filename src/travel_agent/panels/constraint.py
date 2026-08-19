@@ -1,7 +1,7 @@
 """Run-scoped Personal Constraint Pack builder.
 
 Constraint Pack v1 是个人出行约束的后端唯一事实源：
-constraint_normalizer → source loader → LLM extraction + deterministic fallback →
+request_contract_normalizer → source loader → shared semantic extraction + deterministic fallback →
 ConstraintExtractionResult → PersonalConstraintPack。Planner 与 Workers 只消费 state 中同一个 pack。
 
 七个来源三类处理（JP-02-02 §A.1）：
@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -133,7 +132,13 @@ _LOCAL_MODE_PREFER_HINTS = (
 # connector pair → gap → 定向补研，把写死的墙钟预算顶出去。
 # 它落在 ``other`` 这一档（见 ``_map_manual_memory_facts``），所以 ``_default_type``
 # 结构上就给不出 hard；写在这里是为了让「加不加」是一次记录在案的决定，而不是遗漏。
-_EXPLICIT_SOURCES = {"manual_profile", "session_anchor", "current_query"}
+_EXPLICIT_SOURCES = {
+    "manual_profile",
+    "session_anchor",
+    "current_query",
+    "plan_gate_amendment",
+    "run_supplement",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +169,9 @@ _SINGULAR_CATEGORIES = {"budget_cap", "pace_preference"}
 # ``auto_portrait``（0）**之下** —— 用户手写的「预算别超两千」会输给系统推断的画像，
 # 不报错、不留痕。这张表的完整性由真实打包出来的包反查守护：新增来源必须在这里登记。
 _SINGULAR_SOURCE_PRECEDENCE = {
-    "current_query": 5,
+    "current_query": 7,
+    "plan_gate_amendment": 6,
+    "run_supplement": 5,
     "preset": 4,
     "session_anchor": 3,
     "manual_memory": 2,
@@ -221,8 +228,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _cid() -> str:
-    return f"c_{uuid.uuid4().hex[:10]}"
+def _cid(*parts: Any) -> str:
+    import hashlib
+
+    encoded = json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str)
+    return f"c_{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
 
 
 def _get(state: Any, key: str, default: Any = None) -> Any:
@@ -245,14 +255,6 @@ def _iso(v: Any) -> Optional[str]:
 def _normalize_category(cat: Any) -> str:
     c = str(cat or "").strip().lower()
     return c if c in _ALL_CATEGORIES else "other"
-
-
-def _parse_brief(brief: Any) -> Dict[str, Any]:
-    if isinstance(brief, dict):
-        return brief
-    if isinstance(brief, str) and brief.strip():
-        return safe_parse_json(brief, enable_repair=True) or {}
-    return {}
 
 
 def _default_type(category: str, value: str, source: str) -> str:
@@ -539,7 +541,7 @@ def _make_item(
         ctype = "soft"
     policy = _enforcement_policy(category, params, ctype)
     return {
-        "constraint_id": _cid(),
+        "constraint_id": _cid(category, value, params, source, origin_ref),
         "category": category,
         "value": value,
         "params": params or None,
@@ -922,7 +924,7 @@ class ConstraintExtractionResult:
 
 
 class ConstraintSourceLoader:
-    """Assemble the sources consumed once by ``constraint_normalizer``."""
+    """Assemble the sources consumed once by request-contract normalization."""
 
     def __init__(
         self,
@@ -936,6 +938,9 @@ class ConstraintSourceLoader:
         context_status: str,
         missing_source_layers: Optional[List[str]] = None,
         partial_reasons: Optional[List[str]] = None,
+        precomputed_free_text_constraints: Optional[
+            Dict[str, List[Dict[str, Any]]]
+        ] = None,
     ) -> None:
         self.state = state
         self.fast_llm = fast_llm
@@ -946,6 +951,7 @@ class ConstraintSourceLoader:
         self.context_status = context_status
         self.missing_source_layers = missing_source_layers or []
         self.partial_reasons = partial_reasons or []
+        self.precomputed_free_text_constraints = precomputed_free_text_constraints
 
     @classmethod
     def from_loaded(
@@ -959,6 +965,9 @@ class ConstraintSourceLoader:
         memory_facts: Optional[List[Dict[str, Any]]] = None,
         missing_source_layers: Optional[List[str]] = None,
         partial_reasons: Optional[List[str]] = None,
+        precomputed_free_text_constraints: Optional[
+            Dict[str, List[Dict[str, Any]]]
+        ] = None,
     ) -> "ConstraintSourceLoader":
         missing = list(missing_source_layers or [])
         if user_profile is None and "manual_profile" not in missing:
@@ -978,6 +987,7 @@ class ConstraintSourceLoader:
             context_status=status,
             missing_source_layers=missing,
             partial_reasons=partial_reasons or [],
+            precomputed_free_text_constraints=precomputed_free_text_constraints,
         )
 
     async def build_pack(self) -> Dict[str, Any]:
@@ -991,6 +1001,7 @@ class ConstraintSourceLoader:
             context_status=self.context_status,
             missing_source_layers=self.missing_source_layers,
             partial_reasons=self.partial_reasons,
+            precomputed_free_text_constraints=self.precomputed_free_text_constraints,
         )
 
 
@@ -1271,6 +1282,30 @@ async def _extract_free_text(fast_llm: Any, free_items: List[Dict[str, Any]]) ->
 
     if reason:
         result.partial_reasons.append(reason)
+    if result.fallback_extracted:
+        result.partial_reasons.append("deterministic_fallback_used")
+    return result
+
+
+def merge_precomputed_constraint_extraction(
+    free_items: List[Dict[str, Any]],
+    model_items: Dict[str, List[Dict[str, Any]]],
+) -> ConstraintExtractionResult:
+    """Merge one shared request-normalization result with deterministic safeguards."""
+    rule_items = _rule_fallback_extract(free_items).fallback_items
+    result = ConstraintExtractionResult(llm_items=model_items)
+    for item in free_items:
+        source_id = item["id"]
+        merged, supplemented = _merge_extracted_constraints(
+            list(model_items.get(source_id) or []),
+            list(rule_items.get(source_id) or []),
+        )
+        if merged:
+            result.items[source_id] = merged
+        if supplemented:
+            result.fallback_items[source_id] = supplemented
+        if not merged:
+            result.missing_sources.append(source_id)
     if result.fallback_extracted:
         result.partial_reasons.append("deterministic_fallback_used")
     return result
@@ -1600,6 +1635,75 @@ def _dedupe_constraints(constraints: List[Dict[str, Any]]) -> List[Dict[str, Any
     return out
 
 
+def constraint_free_text_sources(
+    state: Any,
+    memory_facts: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    now = _now_iso()
+    free_items: List[Dict[str, Any]] = []
+    anchor = _get(state, "session_anchor") or {}
+    if isinstance(anchor, dict):
+        for index, value in enumerate(anchor.get("key_constraints") or []):
+            free_items.append(
+                {
+                    "id": f"anchor_{index}",
+                    "source": "session_anchor",
+                    "text": str(value),
+                    "updated_at": anchor.get("compressed_at") or now,
+                }
+            )
+    user_query = str(_get(state, "user_query") or "").strip()
+    if user_query:
+        free_items.append(
+            {
+                "id": "query_main",
+                "source": "current_query",
+                "text": user_query,
+                "updated_at": now,
+            }
+        )
+    plan_amendment = _get(state, "plan_gate_amendment")
+    if plan_amendment is not None:
+        content = str(getattr(plan_amendment, "content", "") or "").strip()
+        command_id = str(
+            getattr(plan_amendment, "command_id", "plan_gate_amendment")
+        )
+        if content:
+            free_items.append(
+                {
+                    "id": command_id,
+                    "source": "plan_gate_amendment",
+                    "text": content,
+                    "updated_at": now,
+                }
+            )
+    for amendment in _get(state, "pending_intent_amendments") or []:
+        content = str(getattr(amendment, "content", "") or "").strip()
+        command_id = str(getattr(amendment, "command_id", "") or "").strip()
+        if content and command_id:
+            free_items.append(
+                {
+                    "id": command_id,
+                    "source": "run_supplement",
+                    "text": content,
+                    "updated_at": now,
+                }
+            )
+    for index, fact in enumerate(memory_facts or []):
+        if isinstance(fact, dict):
+            free_items.append(
+                {
+                    "id": f"fact_{index}",
+                    "source": "memory_fact",
+                    "text": str(fact.get("content") or ""),
+                    "updated_at": _iso(fact.get("created_at")) or now,
+                    "category_meta": fact.get("category"),
+                    "importance": int(fact.get("importance") or 0),
+                }
+            )
+    return free_items
+
+
 async def build_constraint_pack(
     state: Any,
     fast_llm: Any,
@@ -1611,6 +1715,9 @@ async def build_constraint_pack(
     context_status: str = "unknown",
     missing_source_layers: Optional[List[str]] = None,
     partial_reasons: Optional[List[str]] = None,
+    precomputed_free_text_constraints: Optional[
+        Dict[str, List[Dict[str, Any]]]
+    ] = None,
 ) -> Dict[str, Any]:
     """组装 PersonalConstraintPack（约束侧唯一事实源，一处装配多处消费，JP-02-02 §A.0）。
 
@@ -1653,44 +1760,14 @@ async def build_constraint_pack(
         source_layers.append("preset")
 
     # 2) session_anchor / 3) current_query / 4) memory_fact → 自由文本 LLM 抽取。
-    free_items: List[Dict[str, Any]] = []
-    anchor = _get(state, "session_anchor") or {}
-    if isinstance(anchor, dict):
-        for i, kc in enumerate(anchor.get("key_constraints") or []):
-            free_items.append(
-                {"id": f"anchor_{i}", "source": "session_anchor", "text": str(kc),
-                 "updated_at": anchor.get("compressed_at") or now}
-            )
-    user_query = str(_get(state, "user_query") or "").strip()
-    if user_query:
-        free_items.append({"id": "query_main", "source": "current_query", "text": user_query, "updated_at": now})
-    brief = _parse_brief(_get(state, "research_brief"))
-    for i, bc in enumerate(brief.get("constraints") or []):
-        free_items.append({"id": f"brief_{i}", "source": "current_query", "text": str(bc), "updated_at": now})
-    plan_revision = _get(state, "plan_revision")
-    if isinstance(plan_revision, dict):
-        revision_content = str(plan_revision.get("content") or "").strip()
-        if revision_content:
-            free_items.append({
-                "id": "plan_revision",
-                "source": "current_query",
-                "text": revision_content,
-                "updated_at": now,
-            })
-    for i, fact in enumerate(memory_facts or []):
-        if isinstance(fact, dict):
-            free_items.append(
-                {
-                    "id": f"fact_{i}",
-                    "source": "memory_fact",
-                    "text": str(fact.get("content") or ""),
-                    "updated_at": _iso(fact.get("created_at")) or now,
-                    "category_meta": fact.get("category"),
-                    "importance": int(fact.get("importance") or 0),
-                }
-            )
-
-    extraction = await _extract_free_text(fast_llm, free_items)
+    free_items = constraint_free_text_sources(state, memory_facts)
+    extraction = (
+        merge_precomputed_constraint_extraction(
+            free_items, precomputed_free_text_constraints
+        )
+        if precomputed_free_text_constraints is not None
+        else await _extract_free_text(fast_llm, free_items)
+    )
     seen_sources: set = set()
     for it in free_items:
         # 一条自由文本只取一份（``items_for``：模型说了算，模型没说话才轮到规则）。
@@ -1703,7 +1780,7 @@ async def build_constraint_pack(
             high = it.get("category_meta") == "constraint" and it.get("importance", 0) >= 8
             confidence = "high" if high else "medium"
             visibility = "user_visible" if high else "internal_only"
-        else:  # session_anchor / current_query：显式来源
+        else:  # session_anchor / current query / amendment：显式来源
             confidence = "high"
             visibility = "user_visible"
         source_text = str(it.get("text") or "").strip()
@@ -1977,7 +2054,7 @@ def _manual_memory_omitted_note(kept_rows: List[Dict[str, Any]]) -> str:
 
     **上限本身不在这里，也不该在这里。** 它只有一处定义
     （``memory/context_builder.py::ContextBudget.manual_memory_facts_limit``），
-    由 ``agents/scope/constraint_normalizer.py`` 在取数那一步用掉。这一层只被告知
+    由 Constraint Pack 的统一装配入口在取数时用掉。这一层只被告知
     「被截了」这件事，以及本轮真印出去几条 —— 把那个数搬进来就等于让它有两处定义。
 
     **不报「少了几条」这个确数。** 取数那一侧多取一条当**探针**（``limit + 1``），

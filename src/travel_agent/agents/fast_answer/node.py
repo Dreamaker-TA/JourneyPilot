@@ -666,7 +666,7 @@ async def fast_answer_node(state: TravelAgentState, config: RunnableConfig) -> D
     # 列的是 ``referenced_context_sections(pack)`` —— 与 ``format_constraint_pack_for_prompt``
     # 同一个产地（``panels/constraint.py::_constraint_prompt_sections``），所以「屏幕上说
     # 参考了」与「模型真的读到了」在这条路上也不可能各自漂移。深度路径那侧同一份报告由
-    # ``constraint_normalizer_node`` 发。
+    # 深度路径由 Request Contract 归一化节点发。
     #
     # 这一轮什么都没参考（没有条目进 prompt，也没压缩）时 ``build_context_report``
     # 返回 None，这个事件就不发 —— 印记的出现本身要能证明数据存在。

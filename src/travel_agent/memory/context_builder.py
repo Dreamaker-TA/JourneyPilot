@@ -8,8 +8,8 @@ Context Builder v3 (Application Layer)
   2. [低优先]   当前会话消息  (Working Memory)  → Token 预算裁剪
 
 **记忆层不在这里**。用户声明的偏好、系统推理的画像、手写记忆、语义检索记忆，抵达模型
-的通道只有一条：Constraint Pack（``agents/scope/constraint_normalizer.py::
-build_run_constraint_pack`` 装配、``panels/constraint.py::
+的通道只有一条：Constraint Pack（``agents/scope/request_contract_normalizer.py``
+统一解析、``agents/scope/constraint_normalizer.py::build_run_constraint_pack`` 装配、``panels/constraint.py::
 format_constraint_pack_for_prompt`` 投影），快慢两条路径共用同一份装配、同一套仲裁。
 
 这一层曾经也装记忆，而且装得很全：手写记忆按条数上限取回、编号成表、被截时出声，
@@ -74,7 +74,7 @@ class ContextBudget:
     system_prompt_budget: int = 600
     anchor_summary_budget: int = 2_000      # Anchor 摘要（v3 新增）
     # 手写记忆进 prompt 的条数上限（**全仓唯一定义处**）。
-    # 它的消费方**不在本文件**：``agents/scope/constraint_normalizer.py`` 取数时用它，
+    # 它的消费方**不在本文件**：Request Contract Normalizer 取数时用它，
     # 出声那一句由 ``panels/constraint.py`` 印。留在这张预算表上是因为它问的是同一个
     # 问题 ——「用户的东西有多少能挤进模型的上下文」；散到调用点或存储层去，正是它
     # 曾经有三份、其中两份静默胜出的老路。

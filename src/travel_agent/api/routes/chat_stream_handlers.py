@@ -29,7 +29,9 @@ _DEEP_WORKER_NODES = {
 _FINAL_OUTPUT_NODES = {"fast_answer_agent"}
 _CHECKPOINT_GATE_NODES = {"plan_gate"}
 _PROGRESS_STEP_NODES = {
-    "constraint_normalizer",
+    "request_contract_normalizer",
+    "research_brief_builder",
+    "intent_amendment_router",
     "destination_geo_resolver",
     "weather_context_builder",
     "dispatcher",

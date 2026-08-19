@@ -35,12 +35,19 @@ PostgreSQL + pgvector（最终事实）        Redis（缓存与快照）
 ## 一次请求走过什么
 
 1. **路由**：简单问题走快问快答；多日行程进研究工作流。
-2. **收敛**：澄清范围与硬约束，构建 `MinimumDeliveryDraft`（确定性、可 checkpoint）。
-3. **授权**：用户在计划门确认后封存 Draft，同时封存 `RunDeadlineSnapshot` 与
+2. **合同化**：一次归一化同时产生 clause ledger、`IntentSpec` 与 Constraint Pack，
+   并封装为唯一 `RequestContract`。
+3. **编排**：从合同确定性投影 `ResearchBriefV2`、`CapabilityPlan` 与
+   `MinimumDeliveryDraft`；每个 hard intent 都有所有者与验收标准。
+4. **授权**：用户在计划门确认后封存 Draft，同时封存 `RunDeadlineSnapshot` 与
    `RunBudgetSnapshot` —— 时间与钱的上限从这一刻起对这个 Run 固定。
-4. **研究**：并行 worker 通过 MCP 与 Provider 取回**带来源的候选**，不是行程正文。
-5. **门**：确定性检查覆盖度与来源谱系，缺什么就发起定向补研究。
-6. **交付**：一次原子提交写出唯一的 `DeliveryBundle`，所有面向用户的界面都是它的投影。
+5. **研究**：并行 worker 通过 MCP 与 Provider 取回**带来源的候选**，每个
+   Research Packet 绑定当前 `PlanningGeneration`。
+6. **门**：确定性检查覆盖度、来源谱系与 generation，缺什么就发起定向补研究。
+7. **交付**：一次原子提交写出唯一的 `DeliveryBundle`，所有面向用户的界面都是它的投影。
+
+计划门修改和运行中追加要求不直接改 prompt。它们先变成 `IntentAmendment`，
+回到同一个 Request Contract 边界，再按影响范围失效旧产物。
 
 ## 从哪里继续读
 

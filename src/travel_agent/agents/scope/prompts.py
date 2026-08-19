@@ -1,16 +1,4 @@
-"""Scope 阶段 Prompt — 记忆上下文装配用的系统提示
-
-本文件曾装着两对 prompt：Clarifier（生成多选澄清题）与 Brief Generator（把对话
-压成 Research Brief）。两者都随受控旅行身份成为必填而失效——身份里已经有目的地、
-日期、同行与风格，Brief 由 `brief_generator_node` 确定性派生，没有模型参与，也就
-没有需要向模型描述的抽取规则。
-
-剩下这一份不是它们的残留，而是另一件事的输入：Scope 入口要为「本轮上下文该注入
-哪些记忆层、够不够压缩阈值」装配一次 ContextBuilder 上下文
-（`node.py::_check_and_handle_compaction_deep` → `_build_scope_context`），
-ContextBuilder 需要一个系统提示来做 token 记账并作为注入锚点。它不驱动任何一次
-决策调用。
-"""
+"""System text used only to measure the Scope session context."""
 
 SCOPE_CONTEXT_SYSTEM_PROMPT = """<role>
 你是旅行规划系统的 Scope 阶段上下文装配位。本轮的旅行事实来自用户在界面上确认的

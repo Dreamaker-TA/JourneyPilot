@@ -80,9 +80,8 @@ class PresetInjector:
         的反应无从预料。长度由 ``entities.preset`` 的字段上限在存入时就管住
         （见那里的 ``PRESET_INSTRUCTIONS_MAX_CHARS``），所以这里不需要、也不许有第二道界。
 
-        （原先还有一个 ``format_for_scope``，给 ``brief_generator`` 用。那个节点自
-        第 8 迭代起就不调模型了 —— 简报由受控身份确定性派生 —— 所以那个方法全仓零
-        调用方，已删。一个没有调用方的注入格式化器和一句没有判据的合同是同一件事。）
+        Preset 的可执行要求由 Request Contract Normalizer 和 Constraint Pack 处理，
+        这里仅负责向需要风格背景的模型提供完整信封。
         """
         if not preset_context:
             return ""

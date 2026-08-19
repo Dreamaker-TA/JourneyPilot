@@ -85,10 +85,13 @@ def _draft(*, authorized_at=None):
         draft_id="draft_seal_budget",
         content_hash="0" * 64,
         run_id="run_seal_budget",
+        planning_generation_id="generation_budget",
         controlled_trip_identity_revision=1,
         constraint_pack_revision=0,
+        intent_spec_revision=1,
+        intent_spec_hash="1" * 64,
         plan_revision=0,
-        policy_version="minimum_delivery.v1",
+        policy_version="minimum_delivery.v2",
         day_shells=[
             MinimumDeliveryDayShell(
                 day_id="day_1",
@@ -100,6 +103,33 @@ def _draft(*, authorized_at=None):
         ],
         planning_authorized=authorized_at is not None,
         planning_authorized_at=authorized_at,
+    )
+
+
+def _generation():
+    from travel_agent.entities.planning_generation import PlanningGeneration
+
+    return PlanningGeneration(
+        generation_id="generation_budget",
+        controlled_trip_identity_revision=1,
+        intent_spec_revision=1,
+        constraint_pack_revision=0,
+        plan_revision=0,
+        identity_hash="2" * 64,
+        intent_hash="1" * 64,
+        constraint_hash="3" * 64,
+    )
+
+
+def _intent_spec():
+    from travel_agent.entities.intent_spec import IntentSpec
+
+    return IntentSpec(
+        intent_spec_id="intent_spec_budget",
+        revision=1,
+        generation_id="generation_budget",
+        content_hash="1" * 64,
+        objective_summary="预算边界测试",
     )
 
 
@@ -122,6 +152,9 @@ def test_budget_and_deadline_must_be_sealed_together():
             session_id="s",
             run_id="run_seal_budget",
             controlled_trip_identity_revision=1,
+            intent_spec_revision=1,
+            intent_spec=_intent_spec(),
+            planning_generation=_generation(),
             minimum_delivery_draft=sealed["minimum_delivery_draft"],
             run_deadline=sealed["run_deadline"],
         )

@@ -59,7 +59,7 @@ from ...entities.state import TravelAgentState, bounded_repair_context
 from ...models.router import get_model_router
 from ...models.strict_json_schema import as_strict_schema
 from ...tools.registry import get_tool_registry
-from ...utils.brief_helpers import build_brief_context_for_agent
+from ...utils.brief_helpers import build_assignment_context
 from ...workflows.run_control import ModelWindowClosed, await_model_operation
 from ...workflows.run_deadline import observe_run_deadline
 from ...entities.provider_evidence import (
@@ -557,7 +557,15 @@ def _composition_prompt(
     schema = _composition_schema_json(state, skeleton_only=skeleton_only)
     catalog = _composition_catalog_json(state)
     capabilities = _composition_capabilities_json(state, skeleton_only=skeleton_only)
-    brief = build_brief_context_for_agent("itinerary_planner", state.research_brief)
+    _, assignment = resolve_agent_assignment(
+        state.agent_assignments or {}, _NODE_NAME, state.refinement_count
+    )
+    brief = build_assignment_context(
+        assignment=assignment,
+        brief=state.research_brief,
+        intent_spec=state.intent_spec,
+        constraint_pack=state.constraint_pack,
+    )
     transport_contract = (
         "- 这是 placement skeleton 阶段：禁止引用任何 public_transit 或 flexible candidate，"
         "只确定 Visit/Dining 的 Day、顺序、当地时间以及日期匹配的 long_distance 主方案。"
@@ -683,7 +691,19 @@ def composition_prompt_segments(
         ("catalog", _composition_catalog_json(state)),
         ("capabilities", _composition_capabilities_json(state, skeleton_only=skeleton_only)),
         ("schema", _composition_schema_json(state, skeleton_only=skeleton_only)),
-        ("brief", build_brief_context_for_agent("itinerary_planner", state.research_brief)),
+        (
+            "brief",
+            build_assignment_context(
+                assignment=resolve_agent_assignment(
+                    state.agent_assignments or {},
+                    _NODE_NAME,
+                    state.refinement_count,
+                )[1],
+                brief=state.research_brief,
+                intent_spec=state.intent_spec,
+                constraint_pack=state.constraint_pack,
+            ),
+        ),
         ("repair_section", _composition_repair_section(state)),
         ("user_query", state.user_query or ""),
         ("task_desc", task_desc),
@@ -749,14 +769,6 @@ def _agent_context_pieces(state: TravelAgentState) -> List[tuple[str, str]]:
         if state.weather_context is not None
         else ""
     )
-    supplement_lines = [
-        f"- [{item.get('category', 'other')}] {item.get('content', '')}"
-        for item in (state.supplemental_requirements or [])
-        if item.get("content")
-    ]
-    supplements = (
-        "【本次运行追加要求】\n" + "\n".join(supplement_lines) if supplement_lines else ""
-    )
     return [
         ("session_anchor", anchor),
         ("preset", preset),
@@ -764,7 +776,6 @@ def _agent_context_pieces(state: TravelAgentState) -> List[tuple[str, str]]:
         # This is the prompt's **only** weather; the composition
         # prompt no longer renders a second copy of the same day records.
         ("weather_planning_prose", weather_prose),
-        ("supplemental_requirements", supplements),
     ]
 
 
@@ -2683,17 +2694,12 @@ async def itinerary_planner_node(
     output_key, assignment = resolve_agent_assignment(
         state.agent_assignments or {}, _NODE_NAME, state.refinement_count
     )
-    if isinstance(assignment, dict):
-        task_desc = str(assignment.get("task") or "组合完整旅行行程")
-        required_candidate_kinds = {
-            str(kind)
-            for kind in assignment.get("required_candidate_kinds", [])
-            if str(kind) in {"visit", "dining"}
-        }
-    else:
-        task_desc = str(assignment or "组合完整旅行行程")
-        required_candidate_kinds = set()
-        output_key = _NODE_NAME
+    task_desc = str(assignment["objective"])
+    required_candidate_kinds = {
+        str(kind)
+        for kind in assignment.get("required_candidate_kinds", [])
+        if str(kind) in {"visit", "dining"}
+    }
     phase = _composition_phase(state)
     unlocatable = {key for key in state.unlocatable_authored_places if key}
     # Names the failing stage for the repair round. Workspace materialization

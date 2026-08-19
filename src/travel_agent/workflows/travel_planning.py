@@ -2,7 +2,7 @@
 深度调研工作流 (Application Layer) — 仅负责图结构。
 
 v2 三段主链：
-  1. scope_clarifier → brief_generator → constraint_normalizer → destination_geo_resolver → weather_context_builder → planner
+  1. scope_clarifier → request_contract_normalizer → research_brief_builder → destination_geo_resolver → weather_context_builder → planner
   2. dispatcher → typed workers → Candidate / Artifact / Delivery Quality Gates
   3. deterministic delivery projector → atomic delivery finalizer → END
 
@@ -36,6 +36,9 @@ from ..agents.orchestrator.delivery_quality_gate import (
     route_after_delivery_quality_gate,
 )
 from ..agents.orchestrator.planner import planner_node
+from ..agents.orchestrator.intent_amendment_router import (
+    intent_amendment_router_node,
+)
 from ..entities.trip_run import generate_trip_run_id
 from ..infrastructure.cost_ledger_store import get_cost_ledger_store
 from ..local_profile import LOCAL_USER_ID
@@ -43,15 +46,17 @@ from ..infrastructure.delivery_bundle_store import DeliveryBundleStore
 from ..infrastructure.trip_run_store import TripRunStore, get_trip_run_store
 from ..infrastructure.tool_audit_store import get_tool_audit_store
 from ..models.usage import get_usage_recorder
-from ..agents.scope.node import (
-    brief_generator_node,
-    clarifier_node,
+from ..agents.scope.node import clarifier_node
+from ..agents.scope.request_contract_normalizer import (
+    request_contract_normalizer_node,
 )
-from ..agents.scope.constraint_normalizer import constraint_normalizer_node
+from ..agents.scope.research_brief_builder import research_brief_builder_node
 from ..agents.summary_card.node import trip_summary_card_after_brief_node
 from ..agents.transport_researcher.node import transport_researcher_node
 from ..config import get_settings
 from ..entities.state import TravelAgentState
+from ..entities.request_contract import AmendmentImpact, IntentAmendment
+from ..services.state_invalidation import invalidation_update
 from ..utils.display_names import get_agent_display_name
 from ..utils.message_helpers import build_messages
 from .budget_estimate import budget_estimate_node
@@ -86,8 +91,9 @@ if not hasattr(langchain, "debug"):
 
 # ── 节点名称常量 ──────────────────────────────────────────────────────────────
 NODE_CLARIFIER = "scope_clarifier"
-NODE_BRIEF_GEN = "scope_brief_generator"
-NODE_CONSTRAINT_NORMALIZER = "constraint_normalizer"
+NODE_REQUEST_CONTRACT_NORMALIZER = "request_contract_normalizer"
+NODE_RESEARCH_BRIEF_BUILDER = "research_brief_builder"
+NODE_INTENT_AMENDMENT_ROUTER = "intent_amendment_router"
 NODE_MINIMUM_DELIVERY_DRAFT = "minimum_delivery_draft_builder"
 NODE_DESTINATION_GEO_RESOLVER = "destination_geo_resolver"
 NODE_WEATHER_CONTEXT_BUILDER = "weather_context_builder"
@@ -141,7 +147,7 @@ def _is_plan_gate_enabled(config: Optional[RunnableConfig]) -> bool:
 def _assignment_task_text(value: Any) -> str:
     """规范化单个 agent 的任务全文（不截断）。"""
     if isinstance(value, dict):
-        text = str(value.get("task") or value.get("summary") or "")
+        text = str(value.get("objective") or "")
     else:
         text = str(value or "")
     return " ".join(text.split())
@@ -191,6 +197,16 @@ def _build_plan_gate_payload(state: TravelAgentState) -> Dict[str, Any]:
         for item in constraint_pack.get("hard_constraints") or []
         if isinstance(item, dict) and item.get("status") in (None, "active")
     ]
+    if state.intent_spec is not None:
+        existing = {item["constraint_id"] for item in must_obey}
+        must_obey.extend(
+            {
+                "constraint_id": item.intent_id,
+                "public_summary": item.public_summary,
+            }
+            for item in state.intent_spec.active_items
+            if item.strength.value == "hard" and item.intent_id not in existing
+        )
     return {
         # `gate` is this payload's only name for itself.  It used to also
         # carry `"type": "plan_gate"` — a second name with no reader on either
@@ -211,6 +227,68 @@ def _build_plan_gate_payload(state: TravelAgentState) -> Dict[str, Any]:
     }
 
 
+def _validate_plan_gate_contract(state: TravelAgentState) -> None:
+    contract = state.request_contract
+    plan = state.capability_plan
+    draft = state.minimum_delivery_draft
+    brief = state.research_brief
+    if contract is None or brief is None or plan is None or draft is None:
+        raise RuntimeError(
+            "plan gate requires request, research, capability and minimum-delivery contracts"
+        )
+    if contract.has_blocking_conflicts:
+        raise RuntimeError("request contract contains a blocking intent conflict")
+    if contract.has_unresolved_material_clauses:
+        raise RuntimeError("request contract contains an unresolved material clause")
+    hard_ids = {
+        item.intent_id
+        for item in contract.intent_spec.active_items
+        if item.strength.value == "hard"
+    }
+    owned_ids = {
+        intent_id
+        for assignment in plan.assignments.values()
+        for intent_id in assignment.must_cover_intent_ids
+    }
+    if hard_ids - owned_ids:
+        raise RuntimeError("active hard intent lacks capability ownership")
+    objective_intents = {
+        intent_id
+        for objective in brief.domain_objectives
+        for intent_id in [
+            *objective.must_cover_intent_ids,
+            *objective.optional_intent_ids,
+        ]
+    }
+    research_ids = {
+        item.intent_id
+        for item in contract.intent_spec.active_items
+        if "research" in item.impact_stages
+    }
+    if research_ids - objective_intents:
+        raise RuntimeError("research-affecting intent lacks a research objective")
+    if draft.planning_generation_id != contract.generation_id:
+        raise RuntimeError("minimum delivery draft belongs to another generation")
+    if (
+        draft.intent_spec_revision != contract.intent_spec.revision
+        or draft.intent_spec_hash != contract.intent_spec.content_hash
+    ):
+        raise RuntimeError("minimum delivery draft belongs to another intent contract")
+    if plan.generation_id != contract.generation_id:
+        raise RuntimeError("capability plan belongs to another generation")
+    if plan.intent_spec_revision != contract.intent_spec.revision:
+        raise RuntimeError("capability plan uses another intent revision")
+
+
+def _projection_only_amendment(content: str) -> bool:
+    lowered = content.lower()
+    presentation = ("报告", "输出", "措辞", "简洁", "格式", "排版", "summary", "format")
+    material = ("不要", "安排", "每天", "景点", "餐", "酒店", "交通", "预算", "must", "avoid")
+    return any(token in lowered for token in presentation) and not any(
+        token in lowered for token in material
+    )
+
+
 async def plan_gate_node(state: TravelAgentState, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     """Block after planning and before worker fan-out until the user decides.
 
@@ -228,15 +306,19 @@ async def plan_gate_node(state: TravelAgentState, config: Optional[RunnableConfi
         raise RuntimeError(
             "hard constraint contract is incomplete: " + ", ".join(str(item) for item in unsupported)
         )
+    _validate_plan_gate_contract(state)
 
     if not _is_plan_gate_enabled(config):
-        # A disabled interaction cannot be treated as a user authorization.
-        # Legacy non-controlled flows have no Draft and retain their existing
-        # behavior; controlled completion-guarantee runs must not dispatch
-        # without a real approval/seal.
-        if state.minimum_delivery_draft is not None:
-            raise RuntimeError("controlled planning requires an enabled approval gate")
-        return {"plan_gate_decision": {"action": "skipped", "source": "config"}}
+        raise RuntimeError("controlled planning requires an enabled approval gate")
+
+    if (state.plan_gate_decision or {}).get("action") == "projection_amendment_pending":
+        return {
+            "plan_gate_decision": {
+                "action": "approve",
+                "revision": state.plan_gate_revision_count,
+            },
+            **seal_minimum_delivery_draft(state),
+        }
 
     while True:
         decision = interrupt(_build_plan_gate_payload(state))
@@ -265,60 +347,130 @@ async def plan_gate_node(state: TravelAgentState, config: Optional[RunnableConfi
             if not content:
                 logger.info("plan_gate: %s 缺少 content，重新 interrupt", action)
                 continue
-            revision = {"mode": action, "content": content}
-            if action == "supplement":
-                revision["base_plan_text"] = _serialize_plan_text(state)
+            amendment = IntentAmendment(
+                command_id=f"plan_gate_{state.run_id}_{revision_count + 1}",
+                category=action,
+                content=content,
+                source_kind="plan_gate_amendment",
+                impact=(
+                    AmendmentImpact.PROJECTION_ONLY
+                    if _projection_only_amendment(content)
+                    else AmendmentImpact.RESEARCH_AFFECTING
+                ),
+            )
             return {
-                "plan_revision": revision,
+                "plan_gate_amendment": amendment,
                 "plan_gate_decision": {
-                    "action": action,
+                    "action": "amendment",
                     "revision": revision_count + 1,
                 },
                 "plan_gate_revision_count": revision_count + 1,
-                "minimum_delivery_draft": None,
-                "run_deadline": None,
-                "run_budget": None,
-                "gate_failure_attributions": {},
-                "candidate_research_gaps": [],
-                "candidate_gate_attempts": {},
-                "candidate_gate_failure_signatures": {},
-                "composition_repair_attempts": 0,
-                "terminal_attribution": None,
+                **invalidation_update(amendment.impact),
             }
 
-        # approve only. Unknown actions are rejected above and re-interrupt
-        # (fail-closed; not treated as approve).
-        # 前端在确认时把用户累积的「追加信息 / 补充想法」一并放进 content，此处并入
-        # supplemental_requirements（append-only reducer），供 worker 系统提示消费——
-        # 不再走独立提交 / 重规划（DESIGN §8）。
-        approve_update: Dict[str, Any] = {
+        approve_content = str(decision.get("content") or "").strip()[:2000]
+        if approve_content:
+            if limit_reached:
+                logger.info(
+                    "plan_gate: 修改额度已用满，忽略 approve content，重新等待 approve/cancel"
+                )
+                continue
+            projection_only = _projection_only_amendment(approve_content)
+            amendment = IntentAmendment(
+                command_id=f"plan_gate_{state.run_id}_{revision_count + 1}",
+                category=("projection_only_approve" if projection_only else "approve_content"),
+                content=approve_content,
+                source_kind="plan_gate_amendment",
+                impact=(
+                    AmendmentImpact.PROJECTION_ONLY
+                    if projection_only
+                    else AmendmentImpact.RESEARCH_AFFECTING
+                ),
+            )
+            return {
+                "plan_gate_amendment": amendment,
+                "plan_gate_decision": {
+                    "action": (
+                        "projection_amendment_pending"
+                        if projection_only
+                        else "amendment"
+                    ),
+                    "revision": revision_count + 1,
+                },
+                "plan_gate_revision_count": revision_count + 1,
+                **invalidation_update(
+                    AmendmentImpact.PROJECTION_ONLY
+                    if projection_only
+                    else AmendmentImpact.RESEARCH_AFFECTING
+                ),
+            }
+        return {
             "plan_gate_decision": {
                 "action": "approve",
                 "revision": revision_count,
-            }
+            },
+            **seal_minimum_delivery_draft(state),
         }
-        approve_content = str(decision.get("content") or "").strip()[:2000]
-        if approve_content:
-            approve_update["supplemental_requirements"] = [
-                {"category": "user_supplement", "content": approve_content}
-            ]
-        if state.minimum_delivery_draft is not None:
-            approve_update.update(seal_minimum_delivery_draft(state))
-        return approve_update
 
 
 def route_after_plan_gate(state: TravelAgentState) -> str:
+    if state.pending_intent_amendments:
+        return NODE_INTENT_AMENDMENT_ROUTER
     decision = state.plan_gate_decision or {}
-    if decision.get("action") in ("edit", "supplement"):
-        return NODE_CONSTRAINT_NORMALIZER
+    if decision.get("action") in ("amendment", "projection_amendment_pending"):
+        return NODE_REQUEST_CONTRACT_NORMALIZER
     return NODE_DISPATCHER
 
 
 def route_after_destination(state: TravelAgentState) -> str:
     """destination_researcher 节点后的路由：触发 ask_user 则中断，否则回 dispatcher。"""
+    if state.pending_intent_amendments:
+        return NODE_INTENT_AMENDMENT_ROUTER
     if state.next_agent == "HALT":
         return "HALT"
     return "dispatcher"
+
+
+def _route_after_boundary(next_node: str):
+    def route(state: TravelAgentState) -> str:
+        if state.pending_intent_amendments:
+            return NODE_INTENT_AMENDMENT_ROUTER
+        return next_node
+
+    return route
+
+
+def _route_after_dispatcher_with_amendments(state: TravelAgentState):
+    if state.pending_intent_amendments:
+        return NODE_INTENT_AMENDMENT_ROUTER
+    return route_after_dispatcher(state)
+
+
+def _route_after_candidate_gate_with_amendments(state: TravelAgentState) -> str:
+    if state.pending_intent_amendments:
+        return NODE_INTENT_AMENDMENT_ROUTER
+    return route_after_candidate_gate(state)
+
+
+def _route_after_artifact_gate_with_amendments(state: TravelAgentState) -> str:
+    if state.pending_intent_amendments:
+        return NODE_INTENT_AMENDMENT_ROUTER
+    return route_after_artifact_gate(state)
+
+
+def _route_after_delivery_quality_gate_with_amendments(
+    state: TravelAgentState,
+) -> str:
+    if state.pending_intent_amendments:
+        return NODE_INTENT_AMENDMENT_ROUTER
+    return route_after_delivery_quality_gate(state)
+
+
+def route_after_intent_amendment(state: TravelAgentState) -> str:
+    route = str(state.intent_amendment_route or "")
+    if not route:
+        raise RuntimeError("intent amendment router produced no continuation")
+    return route
 
 
 def build_travel_workflow() -> StateGraph:
@@ -336,10 +488,21 @@ def build_travel_workflow() -> StateGraph:
 
     # ── 注册所有节点 ──────────────────────────────────────────────────────
     graph.add_node(NODE_CLARIFIER, with_run_control(NODE_CLARIFIER, clarifier_node))
-    graph.add_node(NODE_BRIEF_GEN, with_run_control(NODE_BRIEF_GEN, brief_generator_node))
     graph.add_node(
-        NODE_CONSTRAINT_NORMALIZER,
-        with_run_control(NODE_CONSTRAINT_NORMALIZER, constraint_normalizer_node),
+        NODE_REQUEST_CONTRACT_NORMALIZER,
+        with_run_control(
+            NODE_REQUEST_CONTRACT_NORMALIZER, request_contract_normalizer_node
+        ),
+    )
+    graph.add_node(
+        NODE_RESEARCH_BRIEF_BUILDER,
+        with_run_control(NODE_RESEARCH_BRIEF_BUILDER, research_brief_builder_node),
+    )
+    graph.add_node(
+        NODE_INTENT_AMENDMENT_ROUTER,
+        with_run_control(
+            NODE_INTENT_AMENDMENT_ROUTER, intent_amendment_router_node
+        ),
     )
     graph.add_node(
         NODE_MINIMUM_DELIVERY_DRAFT,
@@ -389,18 +552,35 @@ def build_travel_workflow() -> StateGraph:
 
     # ── 固定边 ───────────────────────────────────────────────────────────
     graph.add_edge(START, NODE_CLARIFIER)
-    graph.add_edge(NODE_BRIEF_GEN, NODE_CONSTRAINT_NORMALIZER)
-    graph.add_edge(NODE_CONSTRAINT_NORMALIZER, NODE_MINIMUM_DELIVERY_DRAFT)
-    graph.add_edge(NODE_MINIMUM_DELIVERY_DRAFT, NODE_DESTINATION_GEO_RESOLVER)
-    graph.add_edge(NODE_DESTINATION_GEO_RESOLVER, NODE_WEATHER_CONTEXT_BUILDER)
-    graph.add_edge(NODE_WEATHER_CONTEXT_BUILDER, NODE_SUMMARY_CARD_BRIEF)
-    graph.add_edge(NODE_SUMMARY_CARD_BRIEF, NODE_PLANNER)
-    graph.add_edge(NODE_PLANNER, NODE_PLAN_GATE)
+    graph.add_edge(NODE_REQUEST_CONTRACT_NORMALIZER, NODE_RESEARCH_BRIEF_BUILDER)
+    for source, target in (
+        (NODE_RESEARCH_BRIEF_BUILDER, NODE_MINIMUM_DELIVERY_DRAFT),
+        (NODE_MINIMUM_DELIVERY_DRAFT, NODE_DESTINATION_GEO_RESOLVER),
+        (NODE_DESTINATION_GEO_RESOLVER, NODE_WEATHER_CONTEXT_BUILDER),
+        (NODE_WEATHER_CONTEXT_BUILDER, NODE_SUMMARY_CARD_BRIEF),
+        (NODE_SUMMARY_CARD_BRIEF, NODE_PLANNER),
+        (NODE_PLANNER, NODE_PLAN_GATE),
+        (NODE_BUDGET_ESTIMATE, NODE_DELIVERY_PROJECTOR),
+        (NODE_DELIVERY_PROJECTOR, NODE_DELIVERY_FINALIZER),
+    ):
+        graph.add_conditional_edges(
+            source,
+            _route_after_boundary(target),
+            {
+                NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
+                target: target,
+            },
+        )
     # 预算估算在投影之前：它往 workspace 上写一个数，报告/公共载荷/PDF 都从投影里读。
     # 它自己不会让交付失败——查不到就不写，那一行也就不出现。
-    graph.add_edge(NODE_BUDGET_ESTIMATE, NODE_DELIVERY_PROJECTOR)
-    graph.add_edge(NODE_DELIVERY_PROJECTOR, NODE_DELIVERY_FINALIZER)
-    graph.add_edge(NODE_DELIVERY_FINALIZER, END)
+    graph.add_conditional_edges(
+        NODE_DELIVERY_FINALIZER,
+        _route_after_boundary(END),
+        {
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
+            END: END,
+        },
+    )
 
     # destination_researcher 具备 HITL 能力（ask_user 工具）：若触发用户澄清则中断到 END，
     # 否则回 dispatcher 继续；其余 Worker 固定 fan-in 到 dispatcher
@@ -410,15 +590,23 @@ def build_travel_workflow() -> StateGraph:
         {
             "HALT": END,
             "dispatcher": NODE_DISPATCHER,
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
         },
     )
     for worker in (NODE_TRANSPORT, NODE_ACCOMMODATION, NODE_ITINERARY):
-        graph.add_edge(worker, NODE_DISPATCHER)
+        graph.add_conditional_edges(
+            worker,
+            _route_after_boundary(NODE_DISPATCHER),
+            {
+                NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
+                NODE_DISPATCHER: NODE_DISPATCHER,
+            },
+        )
 
     # ── scope_clarifier ───────────────────────────────────────────────────
     # 无条件边：clarifier 不再有 HALT 出口。基础旅行事实由受控身份带入，缺身份即
     # fail-closed 抛错（ScopeIdentityError），不存在「停下来问用户」这条分支。
-    graph.add_edge(NODE_CLARIFIER, NODE_BRIEF_GEN)
+    graph.add_edge(NODE_CLARIFIER, NODE_REQUEST_CONTRACT_NORMALIZER)
 
     # ── 条件边：dispatcher ─────────────────────────────────────────────────
     # dispatcher 完成后先过 typed artifact gate，再进入 deterministic quality gate。
@@ -426,15 +614,44 @@ def build_travel_workflow() -> StateGraph:
         NODE_PLAN_GATE,
         route_after_plan_gate,
         {
-            NODE_CONSTRAINT_NORMALIZER: NODE_CONSTRAINT_NORMALIZER,
+            NODE_REQUEST_CONTRACT_NORMALIZER: NODE_REQUEST_CONTRACT_NORMALIZER,
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
             NODE_DISPATCHER: NODE_DISPATCHER,
         },
     )
 
+    amendment_continuations = {
+        NODE_REQUEST_CONTRACT_NORMALIZER,
+        NODE_RESEARCH_BRIEF_BUILDER,
+        NODE_MINIMUM_DELIVERY_DRAFT,
+        NODE_DESTINATION_GEO_RESOLVER,
+        NODE_WEATHER_CONTEXT_BUILDER,
+        NODE_SUMMARY_CARD_BRIEF,
+        NODE_PLANNER,
+        NODE_PLAN_GATE,
+        NODE_DISPATCHER,
+        NODE_CANDIDATE_GATE,
+        NODE_DESTINATION,
+        NODE_TRANSPORT,
+        NODE_ACCOMMODATION,
+        NODE_ITINERARY,
+        NODE_ARTIFACT_GATE,
+        NODE_DELIVERY_QUALITY_GATE,
+        NODE_BUDGET_ESTIMATE,
+        NODE_DELIVERY_PROJECTOR,
+        NODE_DELIVERY_FINALIZER,
+    }
+    graph.add_conditional_edges(
+        NODE_INTENT_AMENDMENT_ROUTER,
+        route_after_intent_amendment,
+        {node: node for node in amendment_continuations},
+    )
+
     graph.add_conditional_edges(
         NODE_DISPATCHER,
-        route_after_dispatcher,
+        _route_after_dispatcher_with_amendments,
         {
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
             "to_check": NODE_ARTIFACT_GATE,
             NODE_CANDIDATE_GATE: NODE_CANDIDATE_GATE,
             NODE_DESTINATION: NODE_DESTINATION,
@@ -446,8 +663,9 @@ def build_travel_workflow() -> StateGraph:
 
     graph.add_conditional_edges(
         NODE_CANDIDATE_GATE,
-        route_after_candidate_gate,
+        _route_after_candidate_gate_with_amendments,
         {
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
             "passed": NODE_DISPATCHER,
             NODE_DESTINATION: NODE_DESTINATION,
             NODE_TRANSPORT: NODE_TRANSPORT,
@@ -459,8 +677,9 @@ def build_travel_workflow() -> StateGraph:
 
     graph.add_conditional_edges(
         NODE_ARTIFACT_GATE,
-        route_after_artifact_gate,
+        _route_after_artifact_gate_with_amendments,
         {
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
             "accepted": NODE_DELIVERY_QUALITY_GATE,
             # Typed Artifact Gate hands explicit provider/model content
             # failures to Candidate Gate, which owns its circuit/retry budget.
@@ -471,8 +690,9 @@ def build_travel_workflow() -> StateGraph:
 
     graph.add_conditional_edges(
         NODE_DELIVERY_QUALITY_GATE,
-        route_after_delivery_quality_gate,
+        _route_after_delivery_quality_gate_with_amendments,
         {
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
             "passed": NODE_BUDGET_ESTIMATE,
             "composition_repair": NODE_ITINERARY,
         },
