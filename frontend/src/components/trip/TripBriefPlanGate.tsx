@@ -54,8 +54,8 @@ interface SupplementRow {
  *   所以这个文件一行 Esc 都不写。
  * - `cancel`「取消规划」—— 两步 `ui/ConfirmAction`，走 `RunCancelled` 收束链。
  *
- * `revision` / `revisionLimit` / `revisionLimitReached` **不**决定按钮集，只负责把按钮集的
- * 理由说出来（`planGateBudgetCopy`）。按钮集只能由后端的 `decisionOptions` 决定：界面里
+ * `revision` / `revisionLimit` **不**决定按钮集，只在还能改时说出还剩几次
+ * （`planGateBudgetCopy`）。按钮集只能由后端的 `decisionOptions` 决定：界面里
  * 发不出 `edit` 时，额度若当第二个 owner 就会永远用不掉、那条分支不可达，而
  * `decisionOptions` 会广告一个客户端发不出的 `edit`。
  */
@@ -355,9 +355,8 @@ export const TripBriefPlanGate: React.FC = () => {
       )}
 
       {/*
-        修改额度那一行。它**不**决定下面有哪几个键（那是 `decisionOptions` 的活），它只
-        说出理由：第二轮的卡片如果只是默默少了两个键，用户读不出「修改额度用完了」。
-        没话说时整行不印（`planGateBudgetCopy` 返回 null）。
+        修改额度那一行。它**不**决定下面有哪几个键（那是 `decisionOptions` 的活），只在
+        还能改时说出还剩几次。没话说时整行不印（`planGateBudgetCopy` 返回 null）。
       */}
       {budgetCopy && (
         <p data-testid="plan-gate-revision-budget" className="mt-4 text-[13px] leading-relaxed text-ink-muted">

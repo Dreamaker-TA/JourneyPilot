@@ -24,9 +24,8 @@ import type { TripSupplementCategory } from '../types/api';
  *   唯一映射，组件不许再自己判一次。后端广告什么，屏幕上就有什么；反之，屏幕上没有的
  *   动作后端也不许广告：广告出来的每个动作都真的被 `plan_gate_node` 接受，
  *   不会被重新 interrupt。
- * - **额度还剩多少、为什么少了两个键：`revision` / `revisionLimit` /
- *   `revisionLimitReached`。** 它们**不**决定按钮集，只负责把按钮集的理由说出来 ——
- *   第二轮的卡片如果只是默默少两个键，用户读不出「修改额度用完了」这件事。
+ * - **额度还剩多少：`revision` / `revisionLimit`。** 它们**不**决定按钮集，只在还能改时
+ *   说出还剩几次；额度用满那一轮不说话。
  * - **用户写的要求怎么变成一段 content：`composeRequirementContent`，只此一处。**
  *   `approve` 与 `supplement` 走同一段文本：前者把它并进 worker 系统提示，后者把它送回
  *   planner 重规划。两处各拼一遍，就会出现「补充想法在批准时算、在重规划时不算」这种
@@ -108,18 +107,14 @@ export function planGateRevisionsLeft(
 /**
  * 修改额度那一行要说的话；没有话说时是 `null`（不印一行「剩余 0 次」的废话）。
  *
- * 两种情况才有话说：
- * - 额度已用满 —— 必须说，否则第二轮的卡片只是默默少了两个键。
- * - 还能改，而且这一轮真的广告了修改入口 —— 说清还剩几次，用户才知道这一次值不值得花。
+ * 只在这一轮真的广告了修改入口、且还剩额度时说话：说清还剩几次，用户才知道这一次值不值得花。
+ * 额度用满那一轮不说话，卡片只留确认与取消。
  */
 export function planGateBudgetCopy(
-  gate: Pick<PlanApprovalGate, 'decisionOptions' | 'status' | 'revision' | 'revisionLimit' | 'revisionLimitReached'>,
+  gate: Pick<PlanApprovalGate, 'decisionOptions' | 'status' | 'revision' | 'revisionLimit'>,
 ): string | null {
   if (gate.status === 'cancelled') return null;
   const entries = planGateEntries(gate);
-  if (gate.revisionLimitReached) {
-    return '这份计划已经按你的要求改过了，本次规划的修改额度到此为止 —— 请确认它，或取消本次运行。';
-  }
   if (!entries.edit && !entries.supplement) return null;
   const left = planGateRevisionsLeft(gate);
   if (left <= 0) return null;
