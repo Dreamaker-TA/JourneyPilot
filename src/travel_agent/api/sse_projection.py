@@ -133,14 +133,21 @@ def public_plan_gate_payload(payload: Any) -> Dict[str, Any]:
             ],
         },
         "plan_text": payload.get("plan_text"),
-        "must_obey": [
-            {
-                "constraint_id": item.get("constraint_id"),
-                "public_summary": item.get("public_summary"),
-            }
-            for item in (payload.get("must_obey") or [])
-            if isinstance(item, Mapping)
-        ],
+        "recognized_requirements": {
+            key: [
+                {
+                    "requirement_id": item.get("requirement_id"),
+                    "summary": item.get("summary"),
+                }
+                for item in (
+                    payload.get("recognized_requirements", {}).get(key, [])
+                    if isinstance(payload.get("recognized_requirements"), Mapping)
+                    else []
+                )
+                if isinstance(item, Mapping)
+            ]
+            for key in ("hard", "preferences", "attention")
+        },
         "decision_options": payload.get("decision_options"),
     }
 

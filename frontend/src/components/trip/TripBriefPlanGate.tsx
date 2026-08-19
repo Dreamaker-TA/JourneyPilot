@@ -173,6 +173,12 @@ export const TripBriefPlanGate: React.FC = () => {
     }
   };
 
+  const requirementGroups = [
+    { key: 'hard', label: '硬要求', items: gate.recognizedRequirements.hard },
+    { key: 'preferences', label: '偏好与侧重', items: gate.recognizedRequirements.preferences },
+    { key: 'attention', label: '需要注意', items: gate.recognizedRequirements.attention },
+  ].filter((group) => group.items.length > 0);
+
   return (
     <m.section
       data-testid="trip-brief-plan-gate"
@@ -220,29 +226,28 @@ export const TripBriefPlanGate: React.FC = () => {
         })}
       </div>
 
-      {/*
-        本轮必须遵守。计划门算好了这几条硬约束、`sse_projection` 也逐字段下发，用户在这一屏
-        按下「确认」时能看到系统声称本轮必须遵守什么。
-
-        只印后端已经写成 人话的 `public_summary`：后端这一帧也不再下发 `category`
-        （`budget_cap`）与 `enforcement_scope`（`composition`）—— 系统词不上屏。
-        位置在任务列表**之后、确认键之前**：它是批准这份计划的前提，不是计划的一部分。
-      */}
-      {gate.mustObey.length > 0 && (
+      {requirementGroups.length > 0 && (
         <section className="mt-4 rounded-card border border-stroke bg-surface/30 px-3 py-2.5">
-          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">本轮必须遵守</h3>
-          <ul className="mt-1.5 space-y-1.5">
-            {gate.mustObey.map((item) => (
-              <li
-                key={item.constraintId}
-                data-must-obey={item.constraintId}
-                className="flex items-baseline gap-2 text-[13px] leading-relaxed text-ink-secondary"
-              >
-                <span aria-hidden className="mt-[0.35em] h-1 w-1 shrink-0 rounded-full bg-accent" />
-                <span className="min-w-0 flex-1 break-words">{item.summary}</span>
-              </li>
+          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">系统识别到的要求</h3>
+          <div className="mt-2 space-y-3">
+            {requirementGroups.map((group) => (
+              <div key={group.key} data-requirement-group={group.key}>
+                <p className="text-xs font-medium text-ink">{group.label}</p>
+                <ul className="mt-1 space-y-1.5">
+                  {group.items.map((item) => (
+                    <li
+                      key={item.requirementId}
+                      data-requirement={item.requirementId}
+                      className="flex items-baseline gap-2 text-[13px] leading-relaxed text-ink-secondary"
+                    >
+                      <span aria-hidden className="mt-[0.35em] h-1 w-1 shrink-0 rounded-full bg-accent" />
+                      <span className="min-w-0 flex-1 break-words">{item.summary}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ))}
-          </ul>
+          </div>
         </section>
       )}
 

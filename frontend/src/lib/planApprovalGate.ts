@@ -1,7 +1,8 @@
 import type {
   PlanApprovalGate,
   PlanGateDecisionAction,
-  PlanGateMustObey,
+  PlanGateRecognizedRequirements,
+  PlanGateRequirement,
   PlanGateStep,
 } from '../types/chat';
 
@@ -14,26 +15,27 @@ import type {
  */
 export const PLAN_GATE_ACTIONS: PlanGateDecisionAction[] = ['approve', 'edit', 'supplement', 'cancel'];
 
-/**
- * 「本轮必须遵守」的归一。
- *
- * 只取 `constraint_id` 与 `public_summary`：那是这一屏会说出来的两样。缺任何一样的
- * 条目**整条不要** —— 一行没有内容的「必须遵守」比不显示更糟，它在屏幕上画出一条
- * 用户读不懂也没法照办的硬约束。后端已不再下发 `category` /
- * `enforcement_scope`。
- */
-function normalizeMustObey(raw: unknown): PlanGateMustObey[] {
+function normalizeRequirements(raw: unknown): PlanGateRequirement[] {
   if (!Array.isArray(raw)) return [];
-  const rows: PlanGateMustObey[] = [];
+  const rows: PlanGateRequirement[] = [];
   for (const entry of raw) {
     if (!entry || typeof entry !== 'object') continue;
     const row = entry as Record<string, unknown>;
-    const constraintId = String(row.constraint_id || '').trim();
-    const summary = String(row.public_summary || '').trim();
-    if (!constraintId || !summary) continue;
-    rows.push({ constraintId, summary });
+    const requirementId = String(row.requirement_id || '').trim();
+    const summary = String(row.summary || '').trim();
+    if (!requirementId || !summary) continue;
+    rows.push({ requirementId, summary });
   }
   return rows;
+}
+
+function normalizeRecognizedRequirements(raw: unknown): PlanGateRecognizedRequirements {
+  const source = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  return {
+    hard: normalizeRequirements(source.hard),
+    preferences: normalizeRequirements(source.preferences),
+    attention: normalizeRequirements(source.attention),
+  };
 }
 
 export function normalizePlanApprovalGate(
@@ -70,6 +72,6 @@ export function normalizePlanApprovalGate(
     steps,
     planText: String(payload.plan_text || ''),
     decisionOptions,
-    mustObey: normalizeMustObey(payload.must_obey),
+    recognizedRequirements: normalizeRecognizedRequirements(payload.recognized_requirements),
   };
 }

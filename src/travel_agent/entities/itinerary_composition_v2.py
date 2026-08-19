@@ -61,26 +61,34 @@ from .delivery_bundle import (
     classify_transport_projection_shape,
 )
 from .candidate_options import candidate_option_availability
+from .candidate_selection import CandidateSelectionPlan
+from .composition_mutation import CompositionMutation
 from .controlled_place_name import (
     CONTROLLED_DESTINATION_ANCHOR_PREFIX,
     controlled_public_place_name,
 )
 from .day_theme import derive_day_theme
 from .trip_highlights import derive_trip_highlights
+from .intent_coverage import IntentContractSnapshot
 
 logger = logging.getLogger(__name__)
 
 
 def _total_budget_cap_cny(anchors: Optional[list[UserInputAnchor]]) -> Optional[float]:
     for anchor in anchors or []:
-        if anchor.input_kind != "hard_constraint" or not isinstance(anchor.value, Mapping):
+        if anchor.input_kind != "hard_constraint" or not isinstance(
+            anchor.value, Mapping
+        ):
             continue
         if str(anchor.value.get("category") or "") != "budget_cap":
             continue
         params = anchor.value.get("params")
         if not isinstance(params, Mapping):
             continue
-        if str(params.get("currency") or "CNY").upper() != "CNY" or str(params.get("per") or "") != "total":
+        if (
+            str(params.get("currency") or "CNY").upper() != "CNY"
+            or str(params.get("per") or "") != "total"
+        ):
             continue
         amount = params.get("amount")
         if isinstance(amount, (int, float)) and amount >= 0:
@@ -186,7 +194,9 @@ class AuthoredRoute(StrictModel):
     the composition.
     """
 
-    mode: Literal["walk", "bike", "drive", "taxi", "ride_hailing", "metro", "bus", "tram"]
+    mode: Literal[
+        "walk", "bike", "drive", "taxi", "ride_hailing", "metro", "bus", "tram"
+    ]
     duration_minutes: int = Field(ge=1, le=360)
     selection_reason: str = Field(min_length=1)
 
@@ -292,7 +302,9 @@ class DayComposition(StrictModel):
     @model_validator(mode="after")
     def validate_time_structure(self) -> "DayComposition":
         if self.time_structure != ["morning", "lunch", "afternoon", "evening"]:
-            raise ValueError("composition day must retain the four canonical time blocks")
+            raise ValueError(
+                "composition day must retain the four canonical time blocks"
+            )
         return self
 
 
@@ -320,7 +332,9 @@ class ItineraryCompositionDraft(StrictModel):
                 if (key := placement_identity(placement)) is not None
             ]
             if len(placement_keys) != len(set(placement_keys)):
-                raise ValueError("an entry cannot be placed more than once in the same day")
+                raise ValueError(
+                    "an entry cannot be placed more than once in the same day"
+                )
             for placement in day.placements:
                 if placement.placement_kind in {"visit", "dining"}:
                     physical_days.setdefault(placement_identity(placement), []).append(
@@ -330,8 +344,12 @@ class ItineraryCompositionDraft(StrictModel):
                 end = getattr(placement, "planned_end", None)
                 if (start is None) != (end is None):
                     raise ValueError("scheduled placement requires both start and end")
-                if start is not None and (end <= start or start.date() != day.date or end.date() != day.date):
-                    raise ValueError("placement schedule must be ordered within its local day")
+                if start is not None and (
+                    end <= start or start.date() != day.date or end.date() != day.date
+                ):
+                    raise ValueError(
+                        "placement schedule must be ordered within its local day"
+                    )
             scheduled = [
                 placement
                 for placement in day.placements
@@ -346,9 +364,7 @@ class ItineraryCompositionDraft(StrictModel):
                         f"leave a {MIN_LOCAL_TRANSFER_MINUTES}-minute transfer window"
                     )
         repeated_physical = {
-            key: day_ids
-            for key, day_ids in physical_days.items()
-            if len(day_ids) > 1
+            key: day_ids for key, day_ids in physical_days.items() if len(day_ids) > 1
         }
         if repeated_physical:
             raise ValueError(
@@ -381,9 +397,9 @@ class LocalConnectorGap(StrictModel):
     to_place_id: str = Field(min_length=1)
     departure_time: datetime
     latest_arrival_time: datetime
-    allowed_transport_classes: list[
-        Literal["public_transit", "flexible"]
-    ] = Field(min_length=1, max_length=2)
+    allowed_transport_classes: list[Literal["public_transit", "flexible"]] = Field(
+        min_length=1, max_length=2
+    )
     requested_flexible_modes: list[FlexibleRouteMode] = Field(default_factory=list)
     preferred_transport_class: Literal["public_transit", "flexible"]
     weather_data_revision: int = Field(ge=0)
@@ -410,8 +426,13 @@ class LocalConnectorGap(StrictModel):
             and self.requested_flexible_modes
         ):
             raise ValueError("flexible modes require the flexible transport class")
-        if self.departure_time.utcoffset() is None or self.latest_arrival_time.utcoffset() is None:
-            raise ValueError("connector gap times must include the destination UTC offset")
+        if (
+            self.departure_time.utcoffset() is None
+            or self.latest_arrival_time.utcoffset() is None
+        ):
+            raise ValueError(
+                "connector gap times must include the destination UTC offset"
+            )
         if (
             self.departure_time.date() != self.day_date
             or self.latest_arrival_time.date() != self.day_date
@@ -422,7 +443,9 @@ class LocalConnectorGap(StrictModel):
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
-    digest = hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()[:16]
+    digest = hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()[
+        :16
+    ]
     return f"{prefix}_{digest}"
 
 
@@ -574,9 +597,7 @@ def map_authored_places(
             ):
                 updated = replace(placement.authored_place)
                 if updated is not placement.authored_place:
-                    placement = placement.model_copy(
-                        update={"authored_place": updated}
-                    )
+                    placement = placement.model_copy(update={"authored_place": updated})
             placements.append(placement)
         days.append(day.model_copy(update={"placements": placements}))
     return composition.model_copy(update={"days": days})
@@ -863,9 +884,7 @@ def validate_placement_skeleton(
     catalog: RecommendationCatalog,
     *,
     required_candidate_kinds: Optional[set[str]] = None,
-    required_long_distance_legs: Optional[
-        list["ProviderRouteLegScope"]
-    ] = None,
+    required_long_distance_legs: Optional[list["ProviderRouteLegScope"]] = None,
     required_leg_scope_ids: Optional[dict[str, str]] = None,
 ) -> None:
     """Validate physical ordering before any local connector research exists."""
@@ -1092,7 +1111,9 @@ def day_chain_node_pairs(
 def day_connector_adjacencies(
     day: DayComposition,
     candidates: Mapping[str, ResearchCandidate],
-) -> list[tuple[CompositionPlacement, CompositionPlacement, str, str, datetime, datetime]]:
+) -> list[
+    tuple[CompositionPlacement, CompositionPlacement, str, str, datetime, datetime]
+]:
     """Every adjacency on one Day that owes a local connector, with its endpoints.
 
     A Day's *chain nodes* are its physical stops **and** its long-distance anchor,
@@ -1150,7 +1171,14 @@ def day_connector_adjacencies(
             # mistake, not a real shape.
             continue
         adjacencies.append(
-            (left, right, from_place_id, to_place_id, departure_time, latest_arrival_time)
+            (
+                left,
+                right,
+                from_place_id,
+                to_place_id,
+                departure_time,
+                latest_arrival_time,
+            )
         )
     return adjacencies
 
@@ -1275,7 +1303,8 @@ def connector_mode_requests_from_constraint_pack(
         # 这两道闸都不该被拆：拆掉任何一道，来源白名单就会放它进来。
         and any(
             isinstance(ref, Mapping)
-            and ref.get("source") in {"memory_fact", "manual_profile", "session_anchor", "current_query"}
+            and ref.get("source")
+            in {"memory_fact", "manual_profile", "session_anchor", "current_query"}
             for ref in item.get("source_refs") or []
         )
     ]
@@ -1289,6 +1318,7 @@ def connector_mode_requests_from_constraint_pack(
         "session_anchor": 2,
         "current_query": 3,
     }
+
     def item_source_priority(item: Mapping[str, Any]) -> int:
         return max(
             (
@@ -1299,13 +1329,13 @@ def connector_mode_requests_from_constraint_pack(
             default=-1,
         )
 
-    items.sort(key=lambda item: (item_source_priority(item), str(item.get("updated_at") or "")))
+    items.sort(
+        key=lambda item: (item_source_priority(item), str(item.get("updated_at") or ""))
+    )
     requested: dict[tuple[str, str], list[FlexibleRouteMode]] = {}
     required: set[tuple[str, str]] = set()
     locked_by_pair: dict[tuple[str, str], str] = {}
-    excluded: dict[tuple[str, str], set[str]] = {
-        pair: set() for pair in actual_pairs
-    }
+    excluded: dict[tuple[str, str], set[str]] = {pair: set() for pair in actual_pairs}
     for item in items:
         params = item.get("params")
         if not isinstance(params, Mapping):
@@ -1314,7 +1344,9 @@ def connector_mode_requests_from_constraint_pack(
             str(params.get("from_candidate_id") or ""),
             str(params.get("to_candidate_id") or ""),
         )
-        explicit_pair = tuple(f"candidate:{value}" if value else "" for value in raw_pair)
+        explicit_pair = tuple(
+            f"candidate:{value}" if value else "" for value in raw_pair
+        )
         target_pairs = (
             [explicit_pair]
             if all(explicit_pair) and explicit_pair in actual_pairs
@@ -1329,14 +1361,10 @@ def connector_mode_requests_from_constraint_pack(
         if not isinstance(raw_excluded_modes, list):
             raw_excluded_modes = []
         preferred_modes = [
-            mode
-            for mode in raw_preferred_modes
-            if mode in _FLEXIBLE_ROUTE_MODES
+            mode for mode in raw_preferred_modes if mode in _FLEXIBLE_ROUTE_MODES
         ]
         excluded_modes = {
-            mode
-            for mode in raw_excluded_modes
-            if mode in _FLEXIBLE_ROUTE_MODES
+            mode for mode in raw_excluded_modes if mode in _FLEXIBLE_ROUTE_MODES
         }
         locked_mode = str(params.get("locked_local_mode") or "")
         if locked_mode not in _FLEXIBLE_ROUTE_MODES:
@@ -1408,8 +1436,9 @@ def connector_candidate_quality_error(
         or candidate.to_endpoint.place_id != gap.to_place_id
     ):
         return "endpoint_mismatch"
-    if candidate.transport_class == "flexible" and candidate.selected_mode.value not in set(
-        gap.requested_flexible_modes
+    if (
+        candidate.transport_class == "flexible"
+        and candidate.selected_mode.value not in set(gap.requested_flexible_modes)
     ):
         return "flexible_mode_not_requested"
     # Route-intrinsic plausibility comes before anything about *this* gap: the
@@ -1422,9 +1451,7 @@ def connector_candidate_quality_error(
     if candidate.distance_meters is not None:
         if candidate.distance_meters <= 0 or candidate.distance_meters > 150_000:
             return "local_route_distance_implausible"
-        speed_kmh = candidate.distance_meters / 1000 / (
-            candidate.duration_minutes / 60
-        )
+        speed_kmh = candidate.distance_meters / 1000 / (candidate.duration_minutes / 60)
         speed_limits = {
             "walk": 12,
             "bike": 45,
@@ -1448,7 +1475,10 @@ def connector_candidate_quality_error(
     if (candidate.departure_at is None) != (candidate.arrival_at is None):
         return "route_half_scheduled"
     if candidate.departure_at is not None and candidate.arrival_at is not None:
-        if candidate.departure_at.utcoffset() is None or candidate.arrival_at.utcoffset() is None:
+        if (
+            candidate.departure_at.utcoffset() is None
+            or candidate.arrival_at.utcoffset() is None
+        ):
             return "route_timezone_missing"
         if (
             candidate.departure_at.date() != gap.day_date
@@ -1621,11 +1651,12 @@ def materialize_skeleton_connectors(
     validate_placement_skeleton(skeleton, catalog)
     candidates = _passed_candidates(catalog)
     gaps_by_pair = {
-        (gap.day_id, gap.from_entry_key, gap.to_entry_key): gap
-        for gap in gaps
+        (gap.day_id, gap.from_entry_key, gap.to_entry_key): gap for gap in gaps
     }
     if len(gaps_by_pair) != len(gaps):
-        raise ItineraryCompositionError("connector gaps must be unique per Day adjacency")
+        raise ItineraryCompositionError(
+            "connector gaps must be unique per Day adjacency"
+        )
     selected: dict[str, TransportCandidate | AuthoredRoute] = {}
     for gap in gaps:
         options = [
@@ -2088,7 +2119,9 @@ def _option(
         option_id=_stable_id("option", slot_id, candidate.candidate_id),
         selection_slot_id=slot_id,
         candidate_id=candidate.candidate_id,
-        candidate_entity_ref=EntityRef(entity_type=entity_type, entity_id=target_entity_id),
+        candidate_entity_ref=EntityRef(
+            entity_type=entity_type, entity_id=target_entity_id
+        ),
         rank=rank,
         selection_reasons=candidate.selection_reasons,
         tradeoff=candidate.tradeoff,
@@ -2103,13 +2136,18 @@ def _option(
 def _slot(
     *,
     selected: LodgingCandidate | DiningCandidate | VisitCandidate | TransportCandidate,
-    eligible: Sequence[LodgingCandidate | DiningCandidate | VisitCandidate | TransportCandidate],
+    eligible: Sequence[
+        LodgingCandidate | DiningCandidate | VisitCandidate | TransportCandidate
+    ],
     slot_id: str,
     target_entity_id: str,
     slot_type: SelectionSlotType,
     context: dict[str, object],
 ) -> SelectionSlot:
-    ordered = [selected, *[item for item in eligible if item.candidate_id != selected.candidate_id]][:3]
+    ordered = [
+        selected,
+        *[item for item in eligible if item.candidate_id != selected.candidate_id],
+    ][:3]
     options = [
         _option(item, slot_id=slot_id, target_entity_id=target_entity_id, rank=index)
         for index, item in enumerate(ordered, 1)
@@ -2147,7 +2185,10 @@ def _transport_alternatives(
     for candidate in candidates.values():
         if not isinstance(candidate, TransportCandidate):
             continue
-        if preference.locked_mode is not None and candidate.selected_mode != preference.locked_mode:
+        if (
+            preference.locked_mode is not None
+            and candidate.selected_mode != preference.locked_mode
+        ):
             continue
         if candidate.selected_mode in preference.excluded_modes:
             continue
@@ -2347,6 +2388,9 @@ def materialize_trip_workspace(
     workspace_revision: int,
     composition: ItineraryCompositionDraft,
     catalog: RecommendationCatalog,
+    intent_contract_snapshot: IntentContractSnapshot,
+    candidate_selection_plan: CandidateSelectionPlan,
+    composition_mutations: list[CompositionMutation],
     user_input_anchors: Optional[list[UserInputAnchor]] = None,
     reference_services: Optional[list[ProviderReferenceService]] = None,
 ) -> TripWorkspaceV2:
@@ -2412,7 +2456,9 @@ def materialize_trip_workspace(
                     continue
                 authored = _located_authored_place(placement)
                 if placement.placement_kind == "visit":
-                    item_id = _stable_id("visit", day.day_id, authored.resolved_place_id)
+                    item_id = _stable_id(
+                        "visit", day.day_id, authored.resolved_place_id
+                    )
                     visits.append(
                         VisitStop(
                             item_id=item_id,
@@ -2475,7 +2521,9 @@ def materialize_trip_workspace(
             candidate = candidates[placement.candidate_id]
             if placement.placement_kind == "visit":
                 if not isinstance(candidate, VisitCandidate):
-                    raise ItineraryCompositionError("visit placement references another candidate kind")
+                    raise ItineraryCompositionError(
+                        "visit placement references another candidate kind"
+                    )
                 item_id = _stable_id("visit", day.day_id, candidate.candidate_id)
                 # The slot id names the *place in the plan*, not the candidate
                 # standing in it, so swapping the candidate leaves the slot
@@ -2523,19 +2571,46 @@ def materialize_trip_workspace(
                         visit_highlights=candidate.highlights,
                     )
                 )
-                timeline.append(TimelineEntryRef(entry_id=_stable_id("entry", item_id), entity_type=EntityType.VISIT_STOP, entity_id=item_id))
+                timeline.append(
+                    TimelineEntryRef(
+                        entry_id=_stable_id("entry", item_id),
+                        entity_type=EntityType.VISIT_STOP,
+                        entity_id=item_id,
+                    )
+                )
             elif placement.placement_kind == "dining":
-                if not isinstance(candidate, DiningCandidate) or placement.meal_type not in candidate.meal_types:
-                    raise ItineraryCompositionError("dining placement does not match candidate meal domain")
-                item_id = _stable_id("dining", day.day_id, placement.meal_type, candidate.candidate_id)
+                if (
+                    not isinstance(candidate, DiningCandidate)
+                    or placement.meal_type not in candidate.meal_types
+                ):
+                    raise ItineraryCompositionError(
+                        "dining placement does not match candidate meal domain"
+                    )
+                item_id = _stable_id(
+                    "dining", day.day_id, placement.meal_type, candidate.candidate_id
+                )
                 slot_id = _stable_id("slot_dining", day.day_id, placement.meal_type)
                 eligible = [
-                    item for item in candidates.values()
+                    item
+                    for item in candidates.values()
                     if isinstance(item, DiningCandidate)
                     and item.destination_id == day.destination_id
                     and placement.meal_type in item.meal_types
                 ]
-                slots.append(_slot(selected=candidate, eligible=eligible, slot_id=slot_id, target_entity_id=item_id, slot_type="dining", context={"day_id": day.day_id, "meal_type": placement.meal_type, "destination_id": day.destination_id}))
+                slots.append(
+                    _slot(
+                        selected=candidate,
+                        eligible=eligible,
+                        slot_id=slot_id,
+                        target_entity_id=item_id,
+                        slot_type="dining",
+                        context={
+                            "day_id": day.day_id,
+                            "meal_type": placement.meal_type,
+                            "destination_id": day.destination_id,
+                        },
+                    )
+                )
                 dining.append(
                     DiningStop(
                         item_id=item_id,
@@ -2557,10 +2632,18 @@ def materialize_trip_workspace(
                         opening_window=candidate.opening_window,
                     )
                 )
-                timeline.append(TimelineEntryRef(entry_id=_stable_id("entry", item_id), entity_type=EntityType.DINING_STOP, entity_id=item_id))
+                timeline.append(
+                    TimelineEntryRef(
+                        entry_id=_stable_id("entry", item_id),
+                        entity_type=EntityType.DINING_STOP,
+                        entity_id=item_id,
+                    )
+                )
             else:
                 if not isinstance(candidate, TransportCandidate):
-                    raise ItineraryCompositionError("transport placement references another candidate kind")
+                    raise ItineraryCompositionError(
+                        "transport placement references another candidate kind"
+                    )
                 leg_id = (
                     _stable_id("transport", candidate.candidate_id)
                     if candidate.transport_class == "long_distance"
@@ -2700,7 +2783,9 @@ def materialize_trip_workspace(
     for candidate_id in composition.lodging_candidate_ids:
         candidate = candidates[candidate_id]
         if not isinstance(candidate, LodgingCandidate):
-            raise ItineraryCompositionError("lodging choice references another candidate kind")
+            raise ItineraryCompositionError(
+                "lodging choice references another candidate kind"
+            )
         window = _destination_stay_window(
             composition,
             candidate.destination_id,
@@ -2716,20 +2801,42 @@ def materialize_trip_workspace(
             continue
         check_in_date, check_out_date = window
         nights = (check_out_date - check_in_date).days
-        stay_id = _stable_id("lodging", candidate.destination_id, check_in_date, check_out_date)
+        stay_id = _stable_id(
+            "lodging", candidate.destination_id, check_in_date, check_out_date
+        )
         if stay_id in placed_stay_ids:
             continue
         placed_stay_ids.add(stay_id)
-        slot_id = _stable_id("slot_lodging", candidate.destination_id, check_in_date, check_out_date)
+        slot_id = _stable_id(
+            "slot_lodging", candidate.destination_id, check_in_date, check_out_date
+        )
         eligible = [
-            item for item in candidates.values()
+            item
+            for item in candidates.values()
             if isinstance(item, LodgingCandidate)
             and item.destination_id == candidate.destination_id
             and _destination_stay_window(
-                composition, item.destination_id, item.check_in_date, item.check_out_date
-            ) == window
+                composition,
+                item.destination_id,
+                item.check_in_date,
+                item.check_out_date,
+            )
+            == window
         ]
-        slots.append(_slot(selected=candidate, eligible=eligible, slot_id=slot_id, target_entity_id=stay_id, slot_type="lodging", context={"destination_id": candidate.destination_id, "check_in_date": check_in_date.isoformat(), "check_out_date": check_out_date.isoformat()}))
+        slots.append(
+            _slot(
+                selected=candidate,
+                eligible=eligible,
+                slot_id=slot_id,
+                target_entity_id=stay_id,
+                slot_type="lodging",
+                context={
+                    "destination_id": candidate.destination_id,
+                    "check_in_date": check_in_date.isoformat(),
+                    "check_out_date": check_out_date.isoformat(),
+                },
+            )
+        )
         lodging.append(
             LodgingStay(
                 stay_id=stay_id,
@@ -2802,7 +2909,9 @@ def materialize_trip_workspace(
     itinerary = StructuredItineraryV2(
         itinerary_id=composition.itinerary_id,
         title=composition.title,
-        destination_ids=list(dict.fromkeys(day.destination_id for day in composition.days)),
+        destination_ids=list(
+            dict.fromkeys(day.destination_id for day in composition.days)
+        ),
         duration_days=composition.duration_days,
         day_plans=day_plans,
         visit_stops=visits,
@@ -2842,7 +2951,8 @@ def materialize_trip_workspace(
                 (
                     item
                     for item in catalog.admission_results
-                    if item.candidate_id == option.candidate_id and item.status == "passed"
+                    if item.candidate_id == option.candidate_id
+                    and item.status == "passed"
                 ),
                 None,
             )
@@ -2850,18 +2960,21 @@ def materialize_trip_workspace(
                 raise ItineraryCompositionError(
                     "selection slot option lacks a passed candidate admission"
                 )
-            scoped = base.model_copy(update={"selection_slot_id": slot.selection_slot_id})
+            scoped = base.model_copy(
+                update={"selection_slot_id": slot.selection_slot_id}
+            )
             admissions.append(scoped)
             admission_index[key] = scoped
-    catalog = catalog.model_copy(
-        update={"admission_results": admissions}
-    )
+    catalog = catalog.model_copy(update={"admission_results": admissions})
     return TripWorkspaceV2(
         run_id=run_id,
         generation_id=catalog.generation_id,
         workspace_revision=workspace_revision,
         itinerary=itinerary,
         recommendation_catalog=catalog,
+        intent_contract_snapshot=intent_contract_snapshot,
+        composition_mutations=composition_mutations,
+        candidate_selection_plan=candidate_selection_plan,
         user_input_anchors=user_input_anchors or [],
         selection_slots=slots,
     )

@@ -47,9 +47,15 @@ PostgreSQL + pgvector（最终事实）        Redis（缓存与快照）
 6. **候选门**：Admission 验证事实与硬 Constraint；Candidate Intent Evaluation、Ranking
    和 Selection 分别判断意图匹配、分层顺序与本次候选集合。缺少高优先级意图候选时，
    Candidate Gate 生成 Targeted Repair Query。
-7. **编排**：Itinerary Planner 只消费 `CandidateSelectionPlan` 允许的候选，不把整个
-   admitted Catalog 当成必须排入行程的清单。
-8. **交付**：一次原子提交写出唯一的 `DeliveryBundle`，所有面向用户的界面都是它的投影。
+7. **编排**：Itinerary Planner 只消费 `CandidateSelectionPlan` 允许的候选，按
+   `CompositionRule` 填充合法槽位，并记录每次确定性后处理的 `CompositionMutation`。
+8. **验收**：Intent Fidelity Gate 检查数量、频率、时段、顺序、硬排除和解释要求；缺口回到
+   对应所有者，预算耗尽的义务变成公开偏差，禁止型硬规则不能降级。
+9. **交付**：一次原子提交写出唯一的 v10 `DeliveryBundle`；Workspace 保存意图快照、选择计划、
+   变更台账和覆盖报告，所有面向用户的界面都是公共安全投影。
+
+默认选择是确定性的。只有明确的 Diversity/Alternatives Intent 才进入受控 Explore；seed 只在
+已通过事实准入和硬合同的近分候选之间生效，因此同 seed 可回放，硬要求不会随探索变化。
 
 计划门修改和运行中追加要求不直接改 prompt。它们先变成 `IntentAmendment`，
 回到同一个 Request Contract 边界，再按影响范围失效旧产物。

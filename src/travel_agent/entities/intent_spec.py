@@ -9,7 +9,7 @@ from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import Field, model_validator
 
-from .delivery_bundle import StrictModel
+from .contract_base import StrictModel
 
 
 INTENT_SPEC_VERSION = "journeypilot.intent_spec.v1"
@@ -229,7 +229,9 @@ class IntentSpec(StrictModel):
         if any(item.status == "active" for item in self.superseded_items):
             raise ValueError("superseded_items may not contain active intents")
         known_ids = set(identifiers)
-        if any(not set(conflict.intent_ids) <= known_ids for conflict in self.conflicts):
+        if any(
+            not set(conflict.intent_ids) <= known_ids for conflict in self.conflicts
+        ):
             raise ValueError("intent conflict references an unknown intent")
         return self
 

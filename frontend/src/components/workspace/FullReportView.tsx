@@ -21,6 +21,8 @@ import type {
 import { DayHeader } from './DayHeader';
 import { DayTimeline } from './DayTimeline';
 import { LabelledFactList, TripFactReadout } from './TripFactReadout';
+import { IntentExplanationList } from './IntentExplanationList';
+import type { EntityIntentExplanation } from '../../types/delivery';
 import { Neatline } from '../ui/Neatline';
 import { Postmark } from '../ui/Postmark';
 
@@ -229,10 +231,21 @@ function ReportTimelineSupplement({
   const reportSummary = block.summary.trim();
   const nodeSummary = node.summary?.trim() ?? '';
   const summaryIsAdditional = reportSummary && reportSummary !== block.title.trim() && reportSummary !== nodeSummary;
+  const intentExplanations = Array.isArray(block.details.intent_explanations)
+    ? block.details.intent_explanations.filter(
+      (item): item is EntityIntentExplanation => Boolean(
+        item
+        && typeof item === 'object'
+        && typeof (item as EntityIntentExplanation).label === 'string'
+        && typeof (item as EntityIntentExplanation).explanation === 'string',
+      ),
+    )
+    : [];
   return (
     <div data-testid={`report-timeline-supplement-${node.key}`} className="min-w-0">
       {summaryIsAdditional && <p className="mt-1 max-w-[68ch] break-words text-sm leading-6 text-ink-secondary">{reportSummary}</p>}
       <ReportEntryLines block={block} />
+      <IntentExplanationList items={intentExplanations} />
       {block.entity_kind !== 'custom' && block.citation_ids.length > 0 && renderCitations(block.citation_ids)}
       <EvidenceBasisChip basis={evidenceBasisForReportBlock(block, itinerary)} />
     </div>

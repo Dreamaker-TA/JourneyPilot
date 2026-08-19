@@ -7,7 +7,6 @@ import copy
 import json
 import logging
 import unicodedata
-from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +24,11 @@ from ...entities.delivery_bundle import (
     UserInputAnchor,
     VisitCandidate,
 )
+from ...entities.candidate_selection import CandidateSelectionPlan
+from ...entities.composition_mutation import CompositionMutation
+from ...entities.composition_rules import CompositionRule
+from ...entities.composition_rules import COMPOSITION_PROMPT_VERSION
+from ...entities.intent_coverage import IntentContractSnapshot
 from ...entities.itinerary_composition_v2 import (
     AUTHORED_ROUTE_CLASS_BY_MODE,
     MIN_LOCAL_TRANSFER_MINUTES,
@@ -55,7 +59,20 @@ from ...services.authored_place_resolution import (
     resolve_authored_place,
 )
 from ...services.geo_dispersion import itinerary_dispersion
-from ...services.candidate_selection import catalog_for_candidate_selection
+from ...services.candidate_selection import (
+    catalog_for_candidate_selection,
+    selected_candidate_capabilities,
+)
+from ...services.composition_rule_compiler import compile_composition_rules
+from ...services.composition_backfill import (
+    assert_never_violate_rules,
+    build_legal_open_slots,
+    order_backfill_candidates,
+)
+from ...services.composition_mutations import (
+    diff_composition_mutations,
+    mark_mutations_revalidated,
+)
 from ...entities.state import TravelAgentState, bounded_repair_context
 from ...models.router import get_model_router
 from ...models.strict_json_schema import as_strict_schema
@@ -90,12 +107,12 @@ _SERVER_OWNED_PLACE_FIELDS = (
 )
 
 
-def admitted_ids_by_kind(
+def selected_ids_by_kind(
     catalog: RecommendationCatalog,
     *,
     skeleton_only: bool = False,
 ) -> Dict[str, list[str]]:
-    """List admitted candidate ids per domain, ordered by descending fit."""
+    """List selected candidate ids per domain, ordered by descending fit."""
     candidate_index = catalog.candidate_index()
     fit_by_id: Dict[str, float] = {}
     for result in catalog.admission_results:
@@ -187,16 +204,16 @@ def authoring_domains(
     day_count: int,
     skeleton_only: bool = False,
 ) -> set[str]:
-    """Domains whose admitted candidates cannot cover the itinerary on their own.
+    """Domains whose selected candidates cannot cover the itinerary on their own.
 
     An empty catalog is the extreme case of under-coverage, not the only one:
-    every visit/dining entry is unique across the whole itinerary, so one admitted
+    every visit/dining entry is unique across the whole itinerary, so one selected
     dining option cannot fill a four-day trip no matter how it is placed.  Inviting
-    authoring never displaces an admitted candidate — the composition contract
-    still requires the admitted ones to be referenced — it only lets the planner
+    authoring never displaces a selected candidate — the composition contract
+    still requires the selected ones to be referenced — it only lets the planner
     write the entries the catalog cannot supply.
     """
-    ids_by_kind = admitted_ids_by_kind(catalog, skeleton_only=skeleton_only)
+    ids_by_kind = selected_ids_by_kind(catalog, skeleton_only=skeleton_only)
     domains = {
         kind
         for kind in ("visit", "dining")
@@ -212,7 +229,7 @@ def _composition_response_schema(
     *,
     skeleton_only: bool = False,
 ) -> Dict[str, Any]:
-    """Bind each placement branch to the admitted candidates of the same kind.
+    """Bind each placement branch to the selected candidates of the same kind.
 
     A domain with an empty catalog drops its ``candidate_id`` branch and opens
     the authoring branch instead, which requires a name, an address, and a city.
@@ -253,7 +270,7 @@ def _composition_response_schema(
         authored_schema["required"] = list(properties)
 
     ids_by_kind = (
-        admitted_ids_by_kind(catalog, skeleton_only=skeleton_only)
+        selected_ids_by_kind(catalog, skeleton_only=skeleton_only)
         if catalog is not None
         else None
     )
@@ -270,12 +287,12 @@ def _composition_response_schema(
             # The skeleton carries no local connectors at all.
             properties.pop("authored_route", None)
         if ids_by_kind is not None:
-            admitted = ids_by_kind[candidate_kind]
+            selected = ids_by_kind[candidate_kind]
             may_author = "authored_place" in properties or "authored_route" in properties
-            if admitted:
+            if selected:
                 properties["candidate_id"] = {
                     "anyOf": [
-                        {"type": "string", "enum": admitted},
+                        {"type": "string", "enum": selected},
                         {"type": "null"},
                     ]
                 }
@@ -308,8 +325,24 @@ def _placement_capabilities(
     catalog: RecommendationCatalog,
     *,
     skeleton_only: bool = False,
+    selection_plan: CandidateSelectionPlan | None = None,
 ) -> list[dict[str, Any]]:
     """Expose only typed placement facts needed to compose a legal topology."""
+    if selection_plan is not None:
+        selected, _alternatives = selected_candidate_capabilities(
+            catalog=catalog,
+            selection_plan=selection_plan,
+        )
+        return [
+            capability.model_dump(mode="json", exclude_none=True)
+            for capability in selected
+            if not (
+                skeleton_only
+                and capability.candidate_kind == "transport"
+                and capability.schedule_capabilities.get("transport_class")
+                != "long_distance"
+            )
+        ]
     candidate_index = catalog.candidate_index()
     fit_by_id: dict[str, Any] = {}
     for result in catalog.admission_results:
@@ -452,6 +485,13 @@ def _composition_repair_section(state: TravelAgentState) -> str:
         if locator:
             detail += f"，涉及 {locator}"
         lines.append(f"- 质量门阻塞项：{detail}")
+    fidelity_gaps = [gap for gap in state.intent_fidelity_gaps if gap.blocking]
+    for gap in fidelity_gaps[:_COMPOSITION_REPAIR_GAP_LIMIT]:
+        missing_days = gap.repair_context.get("missing_days") or []
+        detail = f"{gap.reason}（intent={gap.intent_id}）"
+        if missing_days:
+            detail += f"，缺失 Day {missing_days}"
+        lines.append(f"- 意图验收阻塞项：{detail}")
     if not lines:
         return ""
     body = "\n".join(lines)
@@ -510,9 +550,20 @@ def _composition_schema_json(
 
 
 def _composition_catalog_json(state: TravelAgentState) -> str:
-    """The Recommendation Catalog exactly as the prompt carries it."""
+    """Selected candidate facts exactly as the prompt carries them."""
+    if state.candidate_selection_plan is None:
+        raise ValueError("itinerary composition requires a Candidate Selection Plan")
+    candidate_index = state.recommendation_catalog.candidate_index()
+    candidate_ids = state.candidate_selection_plan.composition_candidate_ids()
     return json.dumps(
-        state.recommendation_catalog.model_dump(mode="json", exclude_none=True),
+        {
+            "generation_id": state.recommendation_catalog.generation_id,
+            "intent_spec_revision": state.recommendation_catalog.intent_spec_revision,
+            "candidates": [
+                candidate_index[candidate_id].model_dump(mode="json", exclude_none=True)
+                for candidate_id in sorted(candidate_ids)
+            ],
+        },
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -526,7 +577,88 @@ def _composition_capabilities_json(
         _placement_capabilities(
             state.recommendation_catalog,
             skeleton_only=skeleton_only,
+            selection_plan=state.candidate_selection_plan,
         ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _alternative_capabilities_json(state: TravelAgentState) -> str:
+    if state.candidate_selection_plan is None:
+        raise ValueError("itinerary composition requires a Candidate Selection Plan")
+    _selected, alternatives = selected_candidate_capabilities(
+        catalog=state.recommendation_catalog,
+        selection_plan=state.candidate_selection_plan,
+    )
+    return json.dumps(
+        [item.model_dump(mode="json", exclude_none=True) for item in alternatives],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _composition_rules(state: TravelAgentState) -> list[CompositionRule]:
+    if state.intent_spec is None:
+        raise ValueError("itinerary composition requires an IntentSpec")
+    return compile_composition_rules(state.intent_spec)
+
+
+def _composition_rules_json(state: TravelAgentState) -> str:
+    return json.dumps(
+        [rule.model_dump(mode="json") for rule in _composition_rules(state)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _intent_contract_json(state: TravelAgentState) -> str:
+    if state.intent_spec is None:
+        raise ValueError("itinerary composition requires an IntentSpec")
+    return json.dumps(
+        {
+            "schema_version": state.intent_spec.schema_version,
+            "intent_spec_id": state.intent_spec.intent_spec_id,
+            "revision": state.intent_spec.revision,
+            "generation_id": state.intent_spec.generation_id,
+            "content_hash": state.intent_spec.content_hash,
+            "objective_summary": state.intent_spec.objective_summary,
+            "active_items": [
+                item.model_dump(
+                    mode="json",
+                    exclude={"source_text", "source_span_start", "source_span_end"},
+                )
+                for item in state.intent_spec.active_items
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _minimum_delivery_json(state: TravelAgentState) -> str:
+    draft = state.minimum_delivery_draft
+    if draft is None:
+        raise ValueError("itinerary composition requires a Minimum Delivery Draft")
+    return json.dumps(
+        {
+            "generation_id": draft.planning_generation_id,
+            "intent_spec_revision": draft.intent_spec_revision,
+            "constraint_pack_revision": draft.constraint_pack_revision,
+            "day_shells": [item.model_dump(mode="json") for item in draft.day_shells],
+            "preserved_hard_intent_ids": draft.preserved_hard_intent_ids,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _previous_mutations_json(state: TravelAgentState) -> str:
+    return json.dumps(
+        [
+            mutation.model_dump(mode="json")
+            for mutation in state.composition_mutations[-20:]
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -558,8 +690,13 @@ def _composition_prompt(
     schema = _composition_schema_json(state, skeleton_only=skeleton_only)
     catalog = _composition_catalog_json(state)
     capabilities = _composition_capabilities_json(state, skeleton_only=skeleton_only)
+    alternatives = _alternative_capabilities_json(state)
+    rules = _composition_rules_json(state)
+    intent_contract = _intent_contract_json(state)
+    minimum_delivery = _minimum_delivery_json(state)
+    previous_mutations = _previous_mutations_json(state)
     _, assignment = resolve_agent_assignment(
-        state.agent_assignments or {}, _NODE_NAME, state.refinement_count
+        state.agent_assignments or {}, _NODE_NAME
     )
     brief = build_assignment_context(
         assignment=assignment,
@@ -575,7 +712,7 @@ def _composition_prompt(
         else "- 同一 Day 内相邻两个 Visit/Dining placement 之间必须插入一个 Transport placement："
         "这一对端点上只要有已准入的 public_transit / flexible 候选，就**必须**引用那个候选——"
         "它是 Provider 实测的线路、时长与票价，你写的是估计值，估计值不得顶替实测值。"
-        "只有这一对端点上没有任何已准入候选时，才用 authored_route 写出出行方式与门到门分钟数"
+        "只有这一对端点上没有任何已选主方案时，才用 authored_route 写出出行方式与门到门分钟数"
         "（端点由服务器按前后两个停留点自动填写）。候选只给时长不给时刻表是正常的——"
         "中国大陆的公交地铁按时长作答，时长本身就是这段路的事实。"
         "authored_route 的端点来自它前后紧邻的两个停留点，所以它只能作为这一段相邻关系里"
@@ -593,9 +730,9 @@ def _composition_prompt(
     if authoring_kinds:
         kind_labels = "、".join(sorted(authoring_kinds))
         authoring_contract = (
-            f"\n- 下列领域的已准入候选不足以覆盖整份行程，缺口由你直接撰写具名条目补足：{kind_labels}。"
-            "这些领域里已准入的候选必须先全部用上，撰写条目只用来补足剩下的天数与时段，"
-            "不得用撰写条目替换任何一个已准入候选。"
+            f"\n- 下列领域的已选主方案不足以覆盖整份行程，缺口由你直接撰写具名条目补足：{kind_labels}。"
+            "这些领域里已选的主方案必须先全部用上，撰写条目只用来补足剩下的天数与时段，"
+            "不得用撰写条目替换任何一个已选主方案。"
             "撰写条目必须是真实存在、可被地图检索到的地点，"
             "并同时给出 local_name、name、address（街道级地址）、city（所在城市），"
             "以及一句 selection_reason 说明为什么放在这一天这个时段。"
@@ -613,18 +750,19 @@ def _composition_prompt(
     if required_candidate_kinds:
         kind_labels = "、".join(sorted(required_candidate_kinds))
         required_kinds_contract = (
-            f"\n- 整份行程必须为下列每一种物理类型各放置至少一个已准入 candidate：{kind_labels}。"
+            f"\n- 整份行程必须为下列每一种物理类型各放置至少一个已选主方案：{kind_labels}。"
             "“每个 Day 至少含一个 Visit/Dining”指的是“非空”，绝不等于可以整份省略某一类型；"
             "只要 required 类型含 dining，就必须至少出现一个 DiningCandidate（用户明确要求美食），"
             "同理 visit 也必须至少出现一个。宁可减少同日停留点，也不得整类缺席。"
         )
     return f"""<role>
-你是 JourneyPilot 的行程组合器。你做候选选择、日期、顺序、当地时间与停留时长决策；已准入候选不足以覆盖行程的领域由你直接撰写具名条目补足。
+你是 JourneyPilot 的行程组合器。你做已选主方案的日期、顺序、当地时间与停留时长决策；已选主方案不足以覆盖行程的领域由你直接撰写具名条目补足。
 </role>
 
 <hard_contract>
 - 只输出一个可直接 json.loads 的 ItineraryCompositionDraft JSON 对象；禁止 Markdown、解释、旧通用信封或 activities[]。
-- 引用候选时只能引用 Recommendation Catalog 中 admission=passed、且由 JSON Schema 对当前 placement_kind 开放的 candidate_id：visit 只能选 VisitCandidate，dining 只能选 DiningCandidate，transport 只能选 TransportCandidate，lodging_candidate_ids 只能选 LodgingCandidate；禁止跨类型引用，也禁止复制或改写 candidate 的名称、价格、来源、交通 segments、营业事实或天气事实。
+- 引用候选时只能引用 CandidateSelectionPlan 选入主方案、且由 JSON Schema 对当前 placement_kind 开放的 candidate_id：visit 只能选 VisitCandidate，dining 只能选 DiningCandidate，transport 只能选 TransportCandidate，lodging_candidate_ids 只能选 LodgingCandidate；禁止跨类型引用，也禁止复制或改写 candidate 的名称、价格、来源、交通 segments、营业事实或天气事实。
+- Composition Rules 是本轮可执行意图合同。never_violate 规则不得违反；repair_then_deviate 规则无法落实时留给 Fidelity Gate 形成明确偏差；nonblocking_preference 只参与选择和排程，不得伪装成硬事实。
 - Placement Capabilities 给出每个候选的 budget_fit / weather_fit / constraint_fit（0–1）。同一领域内优先选择分值高的候选；weather_fit 低的户外项排到天气更好的一天，budget_fit 低的项让位给分值更高的同类。
 - 主方案直接适应【规划前天气事实】里的逐日 data_kind、降水概率与风力：forecast 日的恶劣条件必须反映在排序、时间或交通选择上。{authoring_contract}
 - 每个 Dining placement 必须选择具体门店并填写餐次；每个需要住宿的入住区间必须在 lodging_candidate_ids 选择具体 property。
@@ -643,11 +781,16 @@ def _composition_prompt(
 </hard_contract>
 
 <context>
+组合提示版本：{COMPOSITION_PROMPT_VERSION}
 任务：{task_desc}
-用户需求：{state.user_query}
+Intent Contract Snapshot：{intent_contract}
+Composition Rules：{rules}
+Minimum Delivery Day Shell：{minimum_delivery}
+Previous Composition Mutations：{previous_mutations}
 {brief}
-Recommendation Catalog：{catalog}
-Placement Capabilities：{capabilities}
+Selected Candidate Facts：{catalog}
+Selected Candidate Capabilities：{capabilities}
+Alternative Candidate Capabilities（只供修复路由判断，不得直接放入本轮行程）：{alternatives}
 </context>{repair_section}
 
 <json_schema>{schema}</json_schema>"""
@@ -691,6 +834,11 @@ def composition_prompt_segments(
     pieces: List[tuple[str, str]] = [
         ("catalog", _composition_catalog_json(state)),
         ("capabilities", _composition_capabilities_json(state, skeleton_only=skeleton_only)),
+        ("alternatives", _alternative_capabilities_json(state)),
+        ("composition_rules", _composition_rules_json(state)),
+        ("intent_contract", _intent_contract_json(state)),
+        ("minimum_delivery", _minimum_delivery_json(state)),
+        ("previous_mutations", _previous_mutations_json(state)),
         ("schema", _composition_schema_json(state, skeleton_only=skeleton_only)),
         (
             "brief",
@@ -698,7 +846,6 @@ def composition_prompt_segments(
                 assignment=resolve_agent_assignment(
                     state.agent_assignments or {},
                     _NODE_NAME,
-                    state.refinement_count,
                 )[1],
                 brief=state.research_brief,
                 intent_spec=state.intent_spec,
@@ -706,7 +853,6 @@ def composition_prompt_segments(
             ),
         ),
         ("repair_section", _composition_repair_section(state)),
-        ("user_query", state.user_query or ""),
         ("task_desc", task_desc),
     ]
     pieces.extend(_agent_context_pieces(state))
@@ -1628,7 +1774,7 @@ def _selected_long_distance_anchors(
     """
     candidate_index = catalog.candidate_index()
     selected: Dict[tuple[str, date, date], TransportCandidate] = {}
-    for candidate_id in admitted_ids_by_kind(catalog, skeleton_only=True)["transport"]:
+    for candidate_id in selected_ids_by_kind(catalog, skeleton_only=True)["transport"]:
         candidate = candidate_index[candidate_id]
         if (
             not isinstance(candidate, TransportCandidate)
@@ -1952,6 +2098,8 @@ def _backfill_skeleton_placements(
     payload: Dict[str, Any],
     catalog: RecommendationCatalog,
     required_candidate_kinds: set,
+    rules: List[CompositionRule],
+    selection_plan: CandidateSelectionPlan,
 ) -> None:
     """Complete the composition's placement skeleton without rewriting it.
 
@@ -2010,7 +2158,18 @@ def _backfill_skeleton_placements(
     logger.info("Composition drafted: %s", _shape())
     _prune_illegal_drafted_placements(days, passed, anchor_ids)
     _place_long_distance_anchors(days, passed, catalog)
-    _fill_remaining_placements(days, passed, catalog, required_candidate_kinds)
+    selected, _alternatives = selected_candidate_capabilities(
+        catalog=catalog,
+        selection_plan=selection_plan,
+    )
+    _fill_remaining_placements(
+        days,
+        passed,
+        catalog,
+        required_candidate_kinds,
+        rules=rules,
+        capabilities=selected,
+    )
     logger.info("Composition after backfill: %s", _shape())
     if lodgings and not payload.get("lodging_candidate_ids"):
         # One bed per city the traveller sleeps in, not "the first admitted one".
@@ -2199,8 +2358,11 @@ def _fill_remaining_placements(
     passed: Dict[str, Any],
     catalog: RecommendationCatalog,
     required_candidate_kinds: set,
+    *,
+    rules: List[CompositionRule],
+    capabilities: list[Any],
 ) -> None:
-    """Place the still-unplaced admitted candidates on the Days that have room.
+    """Place the still-unplaced selected candidates on the Days that have room.
 
     Room means an empty Day, and the exact-connector contract is what makes it mean
     that: a deterministically placed entry carries no local time, and two adjacent
@@ -2210,13 +2372,12 @@ def _fill_remaining_placements(
     composition already scheduled is the composition's job, not this pass's.
 
     Each empty Day takes one destination-matched candidate, preferring an uncovered
-    enforced kind, then an uncovered admitted one, so no domain is starved before
+    enforced kind, then an uncovered selected one, so no domain is starved before
     another gets a second entry.  This is also the whole safety net for a draft that
     placed nothing: every Day is then empty, so the same pass rebuilds the skeleton
     end to end.  An enforced kind still absent afterwards is placed regardless, and
     stays absent — a gate failure — when the catalog has nothing left to place.
     """
-    ids_by_kind = admitted_ids_by_kind(catalog, skeleton_only=True)
     placed_ids = {
         str(p.get("candidate_id"))
         for day in days
@@ -2224,12 +2385,12 @@ def _fill_remaining_placements(
         for p in (day.get("placements") or [])
         if isinstance(p, dict) and p.get("candidate_id")
     }
-    pool: Dict[str, List[tuple]] = defaultdict(list)
-    for kind in ("visit", "dining"):
-        for cid in ids_by_kind[kind]:
-            if cid in placed_ids:
-                continue
-            pool[passed[cid].destination_id].append((kind, cid))
+    selected = [
+        capability
+        for capability in capabilities
+        if capability.candidate_kind in {"visit", "dining"}
+        and capability.candidate_id in passed
+    ]
     covered: set = {
         p.get("placement_kind")
         for day in days
@@ -2241,7 +2402,7 @@ def _fill_remaining_placements(
     # Admission is the entitlement to a slot; enforcement only decides whose
     # absence fails the run.  Both physical domains that cleared Candidate Gate
     # are therefore offered a day before any domain gets a second one.
-    admitted_kinds = {kind for kind in ("visit", "dining") if ids_by_kind[kind]}
+    admitted_kinds = {item.candidate_kind for item in selected}
     anchor_day_ids = _anchor_day_ids(days, passed)
     fill_days = [
         day
@@ -2250,14 +2411,26 @@ def _fill_remaining_placements(
     ]
 
     def take(day: Dict[str, Any], wants: tuple[str, ...]) -> Optional[str]:
-        avail = pool.get(day.get("destination_id"), [])
+        slots = build_legal_open_slots({"days": [day]}, rules)
+        if not slots or slots[0].remaining_capacity <= 0:
+            return None
+        slot = slots[0]
+        avail = order_backfill_candidates(
+            [item for item in selected if item.candidate_id not in placed_ids],
+            slot,
+        )
         for want in wants:
-            idx = next((i for i, (k, _) in enumerate(avail) if k == want), None)
-            if idx is not None:
-                kind, cid = avail.pop(idx)
+            candidate = next(
+                (item for item in avail if item.candidate_kind == want),
+                None,
+            )
+            if candidate is not None:
+                kind = candidate.candidate_kind
+                cid = candidate.candidate_id
                 day.setdefault("placements", []).append(
                     _mk_skeleton_placement(kind, cid, passed[cid])
                 )
+                placed_ids.add(cid)
                 covered.add(kind)
                 return kind
         return None
@@ -2313,16 +2486,44 @@ def _apply_skeleton_backfill(
     content: str,
     catalog: RecommendationCatalog,
     required_candidate_kinds: set,
-) -> str:
+    *,
+    rules: List[CompositionRule],
+    selection_plan: CandidateSelectionPlan,
+    generation_id: str,
+) -> tuple[str, list[CompositionMutation]]:
     """Parse, deterministically backfill required skeleton placements, re-serialize."""
     try:
         payload = json.loads(content)
     except (TypeError, json.JSONDecodeError):
-        return content
+        return content, []
     if not isinstance(payload, dict):
-        return content
-    _backfill_skeleton_placements(payload, catalog, required_candidate_kinds)
-    return json.dumps(payload, ensure_ascii=False)
+        return content, []
+    before = copy.deepcopy(payload)
+    _backfill_skeleton_placements(
+        payload,
+        catalog,
+        required_candidate_kinds,
+        rules,
+        selection_plan,
+    )
+    selected, _alternatives = selected_candidate_capabilities(
+        catalog=catalog,
+        selection_plan=selection_plan,
+    )
+    intent_ids = {
+        capability.candidate_id: capability.matched_intent_ids
+        for capability in selected
+    }
+    mutations = diff_composition_mutations(
+        before=before,
+        after=payload,
+        generation_id=generation_id,
+        reason_code="slot_aware_skeleton_closeout",
+        created_by="slot_backfill",
+        intent_ids_by_entity=intent_ids,
+        rule_ids=[rule.rule_id for rule in rules],
+    )
+    return json.dumps(payload, ensure_ascii=False), mutations
 
 
 def _anchor_move_response_schema(
@@ -2730,7 +2931,7 @@ async def itinerary_planner_node(
             }
         )
     output_key, assignment = resolve_agent_assignment(
-        state.agent_assignments or {}, _NODE_NAME, state.refinement_count
+        state.agent_assignments or {}, _NODE_NAME
     )
     task_desc = str(assignment["objective"])
     required_candidate_kinds = {
@@ -2754,6 +2955,12 @@ async def itinerary_planner_node(
             state.user_query or ""
         ),
     )
+    composition_rules = _composition_rules(state)
+    selected_capabilities, _alternative_capabilities = selected_candidate_capabilities(
+        catalog=state.recommendation_catalog,
+        selection_plan=state.candidate_selection_plan,
+    )
+    new_mutations: list[CompositionMutation] = []
 
     try:
         deadline_update: Dict[str, Any] = {}
@@ -2816,11 +3023,15 @@ async def itinerary_planner_node(
             content = response.content if hasattr(response, "content") else response
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False)
-            content = _apply_skeleton_backfill(
+            content, backfill_mutations = _apply_skeleton_backfill(
                 content,
                 state.recommendation_catalog,
                 required_candidate_kinds,
+                rules=composition_rules,
+                selection_plan=state.candidate_selection_plan,
+                generation_id=state.intent_spec.generation_id,
             )
+            new_mutations.extend(backfill_mutations)
             try:
                 skeleton = _parse_exact_llm_composition(content, state)
                 skeleton = await locate_authored_composition(
@@ -2903,6 +3114,20 @@ async def itinerary_planner_node(
                         anchorless_day_ids=anchorless_day_ids,
                         catalog=state.recommendation_catalog,
                     )
+                    new_mutations.extend(
+                        diff_composition_mutations(
+                            before=normalized_payload,
+                            after=repaired_payload,
+                            generation_id=state.intent_spec.generation_id,
+                            reason_code="anchor_coverage_repair",
+                            created_by="composition_repair",
+                            intent_ids_by_entity={
+                                item.candidate_id: item.matched_intent_ids
+                                for item in selected_capabilities
+                            },
+                            rule_ids=[rule.rule_id for rule in composition_rules],
+                        )
+                    )
                     skeleton = _parse_exact_llm_composition(
                         json.dumps(repaired_payload, ensure_ascii=False),
                         state,
@@ -2945,6 +3170,11 @@ async def itinerary_planner_node(
                         state.constraint_pack_revision,
                     ),
                 )
+            assert_never_violate_rules(
+                skeleton.model_dump(mode="json"),
+                composition_rules,
+                selected_capabilities,
+            )
             flexible_requests, required_flexible_pairs = (
                 connector_mode_requests_from_constraint_pack(
                     skeleton,
@@ -2970,6 +3200,7 @@ async def itinerary_planner_node(
                 "candidate_gate_route": "candidate_gate",
                 "unlocatable_authored_places": sorted(unlocatable),
                 "composition_failure_context": None,
+                "composition_mutations": mark_mutations_revalidated(new_mutations),
             }
 
         if phase == "materialize_connectors":
@@ -3010,12 +3241,39 @@ async def itinerary_planner_node(
                 gaps,
                 authored_routes,
             )
+            new_mutations.extend(
+                diff_composition_mutations(
+                    before=state.placement_skeleton.model_dump(mode="json"),
+                    after=composition.model_dump(mode="json"),
+                    generation_id=state.intent_spec.generation_id,
+                    reason_code="connector_materialization",
+                    created_by="composition_repair",
+                    intent_ids_by_entity={
+                        item.candidate_id: item.matched_intent_ids
+                        for item in selected_capabilities
+                    },
+                    rule_ids=[rule.rule_id for rule in composition_rules],
+                )
+            )
+            assert_never_violate_rules(
+                composition.model_dump(mode="json"),
+                composition_rules,
+                selected_capabilities,
+            )
             stage = f"{phase}/workspace_materialization"
             workspace = materialize_trip_workspace(
                 run_id=state.run_id,
                 workspace_revision=0,
                 composition=composition,
                 catalog=state.recommendation_catalog,
+                intent_contract_snapshot=IntentContractSnapshot.from_intent_spec(
+                    state.intent_spec
+                ),
+                candidate_selection_plan=state.candidate_selection_plan,
+                composition_mutations=[
+                    *state.composition_mutations,
+                    *mark_mutations_revalidated(new_mutations),
+                ],
                 user_input_anchors=_draft_user_input_anchors(state),
                 reference_services=list(state.provider_reference_services),
             )
@@ -3029,6 +3287,7 @@ async def itinerary_planner_node(
                 "local_connector_gaps": gaps,
                 "unlocatable_authored_places": sorted(unlocatable),
                 "composition_failure_context": None,
+                "composition_mutations": mark_mutations_revalidated(new_mutations),
             }
 
         if state.candidate_gate_status != "passed" or state.recommendation_catalog is None:
@@ -3072,10 +3331,25 @@ async def itinerary_planner_node(
             composition = await locate_authored_composition(
                 composition, llm, state, unlocatable
             )
+            before_postprocessing = composition.model_dump(mode="json")
             composition = _drop_day_boundary_authored_connectors(composition)
             composition = _isolate_incompatible_long_distance_days(
                 composition,
                 state.recommendation_catalog,
+            )
+            new_mutations.extend(
+                diff_composition_mutations(
+                    before=before_postprocessing,
+                    after=composition.model_dump(mode="json"),
+                    generation_id=state.intent_spec.generation_id,
+                    reason_code="deterministic_topology_repair",
+                    created_by="deterministic_pruner",
+                    intent_ids_by_entity={
+                        item.candidate_id: item.matched_intent_ids
+                        for item in selected_capabilities
+                    },
+                    rule_ids=[rule.rule_id for rule in composition_rules],
+                )
             )
             validate_itinerary_transport_topology(
                 composition, state.recommendation_catalog
@@ -3187,7 +3461,8 @@ async def itinerary_planner_node(
                 for candidate_id in sorted(passed_ids)
             ]
             placement_capabilities = _placement_capabilities(
-                state.recommendation_catalog
+                state.recommendation_catalog,
+                selection_plan=state.candidate_selection_plan,
             )
             movable_candidate_ids = sorted(
                 candidate_id
@@ -3204,7 +3479,7 @@ async def itinerary_planner_node(
                     "content": (
                         "上一个 JSON 对象未通过 ItineraryCompositionDraft 语义校验。"
                         "只做一次行程决策修复：不得新增或改写 Catalog 现实事实；"
-                        "只能重新选择已准入 candidate、日期、顺序和时间。"
+                        "只能重新组合已选主方案的日期、顺序和时间。"
                         "同一 Day 内 placement candidate_id 必须唯一，同一 Visit/Dining candidate 在整份行程中也只能出现一次，"
                         "duration_days 必须等于 days 数量，"
                         "day 必须从 1 连续递增，时间必须落在各自当地日期内。"
@@ -3219,7 +3494,7 @@ async def itinerary_planner_node(
                         "相邻 Visit/Dining 之间必须使用 endpoint place_id 连续且首尾匹配的交通链，"
                         "并至少包含一个 public_transit 或 flexible connector；long_distance 不能单独替代。"
                         "移动实体后只保留仍与相邻实体 place_id 匹配的交通；无法连接时删除悬空或旧起终点路线，不得改写 endpoint。"
-                        f"已准入候选：{json.dumps(eligible_candidates, ensure_ascii=False)}。"
+                        f"已选主方案：{json.dumps(eligible_candidates, ensure_ascii=False)}。"
                         f"候选放置能力：{json.dumps(placement_capabilities, ensure_ascii=False)}。"
                         f"校验错误：{initial_error}"
                     ),
@@ -3286,6 +3561,20 @@ async def itinerary_planner_node(
                         anchorless_day_ids=anchorless_day_ids,
                         catalog=state.recommendation_catalog,
                     )
+                    new_mutations.extend(
+                        diff_composition_mutations(
+                            before=repair_input,
+                            after=repaired_payload,
+                            generation_id=state.intent_spec.generation_id,
+                            reason_code="anchor_coverage_repair",
+                            created_by="composition_repair",
+                            intent_ids_by_entity={
+                                item.candidate_id: item.matched_intent_ids
+                                for item in selected_capabilities
+                            },
+                            rule_ids=[rule.rule_id for rule in composition_rules],
+                        )
+                    )
                     composition = _parse_exact_llm_composition(
                         json.dumps(repaired_payload, ensure_ascii=False),
                         state,
@@ -3303,10 +3592,25 @@ async def itinerary_planner_node(
                 composition = await locate_authored_composition(
                     composition, llm, state, unlocatable
                 )
+                before_postprocessing = composition.model_dump(mode="json")
                 composition = _drop_day_boundary_authored_connectors(composition)
                 composition = _isolate_incompatible_long_distance_days(
                     composition,
                     state.recommendation_catalog,
+                )
+                new_mutations.extend(
+                    diff_composition_mutations(
+                        before=before_postprocessing,
+                        after=composition.model_dump(mode="json"),
+                        generation_id=state.intent_spec.generation_id,
+                        reason_code="deterministic_topology_repair",
+                        created_by="deterministic_pruner",
+                        intent_ids_by_entity={
+                            item.candidate_id: item.matched_intent_ids
+                            for item in selected_capabilities
+                        },
+                        rule_ids=[rule.rule_id for rule in composition_rules],
+                    )
                 )
                 validate_itinerary_transport_topology(
                     composition, state.recommendation_catalog
@@ -3315,12 +3619,25 @@ async def itinerary_planner_node(
                 raise ValueError(
                     f"itinerary composition semantic repair failed: {repair_error}"
                 ) from initial_error
+        assert_never_violate_rules(
+            composition.model_dump(mode="json"),
+            composition_rules,
+            selected_capabilities,
+        )
         stage = f"{phase}/workspace_materialization"
         workspace = materialize_trip_workspace(
             run_id=state.run_id,
             workspace_revision=0,
             composition=composition,
             catalog=state.recommendation_catalog,
+            intent_contract_snapshot=IntentContractSnapshot.from_intent_spec(
+                state.intent_spec
+            ),
+            candidate_selection_plan=state.candidate_selection_plan,
+            composition_mutations=[
+                *state.composition_mutations,
+                *mark_mutations_revalidated(new_mutations),
+            ],
             user_input_anchors=_draft_user_input_anchors(state),
             reference_services=list(state.provider_reference_services),
         )
@@ -3348,6 +3665,7 @@ async def itinerary_planner_node(
             "recommendation_catalog": workspace.recommendation_catalog,
             "unlocatable_authored_places": sorted(unlocatable),
             "composition_failure_context": None,
+            "composition_mutations": mark_mutations_revalidated(new_mutations),
         }
     except Exception as exc:
         # 带上 traceback：这是整个深度规划的终止点，只留一句话没法定位是哪一道校验。

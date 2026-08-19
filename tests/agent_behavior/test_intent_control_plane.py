@@ -9,6 +9,7 @@ from travel_agent.entities.intent_spec import (
     AlternativeIntentValue,
     CategoryIntentValue,
     IntentItem,
+    IntentConflict,
     IntentKind,
     IntentStrength,
     IntentTarget,
@@ -35,6 +36,7 @@ from travel_agent.services.intent_revision import build_request_contract_revisio
 from travel_agent.services.research_query_planner import build_research_query_plan
 from travel_agent.workflows import intent_amendments as intent_amendment_workflow
 from travel_agent.workflows.intent_amendments import apply_runtime_amendments
+from travel_agent.workflows.travel_planning import _build_plan_gate_payload
 
 
 def _identity():
@@ -223,12 +225,60 @@ def test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents()
     }
     assert hard_ids == owned_ids
     assert plan.execution_plan[-1] == ["itinerary_planner"]
-    assert all(assignment.generation_id == generation.generation_id for assignment in plan.assignments.values())
+    assert all(
+        assignment.generation_id == generation.generation_id
+        for assignment in plan.assignments.values()
+    )
     assert {
         query_id
         for assignment in plan.assignments.values()
         for query_id in assignment.research_query_ids
     } == set(query_plan.query_index())
+
+
+def test_plan_gate_separates_hard_preferences_and_attention():
+    contract, _generation = _contract()
+    hard = contract.intent_spec.active_items[0]
+    soft = contract.intent_spec.active_items[1].model_copy(
+        update={"intent_id": "intent_soft", "strength": IntentStrength.SOFT}
+    )
+    intent_spec = contract.intent_spec.model_copy(
+        update={
+            "active_items": [hard, soft],
+            "conflicts": [
+                IntentConflict(
+                    conflict_id="conflict_test",
+                    intent_ids=[hard.intent_id, soft.intent_id],
+                    conflict_type="direct_contradiction",
+                    blocking=False,
+                    user_visible_summary="两项要求需要取舍",
+                )
+            ],
+        }
+    )
+    payload = _build_plan_gate_payload(
+        SimpleNamespace(
+            execution_plan=[["destination_researcher"]],
+            agent_assignments={
+                "destination_researcher": {"objective": "research destinations"}
+            },
+            plan_gate_revision_count=0,
+            constraint_pack={"hard_constraints": []},
+            intent_spec=intent_spec,
+        )
+    )
+
+    recognized = payload["recognized_requirements"]
+    assert [item["requirement_id"] for item in recognized["hard"]] == [
+        hard.intent_id
+    ]
+    assert [item["requirement_id"] for item in recognized["preferences"]] == [
+        soft.intent_id
+    ]
+    assert recognized["attention"] == [
+        {"requirement_id": "conflict_test", "summary": "两项要求需要取舍"}
+    ]
+    assert "must_obey" not in payload
 
 
 @pytest.mark.asyncio

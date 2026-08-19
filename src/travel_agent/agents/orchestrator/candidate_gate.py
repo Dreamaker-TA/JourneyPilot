@@ -60,7 +60,10 @@ from ...services.candidate_admission import (
 )
 from ...services.candidate_intent_evaluation import evaluate_candidate_intents
 from ...services.candidate_ranking import rank_candidates
-from ...services.candidate_selection import build_candidate_selection_plan
+from ...services.candidate_selection import (
+    build_candidate_selection_plan,
+    selection_policy_from_intent_spec,
+)
 from ...models.router import get_model_router
 from ...services.constraint_applicability import (
     bind_candidate_constraint_gate_attestations,
@@ -162,7 +165,9 @@ class ProviderFailureSignal:
 class CandidateGateIntegrityError(RuntimeError):
     """A stale or malformed packet cannot safely enter Candidate admission."""
 
-    def __init__(self, reason_code: str, message: str, *, worker_kind: str | None = None):
+    def __init__(
+        self, reason_code: str, message: str, *, worker_kind: str | None = None
+    ):
         super().__init__(message)
         self.reason_code = reason_code
         self.worker_kind = worker_kind
@@ -324,11 +329,7 @@ def _packet_candidate_closure(
         if fact.entity_ref.entity_id in candidate_ids
     ]
     fact_ids = {fact.fact_assertion_id for fact in facts}
-    source_ids = {
-        link.source_record_id
-        for fact in facts
-        for link in fact.source_links
-    }
+    source_ids = {link.source_record_id for fact in facts for link in fact.source_links}
     sources = [
         source
         for source in packet.source_records
@@ -398,16 +399,14 @@ def _apply_candidate_caps(
     rows: list[tuple[int, str, ResearchDomain]] = []
     for packet in packets:
         discovery = {
-            record.candidate_id: record
-            for record in packet.candidate_discovery_records
+            record.candidate_id: record for record in packet.candidate_discovery_records
         }
         for candidate in packet.candidates:
             record = discovery[candidate.candidate_id]
-            priority = min(
-                origin_priority[origin.value]
-                for origin in record.origins
+            priority = min(origin_priority[origin.value] for origin in record.origins)
+            rows.append(
+                (priority, candidate.candidate_id, _candidate_domain(candidate))
             )
-            rows.append((priority, candidate.candidate_id, _candidate_domain(candidate)))
     rows.sort()
     kept: set[str] = set()
     counts: dict[ResearchDomain, int] = defaultdict(int)
@@ -420,7 +419,9 @@ def _apply_candidate_caps(
     capped: list[ResearchPacket] = []
     for packet in packets:
         candidates = [
-            candidate for candidate in packet.candidates if candidate.candidate_id in kept
+            candidate
+            for candidate in packet.candidates
+            if candidate.candidate_id in kept
         ]
         if candidates:
             capped.append(_packet_candidate_closure(packet, candidates))
@@ -438,7 +439,9 @@ def _target_ref(candidate: ResearchCandidate) -> EntityRef | TransportLegRef:
     return EntityRef(entity_type=entity_type, entity_id=candidate.candidate_id)
 
 
-def _weather_days(state: TravelAgentState, candidate: ResearchCandidate) -> list[WeatherDayContext]:
+def _weather_days(
+    state: TravelAgentState, candidate: ResearchCandidate
+) -> list[WeatherDayContext]:
     if state.weather_context is None:
         return []
     destination_days = sorted(
@@ -459,8 +462,7 @@ def _weather_days(state: TravelAgentState, candidate: ResearchCandidate) -> list
     ]
     if candidate.departure_at is not None or candidate.arrival_at is not None:
         return [
-            _scheduled_transport_weather_day(candidate, day)
-            for day in scheduled_days
+            _scheduled_transport_weather_day(candidate, day) for day in scheduled_days
         ]
     if candidate.transport_class == "long_distance":
         return [
@@ -563,9 +565,7 @@ def _scheduled_transport_weather_day(
         if item.apparent_temperature_c is not None
     ]
     wind_speeds = [
-        item.wind_speed_kph
-        for item in relevant
-        if item.wind_speed_kph is not None
+        item.wind_speed_kph for item in relevant if item.wind_speed_kph is not None
     ]
     return day.model_copy(
         update={
@@ -593,9 +593,7 @@ def _destination_country_codes(state: TravelAgentState) -> dict[str, str]:
     return {
         str(item.get("place_id") or ""): str(item.get("country_code") or "").casefold()
         for item in destinations
-        if isinstance(item, dict)
-        and item.get("place_id")
-        and item.get("country_code")
+        if isinstance(item, dict) and item.get("place_id") and item.get("country_code")
     }
 
 
@@ -618,9 +616,7 @@ def _recommended_tools(
     excluded_tools: set[str],
     domain: ResearchDomain,
 ) -> list[str]:
-    tools = [
-        tool for tool in _ALTERNATIVE_TOOLS[worker] if tool not in excluded_tools
-    ]
+    tools = [tool for tool in _ALTERNATIVE_TOOLS[worker] if tool not in excluded_tools]
     if worker == "transport_researcher":
         if domain != ResearchDomain.LONG_DISTANCE_TRANSPORT:
             return tools
@@ -651,7 +647,9 @@ def _recommended_tools(
 
 
 def _gap_id(*parts: object) -> str:
-    digest = hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()[:18]
+    digest = hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()[
+        :18
+    ]
     return f"candidate_gap_{digest}"
 
 
@@ -785,7 +783,9 @@ def build_candidate_catalog(
                 candidate,
                 fact_data_revision=state.fact_data_revision,
                 weather_data_revision=(
-                    state.weather_context.weather_data_revision if state.weather_context else 0
+                    state.weather_context.weather_data_revision
+                    if state.weather_context
+                    else 0
                 ),
                 weather_impacts=candidate_impacts,
                 weather_evaluated_dates=[
@@ -827,7 +827,9 @@ def build_candidate_catalog(
             gaps.extend(
                 _candidate_gaps(packet, candidate, admission.missing_field_paths)
             )
-        updated_packets.append(packet.model_copy(update={"candidates": updated_candidates}))
+        updated_packets.append(
+            packet.model_copy(update={"candidates": updated_candidates})
+        )
 
     catalog = RecommendationCatalog(
         generation_id=generation_id,
@@ -845,7 +847,11 @@ def build_candidate_catalog(
             for record in packet.candidate_discovery_records
         ],
     )
-    return catalog, list({item.weather_impact_id: item for item in impacts}.values()), gaps
+    return (
+        catalog,
+        list({item.weather_impact_id: item for item in impacts}.values()),
+        gaps,
+    )
 
 
 def _required_workers(state: TravelAgentState) -> set[str]:
@@ -888,7 +894,9 @@ def _intent_research_gaps(
             ResearchDomain.LONG_DISTANCE_TRANSPORT,
         ),
     }
-    intent_index = {intent.intent_id: intent for intent in state.intent_spec.active_items}
+    intent_index = {
+        intent.intent_id: intent for intent in state.intent_spec.active_items
+    }
     destination_ids = [
         str(destination.get("place_id") or "")
         for destination in (state.controlled_trip_identity or {}).get(
@@ -903,10 +911,7 @@ def _intent_research_gaps(
         if (
             intent is None
             or scope is None
-            or (
-                intent.strength is not IntentStrength.HARD
-                and intent.priority < 70
-            )
+            or (intent.strength is not IntentStrength.HARD and intent.priority < 70)
         ):
             continue
         matches = [
@@ -960,7 +965,8 @@ def _long_distance_gaps(
     admitted_scope_ids = {
         candidate.provider_evidence_scope_id
         for admission in catalog.admission_results
-        if admission.status == "passed" and admission.selection_slot_id is None
+        if admission.status == "passed"
+        and admission.selection_slot_id is None
         and isinstance(
             candidate := candidate_index[admission.candidate_id],
             TransportCandidate,
@@ -1059,9 +1065,7 @@ def _itinerary_coverage_gaps(
     entity.
     """
     planned_agents = {
-        strip_round_suffix(agent)
-        for group in state.execution_plan
-        for agent in group
+        strip_round_suffix(agent) for group in state.execution_plan for agent in group
     }
     if (
         "itinerary_planner" not in planned_agents
@@ -1130,7 +1134,9 @@ def _itinerary_coverage_gaps(
                 generation_id=state.planning_generation.generation_id,
                 reason="missing_candidate",
                 field_path="itinerary.day_coverage",
-                destination_id=destination_ids[0] if len(destination_ids) == 1 else None,
+                destination_id=destination_ids[0]
+                if len(destination_ids) == 1
+                else None,
             )
         )
     return gaps, shortfall
@@ -1192,7 +1198,11 @@ def _classify_candidate_gaps(
                     "attempted_signatures": list(
                         dict.fromkeys(
                             [
-                                *(prior.attempted_signatures if prior is not None else []),
+                                *(
+                                    prior.attempted_signatures
+                                    if prior is not None
+                                    else []
+                                ),
                                 *gap.attempted_signatures,
                             ]
                         )
@@ -1240,7 +1250,9 @@ def _record_attribution(
     retry_attempt: int = 0,
 ) -> Dict[str, GateFailureAttribution]:
     ids = list(dict.fromkeys(gap_ids))
-    draft_id = state.minimum_delivery_draft.draft_id if state.minimum_delivery_draft else None
+    draft_id = (
+        state.minimum_delivery_draft.draft_id if state.minimum_delivery_draft else None
+    )
     attribution = GateFailureAttribution(
         attribution_id=_stable_attribution_id(
             draft_id=draft_id,
@@ -1501,11 +1513,13 @@ def _research_gap_priority(gap: CandidateResearchGap) -> int:
     if gap.intent_id:
         return 0
     field_path = gap.field_path or ""
-    if field_path.startswith((
-        "candidate_kind.",
-        "transport_class.",
-        "itinerary.connector.",
-    )):
+    if field_path.startswith(
+        (
+            "candidate_kind.",
+            "transport_class.",
+            "itinerary.connector.",
+        )
+    ):
         return 0
     if gap.candidate_id:
         return 1
@@ -1555,8 +1569,7 @@ def _select_research_gap(
         (
             gap
             for gap in _ordered_research_gaps(gaps, blocked_workers)
-            if (gap.research_domain or ResearchDomain.VISIT)
-            not in unavailable_domains
+            if (gap.research_domain or ResearchDomain.VISIT) not in unavailable_domains
             and gap.status not in {"exhausted", "resolved"}
             and not _gap_research_exhausted(state, gap=gap)
         ),
@@ -1792,11 +1805,7 @@ def _passed_update(
         **base_update,
         "candidate_research_gaps": _mark_scoped_gaps_exhausted(
             gaps,
-            gap_ids=[
-                gap.gap_id
-                for gap in gaps
-                if gap.status != "resolved"
-            ],
+            gap_ids=[gap.gap_id for gap in gaps if gap.status != "resolved"],
             signatures=(),
         ),
         "candidate_gate_status": "passed",
@@ -1830,7 +1839,11 @@ def _catalog_contract_update(
     earlier in the same pass is equally durable.
     """
     accumulated = dict(base_update or {})
-    gap_ids = [f"catalog:{worker_kind}:{reason_code}"] if worker_kind else [f"catalog:{reason_code}"]
+    gap_ids = (
+        [f"catalog:{worker_kind}:{reason_code}"]
+        if worker_kind
+        else [f"catalog:{reason_code}"]
+    )
     return {
         **accumulated,
         "candidate_gate_status": "passed",
@@ -1946,6 +1959,10 @@ async def candidate_gate_node(
         ranking_scores=ranking_scores,
         duration_days=_trip_duration_days(state),
         destination_count=destination_count,
+        selection_policy=selection_policy_from_intent_spec(
+            state.intent_spec,
+            avoid_previous_candidate_ids=state.previous_selected_candidate_ids,
+        ),
     )
 
     packet_workers = {
@@ -2054,9 +2071,7 @@ async def candidate_gate_node(
         )
 
     planned_agents = {
-        strip_round_suffix(agent)
-        for group in state.execution_plan
-        for agent in group
+        strip_round_suffix(agent) for group in state.execution_plan for agent in group
     }
     gaps = _classify_candidate_gaps(
         gaps,
@@ -2162,9 +2177,11 @@ async def candidate_gate_node(
                 "agent_assignments": assignments,
             }
         try:
-            flexible_requests, required_flexible_pairs = connector_mode_requests_from_constraint_pack(
-                state.placement_skeleton,
-                state.constraint_pack,
+            flexible_requests, required_flexible_pairs = (
+                connector_mode_requests_from_constraint_pack(
+                    state.placement_skeleton,
+                    state.constraint_pack,
+                )
             )
             connector_gaps = extract_local_connector_gaps(
                 state.placement_skeleton,
@@ -2318,11 +2335,7 @@ async def candidate_gate_node(
     domain = primary_gap.research_domain or ResearchDomain.VISIT
     scoped_gaps = [primary_gap]
     connector_gap = next(
-        (
-            gap
-            for gap in unresolved_connector_gaps
-            if gap.gap_id == primary_gap.gap_id
-        ),
+        (gap for gap in unresolved_connector_gaps if gap.gap_id == primary_gap.gap_id),
         None,
     )
     # Every adjacency this round, not just the one that led it.  A route between
@@ -2350,9 +2363,7 @@ async def candidate_gate_node(
                 isinstance(scoped_candidate, TransportCandidate)
                 and scoped_candidate.transport_class == "long_distance"
             ):
-                long_distance_scope_id = (
-                    scoped_candidate.provider_evidence_scope_id
-                )
+                long_distance_scope_id = scoped_candidate.provider_evidence_scope_id
         scoped_assignments = build_provider_evidence_assignments(
             run_id=state.run_id,
             constraint_pack_revision=state.constraint_pack_revision,
@@ -2505,8 +2516,7 @@ async def candidate_gate_node(
                 update={"query_id": targeted_query.query_id}
             )
             gaps = [
-                primary_gap if gap.gap_id == primary_gap.gap_id else gap
-                for gap in gaps
+                primary_gap if gap.gap_id == primary_gap.gap_id else gap for gap in gaps
             ]
             researching_gaps = [
                 primary_gap.model_copy(update={"status": "researching"})
@@ -2674,7 +2684,9 @@ async def candidate_gate_node(
             reason_code=primary_gap.reason,
             domain=domain,
             gap_ids=[primary_gap.gap_id],
-            failure_signature=accumulated_signatures[-1] if accumulated_signatures else None,
+            failure_signature=accumulated_signatures[-1]
+            if accumulated_signatures
+            else None,
             retry_attempt=attempts[attempt_scope],
         ),
     }

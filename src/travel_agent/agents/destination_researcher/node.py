@@ -54,6 +54,7 @@ from ...services.product_requirements import (
 )
 from ..utils import (
     append_recent_history,
+    assignment_research_round,
     build_tool_context_from_state,
     compact_tool_content_for_model,
     exclude_tools,
@@ -1359,7 +1360,7 @@ async def destination_researcher_node(
 
     # ── 任务分配（支持精炼轮次 round suffix）─────────────────────────────
     output_key, assignment = resolve_agent_assignment(
-        state.agent_assignments or {}, _NODE_NAME, state.refinement_count
+        state.agent_assignments or {}, _NODE_NAME
     )
     research_brief_context = build_assignment_context(
         assignment=assignment,
@@ -1525,7 +1526,7 @@ async def destination_researcher_node(
         query_context={
             "objective": task_desc,
             "controlled_trip_identity": state.controlled_trip_identity or {},
-            "research_round": state.refinement_count,
+            "research_round": assignment_research_round(output_key),
         },
         generated_at=datetime.datetime.now(datetime.timezone.utc),
     )

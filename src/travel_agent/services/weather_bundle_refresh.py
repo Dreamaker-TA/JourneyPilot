@@ -40,6 +40,8 @@ from .candidate_readmission import (
     workspace_hard_constraint_pack,
 )
 from .weather_adjustment import build_weather_adjustment_proposals
+from .candidate_selection import rebind_candidate_selection_catalog_revision
+from .intent_verification import revalidate_workspace_intent
 from .weather_context_builder import WeatherContextBuildResult, WeatherContextBuilder
 from .weather_impact_engine import WeatherImpactEngine
 
@@ -126,9 +128,7 @@ def expired_weather_destination_ids(
             if not supporting_sources or all(
                 source is None
                 or source.provider_valid_until is None
-                or (
-                    _aware(source.provider_valid_until) <= now
-                )
+                or (_aware(source.provider_valid_until) <= now)
                 for source in supporting_sources
             ):
                 stale.add(day.destination_id)
@@ -145,7 +145,13 @@ def _coverage(days: Iterable[WeatherDayContext]) -> list[WeatherCoverage]:
         items = sorted(items, key=lambda item: item.date)
         available = [item.date for item in items if item.data_kind != "unavailable"]
         unavailable = [item.date for item in items if item.data_kind == "unavailable"]
-        status = "complete" if available and not unavailable else "partial" if available else "unavailable"
+        status = (
+            "complete"
+            if available and not unavailable
+            else "partial"
+            if available
+            else "unavailable"
+        )
         result.append(
             WeatherCoverage(
                 destination_id=destination_id,
@@ -159,7 +165,9 @@ def _coverage(days: Iterable[WeatherDayContext]) -> list[WeatherCoverage]:
     return sorted(result, key=lambda item: item.destination_id)
 
 
-def _merge_unique(items: Iterable[object], *, key: Callable[[object], str]) -> list[object]:
+def _merge_unique(
+    items: Iterable[object], *, key: Callable[[object], str]
+) -> list[object]:
     merged: dict[str, object] = {}
     for item in items:
         merged[key(item)] = item
@@ -192,27 +200,38 @@ def _fact_snapshot(
     )
 
 
-def _target_dates(bundle: DeliveryBundle) -> list[tuple[EntityRef, str, object, set[date]]]:
+def _target_dates(
+    bundle: DeliveryBundle,
+) -> list[tuple[EntityRef, str, object, set[date]]]:
     itinerary = bundle.workspace.itinerary
     candidates = bundle.workspace.recommendation_catalog.candidate_index()
-    day_dates = {day.day_id: day.date for day in itinerary.day_plans if day.date is not None}
+    day_dates = {
+        day.day_id: day.date for day in itinerary.day_plans if day.date is not None
+    }
     timeline_dates: dict[tuple[EntityType, str], set[date]] = {}
     for day in itinerary.day_plans:
         if day.date is None:
             continue
         for ref in day.timeline:
-            timeline_dates.setdefault((ref.entity_type, ref.entity_id), set()).add(day.date)
+            timeline_dates.setdefault((ref.entity_type, ref.entity_id), set()).add(
+                day.date
+            )
     targets: list[tuple[EntityRef, str, object, set[date]]] = []
-    entities = [
-        (EntityType.VISIT_STOP, item.item_id, item) for item in itinerary.visit_stops
-    ] + [
-        (EntityType.DINING_STOP, item.item_id, item) for item in itinerary.dining_stops
-    ] + [
-        (EntityType.LODGING_STAY, item.stay_id, item) for item in itinerary.lodging_stays
-    ] + [
-        (EntityType.TRANSPORT_LEG, item.transport_leg_id, item)
-        for item in itinerary.transport_legs
-    ]
+    entities = (
+        [(EntityType.VISIT_STOP, item.item_id, item) for item in itinerary.visit_stops]
+        + [
+            (EntityType.DINING_STOP, item.item_id, item)
+            for item in itinerary.dining_stops
+        ]
+        + [
+            (EntityType.LODGING_STAY, item.stay_id, item)
+            for item in itinerary.lodging_stays
+        ]
+        + [
+            (EntityType.TRANSPORT_LEG, item.transport_leg_id, item)
+            for item in itinerary.transport_legs
+        ]
+    )
     for entity_type, entity_id, entity in entities:
         candidate = candidates.get(entity.lineage.candidate_id)
         if candidate is None:
@@ -288,7 +307,9 @@ def _carry_over_frozen_impacts(
     refresh's forecast.
     """
 
-    previous = {item.weather_impact_id: item for item in bundle.weather_snapshot.impacts}
+    previous = {
+        item.weather_impact_id: item for item in bundle.weather_snapshot.impacts
+    }
     current = {item.weather_impact_id: item for item in weather.impacts}
     carried = {
         impact_id
@@ -373,7 +394,9 @@ def _weather_snapshot(
             trip_end_date=bundle.weather_snapshot.trip_end_date,
             days=days,
             coverage=_coverage(days),
-            impacts=sorted(impact_index.values(), key=lambda item: item.weather_impact_id),
+            impacts=sorted(
+                impact_index.values(), key=lambda item: item.weather_impact_id
+            ),
             retrieved_at=result.weather_snapshot.retrieved_at,
         ),
         used_previous,
@@ -400,11 +423,9 @@ def _rebind_catalog_for_snapshot(
     candidate_ids = tuple(catalog.candidate_index())
     if not candidate_ids:
         refreshed_packets = [
-                packet.model_copy(
-                    update={"fact_data_revision": facts.fact_data_revision}
-                )
-                for packet in catalog.research_packets
-            ]
+            packet.model_copy(update={"fact_data_revision": facts.fact_data_revision})
+            for packet in catalog.research_packets
+        ]
         refreshed_catalog = catalog.model_copy(
             update={
                 "generation_id": bundle.manifest.generation_id,
@@ -420,15 +441,19 @@ def _rebind_catalog_for_snapshot(
                 "candidate_ranking_scores": [],
             }
         )
-        return (
-            bundle.workspace.model_copy(
-                update={
-                    "workspace_revision": bundle.workspace.workspace_revision + 1,
-                    "recommendation_catalog": refreshed_catalog,
-                }
-            ),
-            weather,
+        workspace = bundle.workspace.model_copy(
+            update={
+                "workspace_revision": bundle.workspace.workspace_revision + 1,
+                "recommendation_catalog": refreshed_catalog,
+                "candidate_selection_plan": rebind_candidate_selection_catalog_revision(
+                    bundle.workspace.candidate_selection_plan,
+                    facts.fact_data_revision,
+                ),
+                "intent_coverage_report": None,
+            }
         )
+        workspace, _report, _gaps = revalidate_workspace_intent(workspace)
+        return workspace, weather
 
     staging_manifest = DeliveryRevisionManifest(
         run_id=bundle.manifest.run_id,
@@ -479,9 +504,7 @@ def _rebind_catalog_for_snapshot(
             exc.code,
             f"weather refresh cannot safely re-admit current catalog: {exc.code}",
         ) from exc
-    merged_impacts = {
-        item.weather_impact_id: item for item in weather.impacts
-    }
+    merged_impacts = {item.weather_impact_id: item for item in weather.impacts}
     for impact in readmission.weather_impacts:
         merged_impacts[impact.weather_impact_id] = impact
     rebound_weather = weather.model_copy(
@@ -494,15 +517,19 @@ def _rebind_catalog_for_snapshot(
     # A newly forecast condition lands on the candidate's weather fit score and
     # on the typed adjustment proposal, so the refreshed catalog carries the new
     # forecast without touching the entities already on the itinerary.
-    return (
-        bundle.workspace.model_copy(
-            update={
-                "workspace_revision": bundle.workspace.workspace_revision + 1,
-                "recommendation_catalog": readmission.catalog,
-            }
-        ),
-        rebound_weather,
+    workspace = bundle.workspace.model_copy(
+        update={
+            "workspace_revision": bundle.workspace.workspace_revision + 1,
+            "recommendation_catalog": readmission.catalog,
+            "candidate_selection_plan": rebind_candidate_selection_catalog_revision(
+                bundle.workspace.candidate_selection_plan,
+                facts.fact_data_revision,
+            ),
+            "intent_coverage_report": None,
+        }
     )
+    workspace, _report, _gaps = revalidate_workspace_intent(workspace)
+    return workspace, rebound_weather
 
 
 def _build_refreshed_bundle(
@@ -581,7 +608,10 @@ def _build_refreshed_bundle(
         coverage_disclosure=coverage_disclosure,
     )
     generated_id = id_factory()
-    bundle_id = generated_id or f"bundle_{hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()[:24]}"
+    bundle_id = (
+        generated_id
+        or f"bundle_{hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()[:24]}"
+    )
     refreshed = DeliveryBundle(
         manifest=DeliveryRevisionManifest(
             run_id=bundle.manifest.run_id,
@@ -649,7 +679,9 @@ class WeatherBundleRefreshService:
         current = await self._store.get_current(run_id)
         if current is None or BundleRevisionVector.from_bundle(current) != expected:
             raise BundleRevisionConflict(
-                BundleRevisionVector.from_bundle(current) if current is not None else None
+                BundleRevisionVector.from_bundle(current)
+                if current is not None
+                else None
             )
         bundle = current
         now = self._clock()
@@ -670,9 +702,7 @@ class WeatherBundleRefreshService:
                     "used_previous_values": False,
                 },
             )
-            return WeatherBundleRefreshResult(
-                receipt.bundle, False, False, False
-            )
+            return WeatherBundleRefreshResult(receipt.bundle, False, False, False)
         grouped: dict[str, list[WeatherDayContext]] = {}
         for day in bundle.weather_snapshot.days:
             if day.destination_id in destination_ids:
@@ -695,7 +725,9 @@ class WeatherBundleRefreshService:
             trip_start_date=bundle.weather_snapshot.trip_start_date,
             trip_end_date=bundle.weather_snapshot.trip_end_date,
         )
-        if not any(day.data_kind != "unavailable" for day in result.weather_snapshot.days):
+        if not any(
+            day.data_kind != "unavailable" for day in result.weather_snapshot.days
+        ):
             latest = await self._store.get_current(run_id)
             if latest is None or BundleRevisionVector.from_bundle(latest) != expected:
                 raise BundleRevisionConflict(

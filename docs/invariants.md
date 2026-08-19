@@ -267,6 +267,51 @@ ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
 Tests:
 - `agent_behavior/test_intent_research_ranking_selection.py::test_packet_compiler_owns_and_merges_candidate_discovery_lineage`
 
+### INV-COMPOSITION-001：Composer 只能放置 Selection Plan 允许的候选
+Owner: `services/candidate_selection.py`、`agents/itinerary_planner/node.py`、
+`services/composition_backfill.py`
+Enforced by: Primary/Required/Fallback 才能进入 Composition；Alternative 只供显式换选；回填按
+Intent 缺口与合法槽位排序，不把 Admission 当作 Placement 义务
+ADR: [ADR-0012](adr/ADR-0012-intent-fidelity-and-controlled-exploration.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_selected_capabilities_exclude_alternatives_from_composition_pool`
+- `agent_behavior/test_intent_composition_fidelity.py::test_slot_backfill_prefers_pending_intent_and_respects_daily_maximum`
+
+### INV-FIDELITY-001：硬禁止不得以预算耗尽为由降级
+Owner: `agents/orchestrator/intent_fidelity_gate.py`、`services/intent_verification.py`
+Enforced by: Fidelity Gate 分开识别 never-violate 与 repair-then-deviate；前者发现一次即拒绝，
+后者仅在修复预算耗尽后转成公开偏差
+ADR: [ADR-0012](adr/ADR-0012-intent-fidelity-and-controlled-exploration.md)
+Tests:
+- `agent_behavior/test_intent_composition_fidelity.py::test_fidelity_detects_hard_excluded_candidate`
+- `agent_behavior/test_intent_composition_fidelity.py::test_fidelity_degrades_exhausted_hard_gap_and_soft_preference_to_deviations`
+
+### INV-MUTATION-001：自动后处理和用户编辑都必须留下可重验的 Mutation
+Owner: `services/composition_mutations.py`、`services/workspace_v2_service.py`
+Enforced by: drop/move/replace/backfill/reorder/time-adjust 都写原因、实体、Intent 与 Rule；提交前
+重新生成 Coverage，Mutation 只有重验通过后才标记 `hard_rules_revalidated`
+ADR: [ADR-0012](adr/ADR-0012-intent-fidelity-and-controlled-exploration.md)
+Tests:
+- `agent_behavior/test_intent_composition_fidelity.py::test_mutation_ledger_records_drop_move_and_backfill_then_revalidation`
+
+### INV-EXPLORE-001：Explore 只改变近分合规候选且必须可回放
+Owner: `services/candidate_selection.py`
+Enforced by: 默认无 seed；显式 Diversity/Alternatives Intent 才启用 Explore；排序输入先经过
+hard eligibility，同一 seed 与同一快照产生相同 Selection Plan
+ADR: [ADR-0012](adr/ADR-0012-intent-fidelity-and-controlled-exploration.md)
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_explore_selection_is_seeded_reproducible_and_diverse`
+
+### INV-REPLAY-001：运行差异必须能定位到具体规划层
+Owner: `entities/trip_run.py`、`services/run_diff.py`
+Enforced by: Completion Audit 只保存各层版本、Hash、ID 与聚合指标；Run Diff 分开比较 Input、
+Intent、Constraint、Query、Provider、Candidate、Admission、Ranking、Selection、Composition、
+Mutation、Coverage 与 Projection
+ADR: [ADR-0012](adr/ADR-0012-intent-fidelity-and-controlled-exploration.md)
+Tests:
+- `agent_behavior/test_run_diff.py::test_completion_audit_records_replay_layers_without_raw_user_text`
+- `agent_behavior/test_run_diff.py::test_run_diff_locates_selection_and_composition_delta`
+
 ---
 
 ## 流与会话

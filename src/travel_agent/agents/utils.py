@@ -5,7 +5,7 @@ Agent 节点通用工具函数。
 - get_available_tools / filter_tools_for_agent: Agent 工具策略过滤
 - streaming_react_loop: 所有 Worker 共用的流式 ReAct 循环
 - inject_agent_context: 系统提示词注入 Anchor、Preset 与统一 Constraint Pack
-- resolve_agent_assignment: Worker 精炼轮次任务查找
+- resolve_agent_assignment: Worker 任务查找
 """
 
 from __future__ import annotations
@@ -352,7 +352,6 @@ async def get_available_tools(selected_mcp_servers: List[str]) -> List[Dict[str,
 def resolve_agent_assignment(
     agent_assignments: Dict[str, Any],
     base_name: str,
-    refinement_count: int,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     为 Worker 节点查找正确的任务分配。
@@ -365,9 +364,6 @@ def resolve_agent_assignment(
     - output_key: 存储输出时使用的 key（base_name 或 base_name_rN）
     - assignment_dict: 完整的 capability assignment 合同
     """
-    # 优先查找当前精炼轮次对应的后缀 key。
-    # 语义约定：首轮无后缀；第一次补充为 _r2；第二次补充为 _r3。
-    # 因此 refinement_count=1 -> _r2，refinement_count=2 -> _r3。
     def require_assignment(key: str) -> Tuple[str, Dict[str, Any]]:
         assignment = agent_assignments.get(key)
         if not isinstance(assignment, dict) or not str(
@@ -376,12 +372,6 @@ def resolve_agent_assignment(
             raise ValueError(f"missing capability assignment for {key}")
         return key, assignment
 
-    if refinement_count > 0:
-        round_key = make_round_name(base_name, refinement_count + 1)
-        if round_key in agent_assignments:
-            return require_assignment(round_key)
-
-    # 查找任意轮次的 round-suffixed key（按数字轮次倒序，取最新）
     matching_keys_with_round = []
     for key in agent_assignments:
         m = re.match(rf"^{re.escape(base_name)}_r(\d+)$", key)
@@ -393,8 +383,12 @@ def resolve_agent_assignment(
         latest_key = matching_keys_with_round[0][1]
         return require_assignment(latest_key)
 
-    # 使用 base_name
     return require_assignment(base_name)
+
+
+def assignment_research_round(assignment_key: str) -> int:
+    match = re.fullmatch(r".+_r(\d+)", assignment_key)
+    return max(int(match.group(1)) - 1, 0) if match else 0
 
 
 def resolve_scoped_research_output_key(

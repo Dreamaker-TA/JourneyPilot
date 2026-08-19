@@ -17,7 +17,7 @@ COMPOSITION_PROMPT_OWNER = "travel_agent.agents.itinerary_planner.node._composit
 CONTRACT_SUMMARY = """
 Itinerary composition outputs exactly one ItineraryCompositionDraft JSON object
 (or placement skeleton subset). Rules:
-- A domain with admitted candidates takes only admission=passed candidate_ids,
+- A domain with selected candidates takes only CandidateSelectionPlan primary candidate_ids,
   ordered by the fit scores the Catalog exposes
 - A domain with an empty catalog takes an authored entry instead: name, address,
   city and a one-line reason; the server resolves it against the global place

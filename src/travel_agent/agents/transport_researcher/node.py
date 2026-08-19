@@ -29,6 +29,7 @@ from ...entities.research_query_plan import ResearchQueryKind
 from ...models.router import get_model_router
 from ..utils import (
     append_recent_history,
+    assignment_research_round,
     build_tool_context_from_state,
     compact_tool_content_for_model,
     execute_tool,
@@ -1884,7 +1885,7 @@ async def transport_researcher_node(
 
     # ── 任务分配（支持精炼轮次 round suffix）─────────────────────────────
     output_key, assignment = resolve_agent_assignment(
-        state.agent_assignments or {}, _NODE_NAME, state.refinement_count
+        state.agent_assignments or {}, _NODE_NAME
     )
     research_brief_context = build_assignment_context(
         assignment=assignment,
@@ -2062,7 +2063,7 @@ async def transport_researcher_node(
                 for scope in required_route_scopes
                 if scope.route_leg is not None
             ],
-            "research_round": state.refinement_count,
+            "research_round": assignment_research_round(output_key),
         },
         generated_at=datetime.datetime.now(datetime.timezone.utc),
     )

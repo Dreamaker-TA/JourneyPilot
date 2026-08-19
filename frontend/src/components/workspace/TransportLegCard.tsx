@@ -3,6 +3,7 @@ import { ChevronDown, type LucideIcon } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { READOUT_LABEL } from '../../lib/typography';
 import { TransportProviderNote } from './TransportProviderNote';
+import { IntentExplanationList } from './IntentExplanationList';
 import type { PublicTransportLeg, TransportEndpoint, TransportSegment } from '../../types/delivery';
 import { BOOKING_LABELS, TRANSPORT_MODE_LABELS } from '../../lib/deliveryLabels';
 import {
@@ -391,6 +392,7 @@ function SupportingContent({ leg, sourceMarkers }: TransportLegCardProps) {
     <>
       <RouteState leg={leg} />
       <SegmentDisclosure leg={leg} />
+      <IntentExplanationList items={leg.intent_explanations} />
       {sourceMarkers}
     </>
   );

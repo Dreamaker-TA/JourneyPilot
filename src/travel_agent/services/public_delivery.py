@@ -99,6 +99,17 @@ def _public_cost_summary(summary: CostCoverageSummary) -> Dict[str, Any]:
     return summary.model_dump(mode="json")
 
 
+def _public_intent_explanations(items: Sequence[Any]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "label": item.label,
+            "explanation": item.explanation,
+            "evidence_basis": item.evidence_basis,
+        }
+        for item in items
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Itinerary entities.  Each of the four lineage-bearing kinds gets its own
 # constructor: ``lineage`` is absent because nothing names it, and the two
@@ -126,6 +137,7 @@ def _public_visit_stop(stop: VisitStop, evidence_basis: str) -> Dict[str, Any]:
         "opening_window": stop.opening_window,
         "reservation_required": stop.reservation_required,
         "visit_highlights": list(stop.visit_highlights),
+        "intent_explanations": _public_intent_explanations(stop.intent_explanations),
         "evidence_basis": evidence_basis,
     }
 
@@ -152,6 +164,7 @@ def _public_dining_stop(stop: DiningStop, evidence_basis: str) -> Dict[str, Any]
         "reservation_required": stop.reservation_required,
         "opening_window": stop.opening_window,
         "dining_reminders": list(stop.dining_reminders),
+        "intent_explanations": _public_intent_explanations(stop.intent_explanations),
         "evidence_basis": evidence_basis,
     }
 
@@ -174,6 +187,7 @@ def _public_lodging_stay(stay: LodgingStay, evidence_basis: str) -> Dict[str, An
         "availability_status": stay.availability_status,
         "address": stay.address,
         "selection_reason": stay.selection_reason,
+        "intent_explanations": _public_intent_explanations(stay.intent_explanations),
         "evidence_basis": evidence_basis,
     }
 
@@ -208,6 +222,7 @@ def _public_transport_leg(
         "booking_status": leg.booking_status,
         "route_status": leg.route_status,
         "mode_preference": leg.mode_preference.model_dump(mode="json"),
+        "intent_explanations": _public_intent_explanations(leg.intent_explanations),
         "evidence_basis": evidence_basis,
         "is_micro_transport": is_micro_transport,
     }
@@ -372,7 +387,9 @@ def _public_report_block(
     return payload
 
 
-def _public_report_day(day: ReportDaySection, view: EvidenceBasisView) -> Dict[str, Any]:
+def _public_report_day(
+    day: ReportDaySection, view: EvidenceBasisView
+) -> Dict[str, Any]:
     return {
         "day_id": day.day_id,
         "day": day.day,
@@ -424,7 +441,9 @@ def _public_report_weather_day(day: ReportWeatherDay) -> Dict[str, Any]:
         # Bundle, so it has to go on the wire too — leave it off and the browser has
         # the field while the server never fills it, making a Run whose refresh has
         # been refusing for days look identical to one refreshed a minute ago.
-        "observed_at": day.observed_at.isoformat() if day.observed_at is not None else None,
+        "observed_at": day.observed_at.isoformat()
+        if day.observed_at is not None
+        else None,
         "weather_data_state": day.weather_data_state,
         "condition_label": day.condition_label,
         "high_c": day.high_c,
@@ -609,12 +628,37 @@ def _public_workspace(
     influences are internal ranking references.
     """
 
+    report = workspace.intent_coverage_report
+    if report is None:
+        raise ValueError("public workspace requires intent coverage")
+    coverage_by_intent = {item.intent_id: item for item in report.items}
+    fulfilled: List[Dict[str, Any]] = []
+    deviations: List[Dict[str, Any]] = []
+    for index, requirement in enumerate(
+        workspace.intent_contract_snapshot.requirements, start=1
+    ):
+        coverage = coverage_by_intent[requirement.intent_id]
+        status = coverage.status.value
+        if status in {"unsupported", "conflicted"}:
+            status = "unsatisfied"
+        item = {
+            "requirement_id": f"requirement_{index}",
+            "summary": requirement.public_summary,
+            "status": status,
+            "explanation": coverage.public_explanation,
+        }
+        (fulfilled if status == "satisfied" else deviations).append(item)
+
     return {
         "contract_version": workspace.contract_version,
         "run_id": workspace.run_id,
         "generation_id": workspace.generation_id,
         "workspace_revision": workspace.workspace_revision,
         "itinerary": _public_itinerary(workspace.itinerary, view),
+        "fulfillment_summary": {
+            "fulfilled": fulfilled,
+            "deviations": deviations,
+        },
         "selection_slots": [
             _public_selection_slot(slot) for slot in workspace.selection_slots
         ],
@@ -665,9 +709,7 @@ def public_event_manifest(manifest: Any) -> Dict[str, Any]:
 
     if not isinstance(manifest, Mapping):
         return {}
-    return {
-        key: manifest[key] for key in _PUBLIC_MANIFEST_KEYS if key in manifest
-    }
+    return {key: manifest[key] for key in _PUBLIC_MANIFEST_KEYS if key in manifest}
 
 
 def public_delivery_bundle(bundle: DeliveryBundle) -> Dict[str, Any]:

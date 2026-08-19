@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from ..local_profile import LOCAL_USER_ID
 
 from ..infrastructure.row_values import iso_or_none as _iso_or_none
+from .composition_rules import COMPOSITION_PROMPT_VERSION
 from .provider_evidence import (
     ProviderEvidenceOutcome,
     build_required_long_distance_legs,
@@ -149,7 +150,9 @@ def coerce_run_command_type(value: str | RunCommandType) -> RunCommandType:
 
 
 def coerce_run_command_status(value: str | RunCommandStatus) -> RunCommandStatus:
-    return value if isinstance(value, RunCommandStatus) else RunCommandStatus(str(value))
+    return (
+        value if isinstance(value, RunCommandStatus) else RunCommandStatus(str(value))
+    )
 
 
 def run_command_digest(
@@ -225,7 +228,11 @@ def coerce_mode(value: str | TripRunMode) -> TripRunMode:
 
 
 def coerce_resume_policy(value: str | TripRunResumePolicy) -> TripRunResumePolicy:
-    return value if isinstance(value, TripRunResumePolicy) else TripRunResumePolicy(str(value))
+    return (
+        value
+        if isinstance(value, TripRunResumePolicy)
+        else TripRunResumePolicy(str(value))
+    )
 
 
 def is_status_transition_allowed(
@@ -256,7 +263,9 @@ def is_terminal_status(value: str | TripRunStatus) -> bool:
 
 
 def coerce_recovery_status(value: str | RunRecoveryStatus) -> RunRecoveryStatus:
-    return value if isinstance(value, RunRecoveryStatus) else RunRecoveryStatus(str(value))
+    return (
+        value if isinstance(value, RunRecoveryStatus) else RunRecoveryStatus(str(value))
+    )
 
 
 #: 可取消的状态。CANCEL_REQUESTED 仍在表里：取消请求可以重发，执行器可能已经消失。
@@ -393,8 +402,6 @@ def _as_mappings(value: Any) -> List[Dict[str, Any]]:
     return values
 
 
-
-
 def _unique_strings(values: Iterable[Any]) -> List[str]:
     return list(dict.fromkeys(str(value) for value in values if str(value).strip()))
 
@@ -523,8 +530,7 @@ def _long_distance_leg_ledger(workspace: Mapping[str, Any]) -> tuple[int, int]:
     long_distance_leg_ids = {
         str(leg.get("transport_leg_id"))
         for leg in _as_mappings(itinerary.get("transport_legs"))
-        if leg.get("transport_class") == "long_distance"
-        and leg.get("transport_leg_id")
+        if leg.get("transport_class") == "long_distance" and leg.get("transport_leg_id")
     }
     day_dates: set[date] = set()
     dates_with_long_distance: set[date] = set()
@@ -611,11 +617,13 @@ def _quality_indicators(
         # future evaluators distinguish absent catalog evidence from an actual
         # zero without persisting Candidate names or tool payloads.
         "passed_candidate_count": len(
-            [candidate_id for candidate_id in passed_candidate_ids if candidate_id in candidates]
+            [
+                candidate_id
+                for candidate_id in passed_candidate_ids
+                if candidate_id in candidates
+            ]
         ),
-        "provider_evidence_current_scope_count": (
-            provider_summary.current_scope_count
-        ),
+        "provider_evidence_current_scope_count": (provider_summary.current_scope_count),
         "provider_evidence_unresolved_scope_count": (
             provider_summary.unresolved_scope_count
         ),
@@ -626,9 +634,7 @@ def _quality_indicators(
         "provider_option_admissible_count": len(
             passed_candidate_ids.intersection(provider_candidate_ids)
         ),
-        "provider_salvage_loss_count": (
-            provider_summary.provider_salvage_loss_count
-        ),
+        "provider_salvage_loss_count": (provider_summary.provider_salvage_loss_count),
         # An unattempted leg leaves no Provider scope behind, so the unresolved
         # scope count above stays silent about it; these two count the delivered
         # round trip itself.
@@ -672,6 +678,90 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         bundle.get("source_index")
     )
     manifest = _as_mapping(bundle.get("manifest"))
+    intent_spec = _as_mapping(data.get("intent_spec"))
+    planning_generation = _as_mapping(data.get("planning_generation"))
+    query_plan = _as_mapping(data.get("research_query_plan"))
+    catalog = _as_mapping(workspace.get("recommendation_catalog")) or _as_mapping(
+        data.get("recommendation_catalog")
+    )
+    selection_plan = _as_mapping(
+        workspace.get("candidate_selection_plan")
+    ) or _as_mapping(data.get("candidate_selection_plan"))
+    selection_policy = _as_mapping(selection_plan.get("selection_policy"))
+    coverage = _as_mapping(workspace.get("intent_coverage_report")) or _as_mapping(
+        data.get("intent_coverage_report")
+    )
+    mutations = _as_mappings(workspace.get("composition_mutations")) or _as_mappings(
+        data.get("composition_mutations")
+    )
+
+    def audit_hash(value: Any) -> str:
+        material = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    packets = _as_mappings(catalog.get("research_packets"))
+    executed_query_ids = _unique_strings(
+        query_id
+        for packet in packets
+        for query_id in packet.get("executed_query_ids") or []
+    )
+    provider_snapshot_hashes = _unique_strings(
+        source.get("content_hash")
+        for packet in packets
+        for source in _as_mappings(packet.get("source_records"))
+        if source.get("content_hash")
+    )
+    generic_candidate_ids = {
+        str(record.get("candidate_id"))
+        for record in _as_mappings(catalog.get("candidate_discovery_records"))
+        if "generic_fallback" in set(record.get("origins") or [])
+    }
+    selection_entries = _as_mappings(selection_plan.get("entries"))
+    selected_candidate_ids = _unique_strings(
+        entry.get("candidate_id")
+        for entry in selection_entries
+        if entry.get("eligible_for_composition") is True
+    )
+    admitted_candidate_ids = _unique_strings(
+        admission.get("candidate_id")
+        for admission in _as_mappings(catalog.get("admission_results"))
+        if admission.get("status") == "passed"
+    )
+    ranking_scores = _as_mappings(catalog.get("candidate_ranking_scores"))
+    coverage_items = _as_mappings(coverage.get("items"))
+    active_intents = _as_mappings(intent_spec.get("active_items"))
+    unresolved_clauses = _as_mappings(intent_spec.get("unresolved_clauses"))
+    active_count = len(active_intents)
+    clause_count = active_count + len(unresolved_clauses)
+    covered_selection_ids = set(selection_plan.get("covered_intent_ids") or [])
+    candidate_relevant_ids = {
+        str(intent.get("intent_id"))
+        for intent in active_intents
+        if "ranking" in set(intent.get("impact_stages") or [])
+    }
+    entity_count = sum(
+        len(_as_mappings(_as_mapping(workspace.get("itinerary")).get(field)))
+        for field in (
+            "visit_stops",
+            "dining_stops",
+            "lodging_stays",
+            "transport_legs",
+        )
+    )
+    postprocessor_mutations = [
+        mutation for mutation in mutations if mutation.get("created_by") != "user_edit"
+    ]
+    unexplained_mutation_count = sum(
+        not mutation.get("reason_code")
+        or mutation.get("hard_rules_revalidated") is not True
+        for mutation in mutations
+    )
 
     exhausted_gap_ids = _unique_strings(
         gap.get("gap_id")
@@ -700,7 +790,9 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             continue
         attributions.append(
             {
-                "attribution_id": str(attribution.get("attribution_id") or attribution_id),
+                "attribution_id": str(
+                    attribution.get("attribution_id") or attribution_id
+                ),
                 "gate_class": attribution.get("gate_class"),
                 "disposition": attribution.get("disposition"),
                 "reason_code": attribution.get("reason_code"),
@@ -734,8 +826,6 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         _as_int(draft.get("controlled_trip_identity_revision"))
         == _as_int(data.get("controlled_trip_identity_revision"))
     )
-    planning_generation = _as_mapping(data.get("planning_generation"))
-    intent_spec = _as_mapping(data.get("intent_spec"))
     intent_generation_valid = bool(
         planning_generation.get("generation_id")
         and draft.get("planning_generation_id")
@@ -745,10 +835,10 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         == _as_int(intent_spec.get("revision"))
         and draft.get("intent_spec_hash") == intent_spec.get("content_hash")
     )
-    constraint_revision_valid = (
-        isinstance(data.get("constraint_pack"), dict)
-        and _as_int(draft.get("constraint_pack_revision"))
-        == _as_int(data.get("constraint_pack_revision"))
+    constraint_revision_valid = isinstance(
+        data.get("constraint_pack"), dict
+    ) and _as_int(draft.get("constraint_pack_revision")) == _as_int(
+        data.get("constraint_pack_revision")
     )
     sealed_draft_valid = bool(
         draft.get("planning_authorized") is True
@@ -765,12 +855,11 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     user_cancelled = bool(
         _as_mapping(terminal_attribution).get("reason_code") == "user_cancelled"
     )
-    formal_bundle_capable = bool(
-        sealed_draft_valid
-        and _delivery_is_intact(data)
-    )
+    formal_bundle_capable = bool(sealed_draft_valid and _delivery_is_intact(data))
 
-    expected_constraint_ids = _unique_strings(draft.get("preserved_constraint_ids") or [])
+    expected_constraint_ids = _unique_strings(
+        draft.get("preserved_constraint_ids") or []
+    )
     workspace_constraint_ids = _unique_strings(
         anchor.get("constraint_id")
         for anchor in _as_mappings(workspace.get("user_input_anchors"))
@@ -799,6 +888,8 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         or document.get("summary")
         or document.get("title")
     )
+    prompt_versions = dict(_as_mapping(data.get("prompt_versions")))
+    prompt_versions.setdefault("itinerary_composition", COMPOSITION_PROMPT_VERSION)
 
     return {
         "run_id": str(data.get("run_id") or draft.get("run_id") or ""),
@@ -826,6 +917,106 @@ def _completion_audit_summary(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             for key, value in _as_mapping(data.get("candidate_gate_attempts")).items()
         },
         "source_origin_counts": source_origin_counts,
+        "planning_generation": {
+            "generation_id": planning_generation.get("generation_id"),
+            "identity_hash": planning_generation.get("identity_hash"),
+            "intent_hash": planning_generation.get("intent_hash"),
+            "constraint_hash": planning_generation.get("constraint_hash"),
+        },
+        "versions": {
+            "intent_schema": intent_spec.get("schema_version"),
+            "query_policy": query_plan.get("policy_version"),
+            "ranking_policy": (
+                ranking_scores[0].get("policy_version") if ranking_scores else None
+            ),
+            "selection_policy": selection_policy.get("policy_version"),
+            "composition_policy": "composition_rules.v1",
+            "fidelity_policy": "intent_fidelity.v1",
+            "prompt_versions": prompt_versions,
+            "model_versions": dict(_as_mapping(data.get("model_versions"))),
+            "policy_versions": dict(_as_mapping(data.get("policy_versions"))),
+            "contract_versions": dict(_as_mapping(manifest.get("contract_versions"))),
+        },
+        "research": {
+            "query_plan_hash": query_plan.get("content_hash"),
+            "executed_query_ids": executed_query_ids,
+            "provider_snapshot_hashes": provider_snapshot_hashes,
+            "generic_fallback_usage_count": len(
+                generic_candidate_ids.intersection(selected_candidate_ids)
+            ),
+        },
+        "candidate": {
+            "catalog_hash": audit_hash(catalog) if catalog else None,
+            "admitted_candidate_ids": admitted_candidate_ids,
+            "ranking_hash": audit_hash(ranking_scores) if ranking_scores else None,
+        },
+        "selection": {
+            "selection_plan_hash": selection_plan.get("content_hash"),
+            "selection_seed": selection_policy.get("selection_seed"),
+            "mode": selection_policy.get("mode"),
+            "selected_candidate_ids": selected_candidate_ids,
+        },
+        "composition": {
+            "workspace_hash": _as_mapping(manifest.get("content_hashes")).get(
+                "workspace"
+            )
+            or (audit_hash(workspace) if workspace else None),
+            "mutation_ids": _unique_strings(
+                mutation.get("mutation_id") for mutation in mutations
+            ),
+            "mutation_count": len(mutations),
+            "postprocessor_override_count": len(postprocessor_mutations),
+        },
+        "intent_fidelity": {
+            "coverage_hash": coverage.get("content_hash"),
+            "hard_satisfaction_rate": coverage.get("hard_satisfaction_rate"),
+            "soft_coverage_rate": coverage.get("soft_coverage_rate"),
+            "unsatisfied_intent_ids": _unique_strings(
+                item.get("intent_id")
+                for item in coverage_items
+                if item.get("status")
+                in {"partially_satisfied", "unsatisfied", "conflicted", "unsupported"}
+            ),
+            "unverifiable_intent_ids": _unique_strings(
+                item.get("intent_id")
+                for item in coverage_items
+                if item.get("status") == "unverifiable"
+            ),
+        },
+        "behavior_metrics": {
+            "intent_clause_coverage_rate": (
+                round(active_count / clause_count, 4) if clause_count else 1.0
+            ),
+            "intent_assignment_coverage_rate": (
+                round(len(coverage_items) / active_count, 4) if active_count else 1.0
+            ),
+            "hard_intent_satisfaction_rate": coverage.get("hard_satisfaction_rate"),
+            "soft_intent_coverage_rate": coverage.get("soft_coverage_rate"),
+            "intent_candidate_coverage_rate": (
+                round(
+                    len(covered_selection_ids.intersection(candidate_relevant_ids))
+                    / len(candidate_relevant_ids),
+                    4,
+                )
+                if candidate_relevant_ids
+                else 1.0
+            ),
+            "generic_fallback_usage_rate": (
+                round(
+                    len(generic_candidate_ids.intersection(selected_candidate_ids))
+                    / len(selected_candidate_ids),
+                    4,
+                )
+                if selected_candidate_ids
+                else 0.0
+            ),
+            "postprocessor_override_rate": (
+                round(len(postprocessor_mutations) / entity_count, 4)
+                if entity_count
+                else 0.0
+            ),
+            "unexplained_mutation_count": unexplained_mutation_count,
+        },
         "gate_failure_attributions": attributions,
         "constraint_contract": {
             "expected_ids": expected_constraint_ids,
@@ -919,14 +1110,15 @@ def build_trip_run_state_summary(state: Any) -> Dict[str, Any]:
     workspace = data.get("trip_workspace_v2")
     packets = data.get("research_packets") or {}
     fact_store = data.get("fact_store_snapshot") or {}
-    source_records = fact_store.get("source_records") if isinstance(fact_store, dict) else []
+    source_records = (
+        fact_store.get("source_records") if isinstance(fact_store, dict) else []
+    )
     summary = {
         "task_type": task_type,
         "has_itinerary": bool(workspace),
         "has_workspace_v2": bool(workspace),
         "research_packet_count": len(packets),
         "source_record_count": len(source_records or []),
-        "refinement_count": data.get("refinement_count") or 0,
         "pending_user_choice": bool(pending_choice),
         "map_ready": bool(data.get("map_projection")),
         "synthesis_mode": data.get("synthesis_mode"),

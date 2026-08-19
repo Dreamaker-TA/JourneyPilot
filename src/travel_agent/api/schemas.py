@@ -32,6 +32,7 @@ from ..entities.workspace_v2_mutations import WorkspaceV2Mutation
 # 聊天相关
 # ---------------------------------------------------------------------------
 
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -132,6 +133,7 @@ class UpdateSessionRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Trip Run / TripOps 任务生命周期
 # ---------------------------------------------------------------------------
+
 
 class TripRunCreateRequest(BaseModel):
     session_id: str = ""
@@ -307,11 +309,33 @@ class PublicBundleManifestResponse(BaseModel):
 
     contract_version: str
     run_id: str
+    generation_id: str
     bundle_id: str
     workspace_revision: int
     fact_data_revision: int
     weather_data_revision: int
     created_at: str
+
+
+class PublicRequirementFulfillmentResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    requirement_id: str
+    summary: str
+    status: Literal[
+        "satisfied",
+        "partially_satisfied",
+        "unsatisfied",
+        "unverifiable",
+    ]
+    explanation: str
+
+
+class PublicFulfillmentSummaryResponse(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    fulfilled: List[PublicRequirementFulfillmentResponse] = Field(default_factory=list)
+    deviations: List[PublicRequirementFulfillmentResponse] = Field(default_factory=list)
 
 
 class PublicBundleWorkspaceResponse(BaseModel):
@@ -321,8 +345,10 @@ class PublicBundleWorkspaceResponse(BaseModel):
 
     contract_version: str
     run_id: str
+    generation_id: str
     workspace_revision: int
     itinerary: Dict[str, Any]
+    fulfillment_summary: PublicFulfillmentSummaryResponse
     selection_slots: List[Dict[str, Any]] = Field(default_factory=list)
     weather_proposal_decisions: List[Dict[str, Any]] = Field(default_factory=list)
     weather_adjustments: List[Dict[str, Any]] = Field(default_factory=list)
@@ -496,6 +522,7 @@ class ToolAuditListResponse(BaseModel):
 # 成本台账 DTO
 # ---------------------------------------------------------------------------
 
+
 class LLMCallCostResponse(BaseModel):
     id: str
     run_id: str
@@ -560,8 +587,10 @@ class RunCostResponse(BaseModel):
 # 系统配置
 # ---------------------------------------------------------------------------
 
+
 class ModelConfigRequest(BaseModel):
     """更新主力模型配置"""
+
     api_key: str
     model_name: str = "deepseek-chat"
     base_url: str = "https://api.deepseek.com/v1"
@@ -588,6 +617,7 @@ class SystemStatus(BaseModel):
 # ---------------------------------------------------------------------------
 # 知识库管理
 # ---------------------------------------------------------------------------
+
 
 class KnowledgeUploadRequest(BaseModel):
     content: str
@@ -661,6 +691,7 @@ class KnowledgeQueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # 用户相关
 # ---------------------------------------------------------------------------
+
 
 class UserProfileResponse(BaseModel):
     display_name: str
@@ -771,6 +802,7 @@ class AddMemoryFactResponse(BaseModel):
 # Preset 相关
 # ---------------------------------------------------------------------------
 
+
 # 三个请求/响应 schema 的长度上限全部引 ``entities.preset`` 的常量，不许写字面量：
 # 「一条指令最多多长」是那个字段的属性，只能有一个定义处。抄一份数字进来，
 # 就是这个仓那个反复出现的形状 —— 同一个角色两套值，其中一套静默胜出。
@@ -785,10 +817,14 @@ class PresetCreateRequest(BaseModel):
 
 class PresetUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, max_length=PRESET_NAME_MAX_CHARS)
-    description: Optional[str] = Field(default=None, max_length=PRESET_DESCRIPTION_MAX_CHARS)
+    description: Optional[str] = Field(
+        default=None, max_length=PRESET_DESCRIPTION_MAX_CHARS
+    )
     icon: Optional[str] = None
     category: Optional[str] = None
-    instructions: Optional[str] = Field(default=None, max_length=PRESET_INSTRUCTIONS_MAX_CHARS)
+    instructions: Optional[str] = Field(
+        default=None, max_length=PRESET_INSTRUCTIONS_MAX_CHARS
+    )
     constraints: Optional[PresetConstraints] = None
 
 

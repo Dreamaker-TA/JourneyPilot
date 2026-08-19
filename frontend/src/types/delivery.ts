@@ -1,5 +1,5 @@
-export const DELIVERY_BUNDLE_CONTRACT_VERSION = 'journeypilot.delivery_bundle.v9' as const;
-export const TRIP_WORKSPACE_CONTRACT_VERSION = 'journeypilot.trip_workspace.v9' as const;
+export const DELIVERY_BUNDLE_CONTRACT_VERSION = 'journeypilot.delivery_bundle.v10' as const;
+export const TRIP_WORKSPACE_CONTRACT_VERSION = 'journeypilot.trip_workspace.v10' as const;
 export const FACT_SNAPSHOT_CONTRACT_VERSION = 'journeypilot.fact_store_snapshot.v4' as const;
 export const WEATHER_SNAPSHOT_CONTRACT_VERSION = 'journeypilot.weather_context_snapshot.v2' as const;
 export const RESEARCH_PACKET_CONTRACT_VERSION = 'journeypilot.research_packet.v5' as const;
@@ -103,6 +103,7 @@ export interface TransportLeg {
   booking_status: 'not_required' | 'recommended' | 'required' | 'booked' | 'unknown';
   route_status: 'pending' | 'ready' | 'unavailable';
   mode_preference: { locked_mode: TransportMode | null; excluded_modes: TransportMode[] };
+  intent_explanations: IntentExplanationRecord[];
   lineage: EntityLineage;
 }
 
@@ -119,6 +120,7 @@ interface ScheduledStopBase {
   duration_minutes: number;
   estimated_cost_cny: number | null;
   selection_reason: string;
+  intent_explanations: IntentExplanationRecord[];
   lineage: EntityLineage;
 }
 
@@ -161,6 +163,7 @@ export interface LodgingStay {
   availability_status: LodgingAvailabilityStatus;
   address: string;
   selection_reason: string;
+  intent_explanations: IntentExplanationRecord[];
   lineage: EntityLineage;
 }
 
@@ -216,6 +219,28 @@ export interface StructuredItineraryV2 {
  */
 export type EvidenceBasis = 'cited_source' | 'public_reference' | 'reference_service';
 
+export interface EntityIntentExplanation {
+  label: string;
+  explanation: string;
+  evidence_basis: 'verified_fact' | 'supported_description' | 'planning_judgment';
+}
+
+export interface IntentExplanationRecord extends EntityIntentExplanation {
+  intent_id: string;
+}
+
+export interface PublicRequirementFulfillment {
+  requirement_id: string;
+  summary: string;
+  status: 'satisfied' | 'partially_satisfied' | 'unsatisfied' | 'unverifiable';
+  explanation: string;
+}
+
+export interface PublicFulfillmentSummary {
+  fulfilled: PublicRequirementFulfillment[];
+  deviations: PublicRequirementFulfillment[];
+}
+
 /**
  * Consumer-safe itinerary records.  The persisted counterparts above retain
  * lineage for replay and audit — packet / candidate / fact / decision ids stay
@@ -253,6 +278,7 @@ export interface PublicVisitStop {
   opening_window: string | null;
   reservation_required: boolean | null;
   visit_highlights: string[];
+  intent_explanations: EntityIntentExplanation[];
   evidence_basis: EvidenceBasis;
 }
 
@@ -277,6 +303,7 @@ export interface PublicDiningStop {
   reservation_required: boolean | null;
   opening_window: string | null;
   dining_reminders: string[];
+  intent_explanations: EntityIntentExplanation[];
   evidence_basis: EvidenceBasis;
 }
 
@@ -297,6 +324,7 @@ export interface PublicLodgingStay {
   availability_status: LodgingAvailabilityStatus;
   address: string;
   selection_reason: string;
+  intent_explanations: EntityIntentExplanation[];
   evidence_basis: EvidenceBasis;
 }
 
@@ -317,6 +345,7 @@ export interface PublicTransportLeg {
   booking_status: TransportLeg['booking_status'];
   route_status: TransportLeg['route_status'];
   mode_preference: { locked_mode: TransportMode | null; excluded_modes: TransportMode[] };
+  intent_explanations: EntityIntentExplanation[];
   evidence_basis: EvidenceBasis;
   /**
    * 这条腿是不是短驳——门口几百米的步行，只把两个地点连起来，因此卡片收成一行、
@@ -594,7 +623,7 @@ export interface RecommendationCatalog {
 }
 
 export interface CandidateSelectionPlan {
-  schema_version: 'journeypilot.candidate_selection.v1';
+  schema_version: 'journeypilot.candidate_selection.v2';
   selection_plan_id: string;
   generation_id: string;
   intent_spec_revision: number;
@@ -611,9 +640,65 @@ export interface CandidateSelectionPlan {
   }>;
   covered_intent_ids: string[];
   uncovered_intent_ids: string[];
-  policy_version: string;
-  selection_seed: number | null;
+  selection_policy: {
+    mode: 'deterministic' | 'explore';
+    selection_seed: number | null;
+    alternative_count: number;
+    diversity_strength: number;
+    avoid_previous_candidate_ids: string[];
+    preferred_theme_clusters: string[];
+    policy_version: string;
+  };
   content_hash: string;
+}
+
+export interface IntentContractSnapshot {
+  schema_version: 'journeypilot.intent_contract_snapshot.v1';
+  generation_id: string;
+  intent_spec_revision: number;
+  objective_summary: string;
+  requirements: Array<{
+    intent_id: string;
+    kind: string;
+    target: string;
+    strength: 'hard' | 'soft' | 'informational';
+    verification_mode: 'deterministic' | 'semantic' | 'mixed';
+    impact_stages: string[];
+    public_summary: string;
+  }>;
+  conflict_summaries: string[];
+  content_hash: string;
+}
+
+export interface IntentCoverageReport {
+  schema_version: 'journeypilot.intent_coverage.v1';
+  coverage_report_id: string;
+  generation_id: string;
+  intent_spec_revision: number;
+  workspace_revision: number;
+  items: Array<{
+    intent_id: string;
+    status: 'satisfied' | 'partially_satisfied' | 'unsatisfied' | 'unverifiable' | 'unsupported' | 'conflicted';
+    public_explanation: string;
+    blocking: boolean;
+  }>;
+  hard_satisfaction_rate: number;
+  soft_coverage_rate: number;
+  blocking_gap_ids: string[];
+  content_hash: string;
+}
+
+export interface CompositionMutation {
+  mutation_id: string;
+  generation_id: string;
+  mutation_type: 'drop' | 'move' | 'replace' | 'backfill' | 'reorder' | 'time_adjust';
+  reason_code: string;
+  source_entity_ids: string[];
+  target_entity_ids: string[];
+  affected_intent_ids: string[];
+  affected_rule_ids: string[];
+  hard_rules_revalidated: boolean;
+  created_by: 'deterministic_pruner' | 'anchor_backfill' | 'slot_backfill' | 'composition_repair' | 'user_edit';
 }
 
 export interface TripWorkspaceV2 {
@@ -623,6 +708,10 @@ export interface TripWorkspaceV2 {
   workspace_revision: number;
   itinerary: StructuredItineraryV2;
   recommendation_catalog: RecommendationCatalog;
+  intent_contract_snapshot: IntentContractSnapshot;
+  intent_coverage_report: IntentCoverageReport | null;
+  composition_mutations: CompositionMutation[];
+  candidate_selection_plan: CandidateSelectionPlan;
   user_input_anchors: UserInputAnchor[];
   selection_slots: SelectionSlot[];
   personalization_influences: PersonalizationInfluence[];
@@ -882,6 +971,7 @@ export interface PublicTripWorkspace {
   generation_id: string;
   workspace_revision: number;
   itinerary: PublicStructuredItineraryV2;
+  fulfillment_summary: PublicFulfillmentSummary;
   selection_slots: SelectionSlot[];
   weather_proposal_decisions: Array<{
     proposal_id: string;
@@ -987,8 +1077,11 @@ export function isPublicDeliveryBundle(value: unknown): value is PublicDeliveryB
       && typeof manifest.bundle_id === 'string'
       && workspace?.contract_version === TRIP_WORKSPACE_CONTRACT_VERSION
       && workspace.run_id === manifest.run_id
+      && workspace.generation_id === manifest.generation_id
       && workspace.workspace_revision === manifest.workspace_revision
       && Array.isArray(workspace.itinerary?.day_plans)
+      && Array.isArray(workspace.fulfillment_summary?.fulfilled)
+      && Array.isArray(workspace.fulfillment_summary?.deviations)
       && Array.isArray(workspace.selection_slots)
       && Array.isArray(workspace.weather_proposal_decisions)
       && Array.isArray(workspace.weather_adjustments)

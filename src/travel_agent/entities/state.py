@@ -50,6 +50,8 @@ from .research_brief import ResearchBriefV2
 from .research_query_plan import ResearchQueryPlan
 from .candidate_intent import CandidateIntentMatch
 from .candidate_selection import CandidateSelectionPlan
+from .composition_mutation import CompositionMutation
+from .intent_coverage import IntentCoverageReport, IntentFidelityGap
 from .weather_planning import DestinationGeoPoint
 from .itinerary_composition_v2 import ItineraryCompositionDraft, LocalConnectorGap
 from .provider_evidence import (
@@ -57,6 +59,7 @@ from .provider_evidence import (
     merge_provider_evidence_outcomes,
 )
 from .provider_reference_service import ProviderReferenceService
+
 
 def _merge_dicts(a: Dict, b: Dict) -> Dict:
     """LangGraph fan-in reducer for dict fields.
@@ -103,6 +106,16 @@ def _replace_amendments(
 
 def _merge_unique_strings(a: List[str], b: List[str]) -> List[str]:
     return list(dict.fromkeys([*(a or []), *(b or [])]))
+
+
+def _merge_composition_mutations(
+    a: List[CompositionMutation], b: List[CompositionMutation]
+) -> List[CompositionMutation]:
+    merged: Dict[str, CompositionMutation] = {}
+    for item in [*(a or []), *(b or [])]:
+        mutation = CompositionMutation.model_validate(item)
+        merged[mutation.mutation_id] = mutation
+    return list(merged.values())
 
 
 def _merge_amendment_rejections(
@@ -159,7 +172,9 @@ def _prefer_pending_choice(
     return b or a
 
 
-def _prefer_latest_dict(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _prefer_latest_dict(
+    a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
     """Prefer the latest non-empty control payload."""
     return b or a
 
@@ -224,6 +239,7 @@ def bounded_repair_context(stage: str, detail: str) -> str:
 
 class TaskType(str, Enum):
     """任务类型标记（由 Planner 设置）"""
+
     QUICK_QA = "quick_qa"
     TRAVEL_PLANNING = "travel_planning"
     DESTINATION_INFO = "destination_info"
@@ -233,13 +249,13 @@ class TaskType(str, Enum):
 
 class MessageItem(BaseModel):
     """单条对话消息"""
+
     role: str
     content: str
     message_id: str = ""
     type: str = "normal"
     step_name: str = ""
     agent_name: str = ""
-
 
 
 class TravelAgentState(BaseModel):
@@ -279,6 +295,7 @@ class TravelAgentState(BaseModel):
     capability_plan: Optional[CapabilityPlan] = None
     research_query_plan: Optional[ResearchQueryPlan] = None
     candidate_selection_plan: Optional[CandidateSelectionPlan] = None
+    previous_selected_candidate_ids: List[str] = Field(default_factory=list)
     candidate_intent_evaluation_cache: Dict[str, CandidateIntentMatch] = Field(
         default_factory=dict
     )
@@ -329,9 +346,13 @@ class TravelAgentState(BaseModel):
     agent_assignments: Dict[str, Any] = Field(default_factory=dict)
 
     # ── Worker 输出 ─────────────────────────────────────────────────────────
-    agent_status: Annotated[Dict[str, str], _merge_dicts_allow_clear] = Field(default_factory=dict)
+    agent_status: Annotated[Dict[str, str], _merge_dicts_allow_clear] = Field(
+        default_factory=dict
+    )
     # artifact gate separates scheduling completion from current-contract acceptance.
-    artifact_status: Annotated[Dict[str, str], _merge_dicts_allow_clear] = Field(default_factory=dict)
+    artifact_status: Annotated[Dict[str, str], _merge_dicts_allow_clear] = Field(
+        default_factory=dict
+    )
     artifact_gate_route: Optional[str] = None
     # v2 Research Worker 的唯一业务产物。key 与 execution plan worker key 对齐，
     # 补研轮次使用后缀，不存在通用文本信封的兼容读取。
@@ -362,7 +383,9 @@ class TravelAgentState(BaseModel):
     candidate_gate_route: Optional[str] = None
     # Whole-field replace (no reducer). Single writer: candidate_gate.
     candidate_gate_attempts: Dict[str, int] = Field(default_factory=dict)
-    candidate_gate_failure_signatures: Dict[str, List[str]] = Field(default_factory=dict)
+    candidate_gate_failure_signatures: Dict[str, List[str]] = Field(
+        default_factory=dict
+    )
     # Single writer: gates that emit composition_repair. Cleared on plan edit.
     composition_repair_attempts: int = 0
     # Normalized authored place names whose whole resolution ladder ran and
@@ -384,6 +407,14 @@ class TravelAgentState(BaseModel):
     # ``composition_failure_context``; neither channel writes the other.
     placement_skeleton_failure_context: Optional[str] = None
     placement_skeleton: Optional[ItineraryCompositionDraft] = None
+    composition_mutations: Annotated[
+        List[CompositionMutation], _merge_composition_mutations
+    ] = Field(default_factory=list)
+    intent_coverage_report: Optional[IntentCoverageReport] = None
+    intent_fidelity_gaps: List[IntentFidelityGap] = Field(default_factory=list)
+    intent_fidelity_route: Optional[
+        Literal["passed", "candidate_gate", "composition_repair"]
+    ] = None
     local_connector_gaps: List[LocalConnectorGap] = Field(default_factory=list)
     trip_workspace_v2: Optional[TripWorkspaceV2] = None
     recommendation_quality: Optional[RecommendationQualityState] = None
@@ -398,31 +429,37 @@ class TravelAgentState(BaseModel):
     delivery_persisted: bool = False
     # ── RAG ────────────────────────────────────────────────────────────────
     retrieved_docs: List[Dict[str, Any]] = Field(default_factory=list)
-    retrieval_summaries: Annotated[List[Dict[str, Any]], _merge_lists] = Field(default_factory=list)
+    retrieval_summaries: Annotated[List[Dict[str, Any]], _merge_lists] = Field(
+        default_factory=list
+    )
 
     # ── 行程规划 ────────────────────────────────────────────────────────────
     # Fast Answer 正文与外部来源的结构化绑定。Deep 交付只读 Bundle source projection。
-    final_grounding: Annotated[Dict[str, Any], _merge_dicts] = Field(default_factory=dict)
+    final_grounding: Annotated[Dict[str, Any], _merge_dicts] = Field(
+        default_factory=dict
+    )
 
     # ── 用户交互 ────────────────────────────────────────────────────────────
-    pending_user_choice: Annotated[Optional[Dict[str, Any]], _prefer_pending_choice] = None
+    pending_user_choice: Annotated[Optional[Dict[str, Any]], _prefer_pending_choice] = (
+        None
+    )
     plan_gate_decision: Annotated[Optional[Dict[str, Any]], _prefer_latest_dict] = None
     plan_gate_revision_count: int = 0
     plan_gate_amendment: Annotated[
         Optional[IntentAmendment], _take_latest_value_allow_clear
     ] = None
-    pending_intent_amendments: Annotated[
-        List[IntentAmendment], _replace_amendments
-    ] = Field(default_factory=list)
+    pending_intent_amendments: Annotated[List[IntentAmendment], _replace_amendments] = (
+        Field(default_factory=list)
+    )
     intent_amendment_resume_node: Annotated[
         Optional[str], _take_latest_value_allow_clear
     ] = None
-    intent_amendment_route: Annotated[
-        Optional[str], _take_latest_value_allow_clear
-    ] = None
-    applied_intent_amendment_ids: Annotated[
-        List[str], _merge_unique_strings
-    ] = Field(default_factory=list)
+    intent_amendment_route: Annotated[Optional[str], _take_latest_value_allow_clear] = (
+        None
+    )
+    applied_intent_amendment_ids: Annotated[List[str], _merge_unique_strings] = Field(
+        default_factory=list
+    )
     rejected_intent_amendments: Annotated[
         List[IntentAmendmentRejection], _merge_amendment_rejections
     ] = Field(default_factory=list)
@@ -430,6 +467,9 @@ class TravelAgentState(BaseModel):
         default_factory=dict
     )
     policy_versions: Annotated[Dict[str, str], _merge_dicts] = Field(
+        default_factory=dict
+    )
+    model_versions: Annotated[Dict[str, str], _merge_dicts] = Field(
         default_factory=dict
     )
 
@@ -477,8 +517,6 @@ class TravelAgentState(BaseModel):
     synthesis_mode: Optional[str] = None  # "deep" | "fast" | None
 
     # ── 循环控制 ────────────────────────────────────────────────────────────
-    # Legacy worker round suffix support; the v2 graph uses scoped Candidate Gate retries.
-    refinement_count: int = 0
     is_completed: Annotated[bool, _or_bool] = False
 
     # ── 错误追踪 ────────────────────────────────────────────────────────────
@@ -494,23 +532,36 @@ class TravelAgentState(BaseModel):
         """
         if self.request_contract is not None:
             if self.intent_spec is None or self.planning_generation is None:
-                raise ValueError("request contract requires intent and planning generation state")
+                raise ValueError(
+                    "request contract requires intent and planning generation state"
+                )
             if self.request_contract.intent_spec != self.intent_spec:
-                raise ValueError("state intent specification differs from request contract")
-            if self.request_contract.generation_id != self.planning_generation.generation_id:
+                raise ValueError(
+                    "state intent specification differs from request contract"
+                )
+            if (
+                self.request_contract.generation_id
+                != self.planning_generation.generation_id
+            ):
                 raise ValueError("request contract and planning generation differ")
             if self.intent_spec_revision != self.intent_spec.revision:
-                raise ValueError("state intent revision differs from intent specification")
+                raise ValueError(
+                    "state intent revision differs from intent specification"
+                )
         if self.research_query_plan is not None:
             if self.planning_generation is None or self.intent_spec is None:
-                raise ValueError("research query plan requires intent and generation state")
+                raise ValueError(
+                    "research query plan requires intent and generation state"
+                )
             if (
                 self.research_query_plan.generation_id
                 != self.planning_generation.generation_id
                 or self.research_query_plan.intent_spec_revision
                 != self.intent_spec_revision
             ):
-                raise ValueError("research query plan belongs to an obsolete intent generation")
+                raise ValueError(
+                    "research query plan belongs to an obsolete intent generation"
+                )
         if self.capability_plan is not None:
             if self.research_query_plan is None:
                 raise ValueError("capability plan requires a research query plan")
@@ -519,10 +570,14 @@ class TravelAgentState(BaseModel):
                 not set(assignment.research_query_ids) <= known_query_ids
                 for assignment in self.capability_plan.assignments.values()
             ):
-                raise ValueError("capability assignment references an unknown research query")
+                raise ValueError(
+                    "capability assignment references an unknown research query"
+                )
         if self.candidate_selection_plan is not None:
             if self.recommendation_catalog is None:
-                raise ValueError("candidate selection plan requires a recommendation catalog")
+                raise ValueError(
+                    "candidate selection plan requires a recommendation catalog"
+                )
             if (
                 self.candidate_selection_plan.generation_id
                 != self.recommendation_catalog.generation_id
@@ -531,7 +586,21 @@ class TravelAgentState(BaseModel):
                 or self.candidate_selection_plan.catalog_revision
                 != self.recommendation_catalog.fact_data_revision
             ):
-                raise ValueError("candidate selection plan belongs to another catalog generation")
+                raise ValueError(
+                    "candidate selection plan belongs to another catalog generation"
+                )
+        if self.intent_coverage_report is not None:
+            if self.intent_spec is None or self.trip_workspace_v2 is None:
+                raise ValueError("intent coverage requires intent and workspace state")
+            if (
+                self.intent_coverage_report.generation_id
+                != self.intent_spec.generation_id
+                or self.intent_coverage_report.intent_spec_revision
+                != self.intent_spec.revision
+                or self.intent_coverage_report.workspace_revision
+                != self.trip_workspace_v2.workspace_revision
+            ):
+                raise ValueError("intent coverage belongs to obsolete planning state")
         draft = self.minimum_delivery_draft
         dependent_values = (
             self.run_deadline,
@@ -545,7 +614,8 @@ class TravelAgentState(BaseModel):
         draft_generation_matches = (
             self.planning_generation is not None
             and draft.planning_generation_id == self.planning_generation.generation_id
-            and draft.controlled_trip_identity_revision == self.controlled_trip_identity_revision
+            and draft.controlled_trip_identity_revision
+            == self.controlled_trip_identity_revision
             and draft.constraint_pack_revision == self.constraint_pack_revision
             and draft.plan_revision == self.plan_gate_revision_count
             and draft.intent_spec_revision == self.intent_spec_revision
@@ -560,24 +630,39 @@ class TravelAgentState(BaseModel):
             if draft.planning_authorized or any(
                 value is not None for value in dependent_values
             ):
-                raise ValueError("completion state belongs to an obsolete minimum delivery draft")
+                raise ValueError(
+                    "completion state belongs to an obsolete minimum delivery draft"
+                )
             return self
         if self.run_deadline is not None:
             if not draft.planning_authorized:
-                raise ValueError("run deadline requires a sealed minimum delivery draft")
+                raise ValueError(
+                    "run deadline requires a sealed minimum delivery draft"
+                )
             if self.run_deadline.draft_id != draft.draft_id:
-                raise ValueError("run deadline belongs to another minimum delivery draft")
+                raise ValueError(
+                    "run deadline belongs to another minimum delivery draft"
+                )
             if self.run_deadline.planning_authorized_at != draft.planning_authorized_at:
-                raise ValueError("run deadline authorization time differs from minimum delivery draft")
+                raise ValueError(
+                    "run deadline authorization time differs from minimum delivery draft"
+                )
         # 预算与 Deadline 同进同出：一个封了预算却没有 Deadline 的 Run 说明有一条
         # 路径只封了一半，而那条路径上的另一半不受任何上限约束。
         if (self.run_budget is None) != (self.run_deadline is None):
             raise ValueError("run budget and run deadline must be sealed together")
-        if self.terminal_attribution is not None and self.terminal_attribution.draft_id != draft.draft_id:
-            raise ValueError("terminal attribution belongs to another minimum delivery draft")
+        if (
+            self.terminal_attribution is not None
+            and self.terminal_attribution.draft_id != draft.draft_id
+        ):
+            raise ValueError(
+                "terminal attribution belongs to another minimum delivery draft"
+            )
         for attribution in self.gate_failure_attributions.values():
             if attribution.draft_id != draft.draft_id:
-                raise ValueError("gate failure attribution belongs to another minimum delivery draft")
+                raise ValueError(
+                    "gate failure attribution belongs to another minimum delivery draft"
+                )
         return self
 
     model_config = {"arbitrary_types_allowed": True}

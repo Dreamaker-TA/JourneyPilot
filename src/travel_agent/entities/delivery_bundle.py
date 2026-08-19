@@ -20,12 +20,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .candidate_discovery import CandidateDiscoveryRecord
 from .candidate_intent import CandidateIntentMatch
 from .candidate_ranking import CandidateRankingScore
+from .candidate_selection import CandidateSelectionPlan
+from .composition_mutation import CompositionMutation
 from .contract_base import StrictModel
+from .intent_coverage import (
+    EntityIntentExplanation,
+    IntentContractSnapshot,
+    IntentCoverageReport,
+)
 from .research_domain import ResearchDomain
 
 
-DELIVERY_BUNDLE_CONTRACT_VERSION = "journeypilot.delivery_bundle.v9"
-TRIP_WORKSPACE_CONTRACT_VERSION = "journeypilot.trip_workspace.v9"
+DELIVERY_BUNDLE_CONTRACT_VERSION = "journeypilot.delivery_bundle.v10"
+TRIP_WORKSPACE_CONTRACT_VERSION = "journeypilot.trip_workspace.v10"
 FACT_SNAPSHOT_CONTRACT_VERSION = "journeypilot.fact_store_snapshot.v4"
 WEATHER_SNAPSHOT_CONTRACT_VERSION = "journeypilot.weather_context_snapshot.v2"
 RESEARCH_PACKET_CONTRACT_VERSION = "journeypilot.research_packet.v5"
@@ -78,7 +85,9 @@ class CandidateConstraintEvaluation(StrictModel):
             object.__setattr__(
                 self,
                 "reason_code",
-                "missing_evidence" if self.status == "unknown" else "hard_constraint_failed",
+                "missing_evidence"
+                if self.status == "unknown"
+                else "hard_constraint_failed",
             )
         return self
 
@@ -92,7 +101,9 @@ class CandidateConstraintGateAttestation(StrictModel):
     Workspace operations verify it before they materialize a Candidate.
     """
 
-    schema_version: Literal["candidate_constraint_gate.v1"] = "candidate_constraint_gate.v1"
+    schema_version: Literal["candidate_constraint_gate.v1"] = (
+        "candidate_constraint_gate.v1"
+    )
     run_id: str = Field(min_length=1)
     research_packet_id: str = Field(min_length=1)
     worker_kind: Literal[
@@ -130,9 +141,9 @@ class EntityLineage(StrictModel):
     at every evidence consumer in the repo.
     """
 
-    lineage_kind: Literal[
-        "candidate_entity", "authored_entity", "reference_entity"
-    ] = "candidate_entity"
+    lineage_kind: Literal["candidate_entity", "authored_entity", "reference_entity"] = (
+        "candidate_entity"
+    )
     research_packet_id: Optional[str] = None
     candidate_id: Optional[str] = None
     selection_slot_id: Optional[str] = None
@@ -201,7 +212,10 @@ class UserInputAnchor(StrictModel):
             raise ValueError("intent-requirement input requires an intent id")
         if self.input_kind != "intent_requirement" and self.intent_id is not None:
             raise ValueError("only intent-requirement input may name an intent id")
-        if self.input_kind not in {"hard_constraint", "intent_requirement"} and self.public_summary is not None:
+        if (
+            self.input_kind not in {"hard_constraint", "intent_requirement"}
+            and self.public_summary is not None
+        ):
             raise ValueError("only contract inputs may define a public summary")
         if self.input_kind == "intent_requirement" and not self.public_summary:
             raise ValueError("intent-requirement input requires a public summary")
@@ -271,7 +285,9 @@ class GateFailureAttribution(StrictModel):
     @model_validator(mode="after")
     def validate_gate_attribution(self) -> "GateFailureAttribution":
         if self.recorded_at.tzinfo is None:
-            raise ValueError("gate failure attribution timestamps must be timezone-aware")
+            raise ValueError(
+                "gate failure attribution timestamps must be timezone-aware"
+            )
         if len(self.gap_ids) != len(set(self.gap_ids)):
             raise ValueError("gate failure attribution gap ids must be unique")
         return self
@@ -298,7 +314,9 @@ class MinimumDeliveryDayShell(StrictModel):
     def validate_time_structure(self) -> "MinimumDeliveryDayShell":
         expected = ["morning", "lunch", "afternoon", "evening"]
         if self.time_structure != expected:
-            raise ValueError("minimum delivery day shell must retain the four canonical time blocks")
+            raise ValueError(
+                "minimum delivery day shell must retain the four canonical time blocks"
+            )
         return self
 
 
@@ -327,27 +345,46 @@ class MinimumDeliveryDraft(StrictModel):
         if [item.day for item in self.day_shells] != list(
             range(1, len(self.day_shells) + 1)
         ):
-            raise ValueError("minimum delivery draft day shells must be contiguous from one")
+            raise ValueError(
+                "minimum delivery draft day shells must be contiguous from one"
+            )
         dates = [item.date for item in self.day_shells]
         if dates != [dates[0] + timedelta(days=index) for index in range(len(dates))]:
             raise ValueError("minimum delivery draft day dates must be contiguous")
         ids = [item.day_id for item in self.day_shells]
         if len(ids) != len(set(ids)):
             raise ValueError("minimum delivery draft day ids must be unique")
-        expected_lodging_nights = [index < len(self.day_shells) - 1 for index in range(len(self.day_shells))]
+        expected_lodging_nights = [
+            index < len(self.day_shells) - 1 for index in range(len(self.day_shells))
+        ]
         if [item.lodging_night for item in self.day_shells] != expected_lodging_nights:
-            raise ValueError("minimum delivery draft must retain every required lodging night")
+            raise ValueError(
+                "minimum delivery draft must retain every required lodging night"
+            )
         for index, item in enumerate(self.day_shells):
             if index == 0 and item.arrival_from_destination_id is not None:
-                raise ValueError("first minimum delivery day cannot have an inter-city arrival")
+                raise ValueError(
+                    "first minimum delivery day cannot have an inter-city arrival"
+                )
             if index > 0:
                 previous = self.day_shells[index - 1]
                 changed_destination = previous.destination_id != item.destination_id
-                if changed_destination != (item.arrival_from_destination_id is not None):
-                    raise ValueError("minimum delivery draft must retain each inter-city boundary")
-                if item.arrival_from_destination_id not in (None, previous.destination_id):
-                    raise ValueError("minimum delivery inter-city boundary must reference the prior destination")
-        if len(self.preserved_constraint_ids) != len(set(self.preserved_constraint_ids)):
+                if changed_destination != (
+                    item.arrival_from_destination_id is not None
+                ):
+                    raise ValueError(
+                        "minimum delivery draft must retain each inter-city boundary"
+                    )
+                if item.arrival_from_destination_id not in (
+                    None,
+                    previous.destination_id,
+                ):
+                    raise ValueError(
+                        "minimum delivery inter-city boundary must reference the prior destination"
+                    )
+        if len(self.preserved_constraint_ids) != len(
+            set(self.preserved_constraint_ids)
+        ):
             raise ValueError("minimum delivery draft constraints must be unique")
         anchor_ids = [item.anchor_id for item in self.user_input_anchors]
         if len(anchor_ids) != len(set(anchor_ids)):
@@ -358,9 +395,13 @@ class MinimumDeliveryDraft(StrictModel):
             if item.input_kind == "hard_constraint" and item.constraint_id is not None
         }
         if not set(self.preserved_constraint_ids) <= hard_constraint_ids:
-            raise ValueError("minimum delivery draft preserves an unanchored hard constraint")
+            raise ValueError(
+                "minimum delivery draft preserves an unanchored hard constraint"
+            )
         if self.planning_authorized != (self.planning_authorized_at is not None):
-            raise ValueError("draft authorization timestamp must match authorization state")
+            raise ValueError(
+                "draft authorization timestamp must match authorization state"
+            )
         return self
 
 
@@ -415,18 +456,26 @@ class RunDeadlineSnapshot(StrictModel):
             < self.delivery_deadline_seconds
         ):
             raise ValueError("run deadline windows must be strictly increasing")
-        if (self.target_at - self.planning_authorized_at).total_seconds() != self.target_seconds:
+        if (
+            self.target_at - self.planning_authorized_at
+        ).total_seconds() != self.target_seconds:
             raise ValueError("run target must match the snapshot target window")
-        if (self.closeout_at - self.planning_authorized_at).total_seconds() != self.closeout_seconds:
+        if (
+            self.closeout_at - self.planning_authorized_at
+        ).total_seconds() != self.closeout_seconds:
             raise ValueError("run closeout must match the snapshot closeout window")
         if (
             self.composition_at - self.planning_authorized_at
         ).total_seconds() != self.composition_seconds:
-            raise ValueError("run composition must match the snapshot composition window")
+            raise ValueError(
+                "run composition must match the snapshot composition window"
+            )
         if (
             self.delivery_deadline_at - self.planning_authorized_at
         ).total_seconds() != self.delivery_deadline_seconds:
-            raise ValueError("run delivery deadline must match the snapshot delivery window")
+            raise ValueError(
+                "run delivery deadline must match the snapshot delivery window"
+            )
         if self.last_observed_at < self.planning_authorized_at:
             raise ValueError("deadline observation predates planning authorization")
         return self
@@ -551,9 +600,14 @@ class TransportLeg(StrictModel):
     total_cost_cny: Optional[float] = Field(default=None, ge=0)
     transfer_count: int = Field(ge=0)
     segments: List[TransportSegment] = Field(default_factory=list)
-    booking_status: Literal["not_required", "recommended", "required", "booked", "unknown"]
+    booking_status: Literal[
+        "not_required", "recommended", "required", "booked", "unknown"
+    ]
     route_status: Literal["pending", "ready", "unavailable"]
-    mode_preference: TransportModePreference = Field(default_factory=TransportModePreference)
+    mode_preference: TransportModePreference = Field(
+        default_factory=TransportModePreference
+    )
+    intent_explanations: List[EntityIntentExplanation] = Field(default_factory=list)
     lineage: EntityLineage
 
     @model_validator(mode="after")
@@ -566,7 +620,10 @@ class TransportLeg(StrictModel):
         if self.segments:
             first = self.segments[0]
             last = self.segments[-1]
-            if first.from_endpoint != self.from_endpoint or last.to_endpoint != self.to_endpoint:
+            if (
+                first.from_endpoint != self.from_endpoint
+                or last.to_endpoint != self.to_endpoint
+            ):
                 raise ValueError("transport segment endpoints must match leg endpoints")
         return self
 
@@ -587,12 +644,15 @@ class ScheduledStopBase(StrictModel):
     duration_minutes: int = Field(ge=1)
     estimated_cost_cny: Optional[float] = Field(default=None, ge=0)
     selection_reason: str = Field(min_length=1)
+    intent_explanations: List[EntityIntentExplanation] = Field(default_factory=list)
     lineage: EntityLineage
 
 
 class VisitStop(ScheduledStopBase):
     type: Literal["visit_stop"] = "visit_stop"
-    visit_type: Literal["attraction", "experience", "culture", "shopping", "nature", "other"]
+    visit_type: Literal[
+        "attraction", "experience", "culture", "shopping", "nature", "other"
+    ]
     opening_window: Optional[str] = None
     reservation_required: Optional[bool] = None
     visit_highlights: List[str] = Field(default_factory=list)
@@ -631,6 +691,7 @@ class LodgingStay(StrictModel):
     )
     address: str = Field(min_length=1)
     selection_reason: str = Field(min_length=1)
+    intent_explanations: List[EntityIntentExplanation] = Field(default_factory=list)
     lineage: EntityLineage
 
     @model_validator(mode="after")
@@ -664,7 +725,9 @@ class TimelineEntryRef(StrictModel):
     entry_id: str = Field(min_length=1)
     entity_type: EntityType
     entity_id: str = Field(min_length=1)
-    projection_role: Literal["full", "departure", "arrival", "check_in", "check_out"] = "full"
+    projection_role: Literal[
+        "full", "departure", "arrival", "check_in", "check_out"
+    ] = "full"
 
 
 TransportProjectionShape = Literal[
@@ -800,7 +863,9 @@ class CostCoverageSummary(StrictModel):
     @model_validator(mode="after")
     def validate_coverage(self) -> "CostCoverageSummary":
         if self.priced_component_count > self.budget_relevant_component_count:
-            raise ValueError("priced component count cannot exceed budget-relevant count")
+            raise ValueError(
+                "priced component count cannot exceed budget-relevant count"
+            )
         expected_coverage = coverage_from_component_counts(
             priced_component_count=self.priced_component_count,
             budget_relevant_component_count=self.budget_relevant_component_count,
@@ -813,9 +878,13 @@ class CostCoverageSummary(StrictModel):
             raise ValueError("priced components require a known subtotal")
         if self.coverage == "complete":
             if self.estimated_total_cny != self.known_subtotal_cny:
-                raise ValueError("complete cost coverage requires an exact estimated total")
+                raise ValueError(
+                    "complete cost coverage requires an exact estimated total"
+                )
         elif self.estimated_total_cny is not None:
-            raise ValueError("incomplete cost coverage cannot publish an estimated total")
+            raise ValueError(
+                "incomplete cost coverage cannot publish an estimated total"
+            )
         expected_budget_status = "unknown"
         if (
             self.budget_cap_cny is not None
@@ -864,7 +933,9 @@ def build_cost_coverage_summary(
     subtotal = sum(known) if known else None
     budget_status = (
         "over_cap"
-        if budget_cap_cny is not None and subtotal is not None and subtotal > budget_cap_cny
+        if budget_cap_cny is not None
+        and subtotal is not None
+        and subtotal > budget_cap_cny
         else "within_cap"
         if budget_cap_cny is not None and coverage == "complete"
         else "unknown"
@@ -925,35 +996,43 @@ class StructuredItineraryV2(StrictModel):
             EntityType.VISIT_STOP: {item.item_id for item in self.visit_stops},
             EntityType.DINING_STOP: {item.item_id for item in self.dining_stops},
             EntityType.LODGING_STAY: {item.stay_id for item in self.lodging_stays},
-            EntityType.TRANSPORT_LEG: {item.transport_leg_id for item in self.transport_legs},
+            EntityType.TRANSPORT_LEG: {
+                item.transport_leg_id for item in self.transport_legs
+            },
             EntityType.CUSTOM_BLOCK: {item.item_id for item in self.custom_blocks},
             EntityType.TRANSPORT_SEGMENT: set(),
         }
         seen: set[tuple[str, EntityType, str, str]] = set()
-        transport_projections: Dict[
-            str, List[tuple[Optional[Date], str]]
-        ] = {}
+        transport_projections: Dict[str, List[tuple[Optional[Date], str]]] = {}
         for day in self.day_plans:
             for ref in day.timeline:
                 if ref.entity_type == EntityType.TRANSPORT_SEGMENT:
                     raise ValueError("transport segments cannot be timeline roots")
                 if ref.entity_id not in entities[ref.entity_type]:
-                    raise ValueError(f"dangling timeline reference: {ref.entity_type}/{ref.entity_id}")
+                    raise ValueError(
+                        f"dangling timeline reference: {ref.entity_type}/{ref.entity_id}"
+                    )
                 key = (day.day_id, ref.entity_type, ref.entity_id, ref.projection_role)
                 if key in seen:
                     raise ValueError("duplicate entity projection in day timeline")
                 seen.add(key)
                 if ref.entity_type == EntityType.TRANSPORT_LEG:
                     if ref.projection_role not in {"full", "departure", "arrival"}:
-                        raise ValueError("transport timeline has an invalid projection role")
+                        raise ValueError(
+                            "transport timeline has an invalid projection role"
+                        )
                     transport_projections.setdefault(ref.entity_id, []).append(
                         (day.date, ref.projection_role)
                     )
                 elif ref.entity_type == EntityType.LODGING_STAY:
                     if ref.projection_role not in {"check_in", "check_out"}:
-                        raise ValueError("lodging timeline has an invalid projection role")
+                        raise ValueError(
+                            "lodging timeline has an invalid projection role"
+                        )
                 elif ref.projection_role != "full":
-                    raise ValueError("ordinary timeline entities require the full projection role")
+                    raise ValueError(
+                        "ordinary timeline entities require the full projection role"
+                    )
         for leg in self.transport_legs:
             projections = transport_projections.get(leg.transport_leg_id, [])
             departure_date = leg.departure_at.date() if leg.departure_at else None
@@ -1008,7 +1087,9 @@ class CandidateBase(StrictModel):
     source_record_ids: List[str] = Field(min_length=1)
     field_paths: List[str] = Field(min_length=1)
     active_constraint_ids: List[str] = Field(default_factory=list)
-    constraint_evaluations: List[CandidateConstraintEvaluation] = Field(default_factory=list)
+    constraint_evaluations: List[CandidateConstraintEvaluation] = Field(
+        default_factory=list
+    )
     # This is populated exclusively by Candidate Gate after the model output
     # has been bound to authoritative packet metadata and constraints.
     constraint_gate_attestation: Optional[CandidateConstraintGateAttestation] = None
@@ -1043,10 +1124,14 @@ class VisitCandidate(CandidateBase):
     candidate_kind: Literal["visit"] = "visit"
     place_id: str = Field(min_length=1)
     provider_place_type: str = Field(min_length=1)
-    provider_country_code: str = Field(min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$")
+    provider_country_code: str = Field(
+        min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$"
+    )
     name: str = Field(min_length=1)
     address: str = Field(min_length=1)
-    visit_type: Literal["attraction", "experience", "culture", "shopping", "nature", "other"]
+    visit_type: Literal[
+        "attraction", "experience", "culture", "shopping", "nature", "other"
+    ]
     recommended_duration_minutes: int = Field(ge=1)
     estimated_cost_cny: Optional[float] = Field(default=None, ge=0)
     opening_window: Optional[str] = None
@@ -1062,7 +1147,9 @@ class DiningCandidate(CandidateBase):
     candidate_kind: Literal["dining"] = "dining"
     place_id: str = Field(min_length=1)
     provider_place_type: str = Field(min_length=1)
-    provider_country_code: str = Field(min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$")
+    provider_country_code: str = Field(
+        min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$"
+    )
     branch_name: str = Field(min_length=1)
     address: str = Field(min_length=1)
     meal_types: List[Literal["breakfast", "lunch", "dinner", "snack", "other"]] = Field(
@@ -1084,7 +1171,9 @@ class LodgingCandidate(CandidateBase):
     candidate_kind: Literal["lodging"] = "lodging"
     place_id: str = Field(min_length=1)
     provider_place_type: str = Field(min_length=1)
-    provider_country_code: str = Field(min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$")
+    provider_country_code: str = Field(
+        min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$"
+    )
     property_name: str = Field(min_length=1)
     address: str = Field(min_length=1)
     check_in_date: Date
@@ -1102,7 +1191,9 @@ class LodgingCandidate(CandidateBase):
     def validate_stay(self) -> "LodgingCandidate":
         expected = (self.check_out_date - self.check_in_date).days
         if expected < 1 or self.nights != expected:
-            raise ValueError("candidate nights must equal check-out date minus check-in date")
+            raise ValueError(
+                "candidate nights must equal check-out date minus check-in date"
+            )
         if (
             self.price_kind == "reference_estimate"
             and self.availability_status == "confirmed"
@@ -1133,7 +1224,9 @@ class TransportCandidate(CandidateBase):
     distance_meters: Optional[int] = Field(default=None, ge=0)
     total_cost_cny: Optional[float] = Field(default=None, ge=0)
     segments: List[TransportSegment] = Field(min_length=1)
-    booking_status: Literal["not_required", "recommended", "required", "booked", "unknown"]
+    booking_status: Literal[
+        "not_required", "recommended", "required", "booked", "unknown"
+    ]
 
     @model_validator(mode="after")
     def validate_segments(self) -> "TransportCandidate":
@@ -1291,7 +1384,9 @@ class DeliveryQualityGap(StrictModel):
     entity_id: Optional[str] = None
     candidate_id: Optional[str] = None
     worker_kind: Optional[
-        Literal["destination_researcher", "accommodation_researcher", "transport_researcher"]
+        Literal[
+            "destination_researcher", "accommodation_researcher", "transport_researcher"
+        ]
     ] = None
     repair_context: Dict[str, Any] = Field(default_factory=dict)
     gate_class: GateClass = GateClass.COMPOSITION
@@ -1380,9 +1475,16 @@ class SelectionSlot(StrictModel):
             raise ValueError("selection option ids must be unique")
         if not ids:
             if self.status == "ready":
-                raise ValueError("ready selection slot requires at least one passed option")
-            if self.recommended_option_id is not None or self.selected_option_id is not None:
-                raise ValueError("empty selection slot cannot name recommended or selected options")
+                raise ValueError(
+                    "ready selection slot requires at least one passed option"
+                )
+            if (
+                self.recommended_option_id is not None
+                or self.selected_option_id is not None
+            ):
+                raise ValueError(
+                    "empty selection slot cannot name recommended or selected options"
+                )
             return self
         if self.recommended_option_id not in ids:
             raise ValueError("recommended option must belong to the slot")
@@ -1393,7 +1495,9 @@ class SelectionSlot(StrictModel):
         expected_ranks = list(range(1, len(self.options) + 1))
         if sorted(item.rank for item in self.options) != expected_ranks:
             raise ValueError("selection option ranks must be contiguous from 1")
-        if any(item.selection_slot_id != self.selection_slot_id for item in self.options):
+        if any(
+            item.selection_slot_id != self.selection_slot_id for item in self.options
+        ):
             raise ValueError("selection option belongs to a different slot")
         return self
 
@@ -1415,7 +1519,9 @@ class SourceRecord(StrictModel):
     provider_valid_until: Optional[datetime] = None
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     snapshot: Dict[str, Any]
-    lifecycle_status: Literal["active", "superseded", "withdrawn", "rejected"] = "active"
+    lifecycle_status: Literal["active", "superseded", "withdrawn", "rejected"] = (
+        "active"
+    )
     tool_audit_id: Optional[str] = Field(default=None, min_length=1)
     cache_provenance: Optional[ProviderSnapshotProvenance] = None
 
@@ -1426,15 +1532,25 @@ class SourceRecord(StrictModel):
         if self.cache_provenance is not None:
             provenance = self.cache_provenance
             if provenance.provider_name != self.provider_name:
-                raise ValueError("cache provenance provider does not match the source record")
+                raise ValueError(
+                    "cache provenance provider does not match the source record"
+                )
             if provenance.content_hash != self.content_hash:
-                raise ValueError("cache provenance content hash does not match the source record")
+                raise ValueError(
+                    "cache provenance content hash does not match the source record"
+                )
             if provenance.observed_at != self.observed_at:
-                raise ValueError("cache provenance observation does not match the source record")
+                raise ValueError(
+                    "cache provenance observation does not match the source record"
+                )
             if provenance.retrieved_at != self.retrieved_at:
-                raise ValueError("cache provenance retrieval does not match the source record")
+                raise ValueError(
+                    "cache provenance retrieval does not match the source record"
+                )
             if provenance.provider_valid_until != self.provider_valid_until:
-                raise ValueError("cache provenance validity does not match the source record")
+                raise ValueError(
+                    "cache provenance validity does not match the source record"
+                )
         return self
 
 
@@ -1452,7 +1568,9 @@ class FactAssertion(StrictModel):
     unit: Optional[str] = None
     currency: Optional[str] = None
     criticality: Literal["execution_critical", "decision_critical", "auxiliary"]
-    status: Literal["verified", "refreshing", "stale", "conflict", "missing", "superseded"]
+    status: Literal[
+        "verified", "refreshing", "stale", "conflict", "missing", "superseded"
+    ]
     observed_at: Optional[datetime] = None
     effective_from: Optional[datetime] = None
     effective_to: Optional[datetime] = None
@@ -1462,7 +1580,9 @@ class FactAssertion(StrictModel):
 
     @model_validator(mode="after")
     def validate_verified_sources(self) -> "FactAssertion":
-        if self.status == "verified" and not any(link.relation == "supports" for link in self.source_links):
+        if self.status == "verified" and not any(
+            link.relation == "supports" for link in self.source_links
+        ):
             raise ValueError("verified fact requires a supporting source")
         return self
 
@@ -1519,7 +1639,10 @@ def _is_self_attested_fact(fact: FactAssertion) -> bool:
         return True
     return any(
         link.relation == "supports"
-        and any(marker in link.source_locator.lower() for marker in _SELF_ATTESTED_LOCATOR_MARKERS)
+        and any(
+            marker in link.source_locator.lower()
+            for marker in _SELF_ATTESTED_LOCATOR_MARKERS
+        )
         for link in fact.source_links
     )
 
@@ -1547,8 +1670,7 @@ def _is_supported_only_by_failed_sources(
         if link.relation == "supports"
     ]
     return bool(supporting_source_ids) and all(
-        _is_failed_source(sources.get(source_id))
-        for source_id in supporting_source_ids
+        _is_failed_source(sources.get(source_id)) for source_id in supporting_source_ids
     )
 
 
@@ -1584,7 +1706,10 @@ def _source_snapshot_contains_exact_value(source: SourceRecord, value: Any) -> b
     expected = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
     def contains(item: Any) -> bool:
-        if json.dumps(item, ensure_ascii=False, sort_keys=True, default=str) == expected:
+        if (
+            json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            == expected
+        ):
             return True
         if isinstance(item, dict):
             return any(contains(child) for child in item.values())
@@ -1651,14 +1776,18 @@ def _can_verify_stable_identity_fact(
 
 
 class FieldProvenance(StrictModel):
-    origin: Literal["external_fact", "planning_decision", "deterministic_computation", "user_input"]
+    origin: Literal[
+        "external_fact", "planning_decision", "deterministic_computation", "user_input"
+    ]
     entity_ref: EntityRef
     field_path: str = Field(min_length=1)
     reference_ids: List[str] = Field(min_length=1)
 
 
 class FactStoreSnapshot(StrictModel):
-    contract_version: Literal[FACT_SNAPSHOT_CONTRACT_VERSION] = FACT_SNAPSHOT_CONTRACT_VERSION
+    contract_version: Literal[FACT_SNAPSHOT_CONTRACT_VERSION] = (
+        FACT_SNAPSHOT_CONTRACT_VERSION
+    )
     fact_data_revision: int = Field(ge=0)
     source_records: List[SourceRecord] = Field(default_factory=list)
     fact_assertions: List[FactAssertion] = Field(default_factory=list)
@@ -1675,10 +1804,17 @@ class FactStoreSnapshot(StrictModel):
         for fact in self.fact_assertions:
             missing = {link.source_record_id for link in fact.source_links} - source_ids
             if missing:
-                raise ValueError(f"fact assertion references missing sources: {sorted(missing)}")
+                raise ValueError(
+                    f"fact assertion references missing sources: {sorted(missing)}"
+                )
         for provenance in self.field_provenance:
-            if provenance.origin == "external_fact" and not set(provenance.reference_ids) <= assertion_ids:
-                raise ValueError("external fact provenance references missing assertion")
+            if (
+                provenance.origin == "external_fact"
+                and not set(provenance.reference_ids) <= assertion_ids
+            ):
+                raise ValueError(
+                    "external fact provenance references missing assertion"
+                )
         return self
 
 
@@ -1692,7 +1828,9 @@ class ResearchPacket(StrictModel):
         revalidate_instances="always",
     )
 
-    contract_version: Literal[RESEARCH_PACKET_CONTRACT_VERSION] = RESEARCH_PACKET_CONTRACT_VERSION
+    contract_version: Literal[RESEARCH_PACKET_CONTRACT_VERSION] = (
+        RESEARCH_PACKET_CONTRACT_VERSION
+    )
     research_packet_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
     generation_id: str = Field(min_length=1)
@@ -1752,14 +1890,21 @@ class ResearchPacket(StrictModel):
             "accommodation_researcher": {"lodging"},
             "transport_researcher": {"transport"},
         }[self.worker_kind]
-        if any(candidate.candidate_kind not in allowed_kinds for candidate in self.candidates):
-            raise ValueError("research packet contains a candidate from another worker domain")
+        if any(
+            candidate.candidate_kind not in allowed_kinds
+            for candidate in self.candidates
+        ):
+            raise ValueError(
+                "research packet contains a candidate from another worker domain"
+            )
 
         unique_sources: Dict[str, SourceRecord] = {}
         for source in self.source_records:
             existing = unique_sources.get(source.source_record_id)
             if existing is not None and existing != source:
-                raise ValueError("research packet has conflicting duplicate source records")
+                raise ValueError(
+                    "research packet has conflicting duplicate source records"
+                )
             unique_sources.setdefault(source.source_record_id, source)
         source_index = unique_sources
         # An unknown source id is a broken packet boundary, not a recoverable
@@ -1771,7 +1916,9 @@ class ResearchPacket(StrictModel):
             for fact in self.fact_assertions
             for link in fact.source_links
         ):
-            raise ValueError("research packet fact references a source outside the packet")
+            raise ValueError(
+                "research packet fact references a source outside the packet"
+            )
         removed_fact_ids = {
             fact.fact_assertion_id
             for fact in self.fact_assertions
@@ -1801,7 +1948,9 @@ class ResearchPacket(StrictModel):
         if not self.candidates and eligible_facts:
             raise ValueError("zero-candidate research packet cannot contain facts")
         if not self.candidates and self.field_provenance:
-            raise ValueError("zero-candidate research packet cannot contain field provenance")
+            raise ValueError(
+                "zero-candidate research packet cannot contain field provenance"
+            )
         if removed_fact_ids or normalized_status_ids:
             object.__setattr__(self, "fact_assertions", eligible_facts)
             object.__setattr__(
@@ -1829,7 +1978,9 @@ class ResearchPacket(StrictModel):
         for fact in self.fact_assertions:
             existing = unique_facts.get(fact.fact_assertion_id)
             if existing is not None and existing != fact:
-                raise ValueError("research packet has conflicting duplicate fact assertions")
+                raise ValueError(
+                    "research packet has conflicting duplicate fact assertions"
+                )
             unique_facts.setdefault(fact.fact_assertion_id, fact)
         if len(unique_sources) != len(self.source_records):
             object.__setattr__(self, "source_records", list(unique_sources.values()))
@@ -1837,7 +1988,8 @@ class ResearchPacket(StrictModel):
             object.__setattr__(self, "fact_assertions", list(unique_facts.values()))
         fact_index = unique_facts
         provenance_keys = {
-            (item.entity_ref.entity_id, item.field_path) for item in self.field_provenance
+            (item.entity_ref.entity_id, item.field_path)
+            for item in self.field_provenance
         }
         if any(
             fact.status == "verified"
@@ -1875,10 +2027,13 @@ class ResearchPacket(StrictModel):
                 "verified transport value must exactly occur in a supporting route snapshot"
             )
         if any(
-            item.origin == "external_fact" and not set(item.reference_ids) <= fact_index.keys()
+            item.origin == "external_fact"
+            and not set(item.reference_ids) <= fact_index.keys()
             for item in self.field_provenance
         ):
-            raise ValueError("research packet provenance references a fact outside the packet")
+            raise ValueError(
+                "research packet provenance references a fact outside the packet"
+            )
         normalized_candidates: List[ResearchCandidate] = []
         source_order = [source.source_record_id for source in self.source_records]
         for candidate in self.candidates:
@@ -1888,7 +2043,9 @@ class ResearchPacket(StrictModel):
                 if fact.entity_ref.entity_id == candidate.candidate_id
             ]
             if not candidate_facts:
-                raise ValueError("candidate requires at least one identity-bound fact assertion")
+                raise ValueError(
+                    "candidate requires at least one identity-bound fact assertion"
+                )
             canonical_fact_ids = [fact.fact_assertion_id for fact in candidate_facts]
             canonical_field_paths = list(
                 dict.fromkeys(fact.field_path for fact in candidate_facts)
@@ -1926,7 +2083,9 @@ class ResearchPacket(StrictModel):
                 if link.relation == "supports"
             }
             canonical_source_ids = [
-                source_id for source_id in source_order if source_id in supported_sources
+                source_id
+                for source_id in source_order
+                if source_id in supported_sources
             ]
             if (
                 candidate.research_packet_id != self.research_packet_id
@@ -1983,14 +2142,30 @@ class RecommendationCatalog(StrictModel):
         packet_ids = [packet.research_packet_id for packet in self.research_packets]
         if len(packet_ids) != len(set(packet_ids)):
             raise ValueError("recommendation catalog packet ids must be unique")
-        candidates = [candidate for packet in self.research_packets for candidate in packet.candidates]
+        candidates = [
+            candidate
+            for packet in self.research_packets
+            for candidate in packet.candidates
+        ]
         candidate_ids = [candidate.candidate_id for candidate in candidates]
         if len(candidate_ids) != len(set(candidate_ids)):
-            raise ValueError("candidate identity cannot be duplicated across research packets")
-        if any(packet.fact_data_revision != self.fact_data_revision for packet in self.research_packets):
-            raise ValueError("research packet fact revision does not match recommendation catalog")
-        if any(packet.generation_id != self.generation_id for packet in self.research_packets):
-            raise ValueError("research packet generation does not match recommendation catalog")
+            raise ValueError(
+                "candidate identity cannot be duplicated across research packets"
+            )
+        if any(
+            packet.fact_data_revision != self.fact_data_revision
+            for packet in self.research_packets
+        ):
+            raise ValueError(
+                "research packet fact revision does not match recommendation catalog"
+            )
+        if any(
+            packet.generation_id != self.generation_id
+            for packet in self.research_packets
+        ):
+            raise ValueError(
+                "research packet generation does not match recommendation catalog"
+            )
         if any(
             packet.intent_spec_revision != self.intent_spec_revision
             for packet in self.research_packets
@@ -2013,7 +2188,9 @@ class RecommendationCatalog(StrictModel):
         ):
             raise ValueError("catalog discovery lineage differs from research packets")
         keys: set[tuple[str, Optional[str]]] = set()
-        candidate_index = {candidate.candidate_id: candidate for candidate in candidates}
+        candidate_index = {
+            candidate.candidate_id: candidate for candidate in candidates
+        }
         for admission in self.admission_results:
             candidate = candidate_index.get(admission.candidate_id)
             if candidate is None:
@@ -2029,9 +2206,13 @@ class RecommendationCatalog(StrictModel):
             if admission.status == "passed" and not set(
                 candidate.active_constraint_ids
             ) <= set(admission.checked_constraint_ids):
-                raise ValueError("passed admission did not check every active hard constraint")
+                raise ValueError(
+                    "passed admission did not check every active hard constraint"
+                )
             if set(admission.weather_impact_ids) != set(candidate.weather_impact_ids):
-                raise ValueError("candidate weather impact lineage differs from admission")
+                raise ValueError(
+                    "candidate weather impact lineage differs from admission"
+                )
         match_keys = [
             (match.candidate_id, match.intent_id)
             for match in self.candidate_intent_matches
@@ -2059,7 +2240,9 @@ class RecommendationCatalog(StrictModel):
             for candidate in packet.candidates
         }
 
-    def admission_index(self) -> Dict[tuple[str, Optional[str]], CandidateAdmissionResult]:
+    def admission_index(
+        self,
+    ) -> Dict[tuple[str, Optional[str]], CandidateAdmissionResult]:
         return {
             (result.candidate_id, result.selection_slot_id): result
             for result in self.admission_results
@@ -2095,11 +2278,17 @@ class WeatherCoverage(StrictModel):
         available = set(self.available_dates)
         unavailable = set(self.unavailable_dates)
         if available & unavailable:
-            raise ValueError("weather coverage date cannot be both available and unavailable")
+            raise ValueError(
+                "weather coverage date cannot be both available and unavailable"
+            )
         if self.status == "complete" and unavailable:
-            raise ValueError("complete weather coverage cannot contain unavailable dates")
+            raise ValueError(
+                "complete weather coverage cannot contain unavailable dates"
+            )
         if self.status == "unavailable" and available:
-            raise ValueError("unavailable weather coverage cannot contain available dates")
+            raise ValueError(
+                "unavailable weather coverage cannot contain available dates"
+            )
         return self
 
 
@@ -2136,7 +2325,9 @@ class WeatherDayContext(StrictModel):
             self.wind_speed_kph,
             self.wind_gust_kph,
         )
-        if self.data_kind == "unavailable" and any(value is not None for value in factual_values):
+        if self.data_kind == "unavailable" and any(
+            value is not None for value in factual_values
+        ):
             raise ValueError("unavailable weather must not contain fabricated facts")
         if self.data_kind == "seasonal_baseline" and (
             self.condition_code is not None
@@ -2182,9 +2373,16 @@ class WeatherImpact(StrictModel):
             "add_buffer",
             "require_plan_b",
         }:
-            raise ValueError("seasonal baseline cannot drive a day-specific itinerary change")
-        if self.severity == "high" and self.action not in {"replace", "change_transport"}:
-            raise ValueError("high weather impact must remove an unsafe candidate or transport mode")
+            raise ValueError(
+                "seasonal baseline cannot drive a day-specific itinerary change"
+            )
+        if self.severity == "high" and self.action not in {
+            "replace",
+            "change_transport",
+        }:
+            raise ValueError(
+                "high weather impact must remove an unsafe candidate or transport mode"
+            )
         return self
 
 
@@ -2293,7 +2491,9 @@ class WeatherAdjustmentProposal(StrictModel):
 
 
 class WeatherContextSnapshot(StrictModel):
-    contract_version: Literal[WEATHER_SNAPSHOT_CONTRACT_VERSION] = WEATHER_SNAPSHOT_CONTRACT_VERSION
+    contract_version: Literal[WEATHER_SNAPSHOT_CONTRACT_VERSION] = (
+        WEATHER_SNAPSHOT_CONTRACT_VERSION
+    )
     weather_data_revision: int = Field(ge=0)
     trip_start_date: Date
     trip_end_date: Date
@@ -2310,7 +2510,10 @@ class WeatherContextSnapshot(StrictModel):
         day_keys = [(day.destination_id, day.date) for day in self.days]
         if len(day_keys) != len(set(day_keys)):
             raise ValueError("weather destination/date pairs must be unique")
-        if any(day.date < self.trip_start_date or day.date > self.trip_end_date for day in self.days):
+        if any(
+            day.date < self.trip_start_date or day.date > self.trip_end_date
+            for day in self.days
+        ):
             raise ValueError("weather day falls outside trip date range")
         coverage_ids = [item.destination_id for item in self.coverage]
         if len(coverage_ids) != len(set(coverage_ids)):
@@ -2333,14 +2536,24 @@ class WeatherContextSnapshot(StrictModel):
         impact_index = {item.weather_impact_id: item for item in self.impacts}
         for proposal in self.adjustment_proposals:
             if proposal.base_weather_data_revision != self.weather_data_revision:
-                raise ValueError("weather proposal must bind the containing weather revision")
+                raise ValueError(
+                    "weather proposal must bind the containing weather revision"
+                )
             if not set(proposal.weather_impact_ids) <= impact_index.keys():
                 raise ValueError("weather proposal references a missing impact")
-            if any(impact_index[item].date != proposal.date for item in proposal.weather_impact_ids):
-                raise ValueError("weather proposal may only combine impacts from one day")
+            if any(
+                impact_index[item].date != proposal.date
+                for item in proposal.weather_impact_ids
+            ):
+                raise ValueError(
+                    "weather proposal may only combine impacts from one day"
+                )
             expected_severity = (
                 "high"
-                if any(impact_index[item].severity == "high" for item in proposal.weather_impact_ids)
+                if any(
+                    impact_index[item].severity == "high"
+                    for item in proposal.weather_impact_ids
+                )
                 else "medium"
             )
             if proposal.severity != expected_severity:
@@ -2354,22 +2567,99 @@ class WeatherProposalDecision(StrictModel):
 
 
 class TripWorkspaceV2(StrictModel):
-    contract_version: Literal[TRIP_WORKSPACE_CONTRACT_VERSION] = TRIP_WORKSPACE_CONTRACT_VERSION
+    contract_version: Literal[TRIP_WORKSPACE_CONTRACT_VERSION] = (
+        TRIP_WORKSPACE_CONTRACT_VERSION
+    )
     run_id: str = Field(min_length=1)
     generation_id: str = Field(min_length=1)
     workspace_revision: int = Field(ge=0)
     itinerary: StructuredItineraryV2
     recommendation_catalog: RecommendationCatalog
+    intent_contract_snapshot: IntentContractSnapshot
+    intent_coverage_report: Optional[IntentCoverageReport] = None
+    composition_mutations: List[CompositionMutation] = Field(default_factory=list)
+    candidate_selection_plan: CandidateSelectionPlan
     user_input_anchors: List[UserInputAnchor] = Field(default_factory=list)
     selection_slots: List[SelectionSlot] = Field(default_factory=list)
-    personalization_influences: List[PersonalizationInfluence] = Field(default_factory=list)
-    weather_proposal_decisions: List[WeatherProposalDecision] = Field(default_factory=list)
+    personalization_influences: List[PersonalizationInfluence] = Field(
+        default_factory=list
+    )
+    weather_proposal_decisions: List[WeatherProposalDecision] = Field(
+        default_factory=list
+    )
 
     @model_validator(mode="after")
     def validate_candidate_lineage(self) -> "TripWorkspaceV2":
         catalog = self.recommendation_catalog
         if catalog.generation_id != self.generation_id:
             raise ValueError("workspace and recommendation catalog generations differ")
+        if self.intent_contract_snapshot.generation_id != self.generation_id:
+            raise ValueError("workspace and intent contract generations differ")
+        if self.candidate_selection_plan.generation_id != self.generation_id:
+            raise ValueError("workspace and candidate selection generations differ")
+        if (
+            self.candidate_selection_plan.intent_spec_revision
+            != self.intent_contract_snapshot.intent_spec_revision
+        ):
+            raise ValueError(
+                "workspace intent and candidate selection revisions differ"
+            )
+        if self.candidate_selection_plan.catalog_revision != catalog.fact_data_revision:
+            raise ValueError(
+                "workspace candidate selection uses another catalog revision"
+            )
+        catalog_candidate_ids = set(catalog.candidate_index())
+        if (
+            not {entry.candidate_id for entry in self.candidate_selection_plan.entries}
+            <= catalog_candidate_ids
+        ):
+            raise ValueError(
+                "workspace candidate selection references a missing candidate"
+            )
+        admitted_candidate_ids = {
+            item.candidate_id
+            for item in catalog.admission_results
+            if item.status == "passed"
+        }
+        if not {
+            entry.candidate_id for entry in self.candidate_selection_plan.entries
+        } <= admitted_candidate_ids:
+            raise ValueError(
+                "workspace candidate selection references a rejected candidate"
+            )
+        if self.intent_coverage_report is not None:
+            if self.intent_coverage_report.generation_id != self.generation_id:
+                raise ValueError("workspace and intent coverage generations differ")
+            if (
+                self.intent_coverage_report.intent_spec_revision
+                != self.intent_contract_snapshot.intent_spec_revision
+            ):
+                raise ValueError("workspace and intent coverage intent revisions differ")
+            if (
+                self.intent_coverage_report.workspace_revision
+                != self.workspace_revision
+            ):
+                raise ValueError("workspace and intent coverage revisions differ")
+            requirement_ids = {
+                item.intent_id for item in self.intent_contract_snapshot.requirements
+            }
+            coverage_ids = {
+                item.intent_id for item in self.intent_coverage_report.items
+            }
+            if coverage_ids != requirement_ids:
+                raise ValueError(
+                    "workspace intent coverage does not match the intent contract"
+                )
+        mutation_ids = [item.mutation_id for item in self.composition_mutations]
+        if len(mutation_ids) != len(set(mutation_ids)):
+            raise ValueError("workspace composition mutations must be unique")
+        if any(
+            item.generation_id != self.generation_id
+            for item in self.composition_mutations
+        ):
+            raise ValueError(
+                "workspace composition mutation belongs to another generation"
+            )
         candidates = catalog.candidate_index()
         admissions = catalog.admission_index()
         anchor_ids = [item.anchor_id for item in self.user_input_anchors]
@@ -2386,7 +2676,9 @@ class TripWorkspaceV2(StrictModel):
         influence_ids = {item.influence_id for item in self.personalization_influences}
         if len(influence_ids) != len(self.personalization_influences):
             raise ValueError("personalization influence ids must be unique")
-        proposal_decision_ids = [item.proposal_id for item in self.weather_proposal_decisions]
+        proposal_decision_ids = [
+            item.proposal_id for item in self.weather_proposal_decisions
+        ]
         if len(proposal_decision_ids) != len(set(proposal_decision_ids)):
             raise ValueError("weather proposal decisions must be unique")
 
@@ -2415,20 +2707,32 @@ class TripWorkspaceV2(StrictModel):
             if not isinstance(candidate, expected_candidate_type):
                 raise ValueError("canonical entity references a cross-domain candidate")
             if packet_by_candidate[lineage.candidate_id] != lineage.research_packet_id:
-                raise ValueError("canonical entity research packet lineage is inconsistent")
-            admission = admissions.get((lineage.candidate_id, lineage.selection_slot_id))
+                raise ValueError(
+                    "canonical entity research packet lineage is inconsistent"
+                )
+            admission = admissions.get(
+                (lineage.candidate_id, lineage.selection_slot_id)
+            )
             invalid_selected_allowed = (
                 lineage.selection_slot_id is not None
                 and slot_status.get(lineage.selection_slot_id) == "needs_user_decision"
             )
-            if (admission is None or admission.status != "passed") and not invalid_selected_allowed:
+            if (
+                admission is None or admission.status != "passed"
+            ) and not invalid_selected_allowed:
                 raise ValueError("canonical entity candidate did not pass admission")
             if not set(lineage.fact_assertion_ids) <= set(candidate.fact_assertion_ids):
-                raise ValueError("canonical entity fact lineage exceeds candidate facts")
+                raise ValueError(
+                    "canonical entity fact lineage exceeds candidate facts"
+                )
             if not set(lineage.source_record_ids) <= set(candidate.source_record_ids):
-                raise ValueError("canonical entity source lineage exceeds candidate sources")
+                raise ValueError(
+                    "canonical entity source lineage exceeds candidate sources"
+                )
             if not set(lineage.personalization_influence_ids) <= influence_ids:
-                raise ValueError("canonical entity references a missing personalization influence")
+                raise ValueError(
+                    "canonical entity references a missing personalization influence"
+                )
 
         slot_ids = [slot.selection_slot_id for slot in self.selection_slots]
         if len(slot_ids) != len(set(slot_ids)):
@@ -2444,37 +2748,69 @@ class TripWorkspaceV2(StrictModel):
         for slot in self.selection_slots:
             target = slot_targets[slot.slot_type].get(slot.target_entity_id)
             if target is None:
-                raise ValueError("selection slot target is missing from canonical itinerary")
+                raise ValueError(
+                    "selection slot target is missing from canonical itinerary"
+                )
             if not slot.options:
                 continue
             for option in slot.options:
                 candidate = candidates.get(option.candidate_id)
                 expected_kind = slot.slot_type
                 if candidate is None or candidate.candidate_kind != expected_kind:
-                    raise ValueError("selection option references a missing or cross-domain candidate")
-                admission = admissions.get((option.candidate_id, slot.selection_slot_id))
+                    raise ValueError(
+                        "selection option references a missing or cross-domain candidate"
+                    )
+                admission = admissions.get(
+                    (option.candidate_id, slot.selection_slot_id)
+                )
                 if admission is None or admission.status != "passed":
-                    raise ValueError("selection option candidate did not pass admission for the slot")
+                    raise ValueError(
+                        "selection option candidate did not pass admission for the slot"
+                    )
                 if option.candidate_entity_ref.entity_id != slot.target_entity_id:
-                    raise ValueError("selection option entity ref must target the slot canonical entity")
+                    raise ValueError(
+                        "selection option entity ref must target the slot canonical entity"
+                    )
                 expected_entity_type = SELECTION_SLOT_ENTITY_TYPES[slot.slot_type]
                 if option.candidate_entity_ref.entity_type != expected_entity_type:
-                    raise ValueError("selection option entity ref has the wrong domain type")
-                if not set(option.fact_assertion_ids) <= set(candidate.fact_assertion_ids):
-                    raise ValueError("selection option fact refs exceed candidate facts")
-                if not set(option.source_record_ids) <= set(candidate.source_record_ids):
-                    raise ValueError("selection option source refs exceed candidate sources")
+                    raise ValueError(
+                        "selection option entity ref has the wrong domain type"
+                    )
+                if not set(option.fact_assertion_ids) <= set(
+                    candidate.fact_assertion_ids
+                ):
+                    raise ValueError(
+                        "selection option fact refs exceed candidate facts"
+                    )
+                if not set(option.source_record_ids) <= set(
+                    candidate.source_record_ids
+                ):
+                    raise ValueError(
+                        "selection option source refs exceed candidate sources"
+                    )
                 if not set(option.personalization_influence_ids) <= influence_ids:
-                    raise ValueError("selection option references a missing personalization influence")
+                    raise ValueError(
+                        "selection option references a missing personalization influence"
+                    )
             if slot.selected_option_id is None:
                 if slot.status != "needs_user_decision":
-                    raise ValueError("unselected non-empty slot must require a user decision")
+                    raise ValueError(
+                        "unselected non-empty slot must require a user decision"
+                    )
                 continue
-            selected = next(option for option in slot.options if option.option_id == slot.selected_option_id)
+            selected = next(
+                option
+                for option in slot.options
+                if option.option_id == slot.selected_option_id
+            )
             if target.lineage.candidate_id != selected.candidate_id:
-                raise ValueError("canonical selected entity does not match slot selected option")
+                raise ValueError(
+                    "canonical selected entity does not match slot selected option"
+                )
             if target.lineage.selection_slot_id != slot.selection_slot_id:
-                raise ValueError("canonical selected entity is missing its selection slot lineage")
+                raise ValueError(
+                    "canonical selected entity is missing its selection slot lineage"
+                )
         return self
 
 
@@ -2648,7 +2984,9 @@ class TripReportProjection(StrictModel):
 
     @model_validator(mode="after")
     def validate_lifecycle(self) -> "TripReportProjection":
-        if self.status == "ready" and (self.document is None or self.generated_at is None):
+        if self.status == "ready" and (
+            self.document is None or self.generated_at is None
+        ):
             raise ValueError("ready report requires a document and generated timestamp")
         if self.status == "failed" and not self.failure_reason:
             raise ValueError("failed report requires a failure reason")
@@ -2672,7 +3010,9 @@ class MapPlaceProjection(StrictModel):
         }:
             raise ValueError("map place projection must reference a real place entity")
         if (self.latitude is None) != (self.longitude is None):
-            raise ValueError("map place coordinates must be both present or both absent")
+            raise ValueError(
+                "map place coordinates must be both present or both absent"
+            )
         return self
 
 
@@ -2717,7 +3057,9 @@ class SourceIndexProjection(StrictModel):
 
 
 class DeliveryRevisionManifest(StrictModel):
-    contract_version: Literal[DELIVERY_BUNDLE_CONTRACT_VERSION] = DELIVERY_BUNDLE_CONTRACT_VERSION
+    contract_version: Literal[DELIVERY_BUNDLE_CONTRACT_VERSION] = (
+        DELIVERY_BUNDLE_CONTRACT_VERSION
+    )
     run_id: str = Field(min_length=1)
     generation_id: str = Field(min_length=1)
     bundle_id: str = Field(min_length=1)
@@ -2784,7 +3126,9 @@ def _report_entity_kind(entity_type: EntityType) -> str:
     }[entity_type]
 
 
-def _immutable_source_payload(source: Optional[SourceRecord]) -> Optional[Dict[str, Any]]:
+def _immutable_source_payload(
+    source: Optional[SourceRecord],
+) -> Optional[Dict[str, Any]]:
     if source is None:
         return None
     return source.model_dump(mode="json", exclude={"lifecycle_status"})
@@ -2810,6 +3154,8 @@ class DeliveryBundle(StrictModel):
 
     @model_validator(mode="after")
     def validate_manifest(self) -> "DeliveryBundle":
+        if self.workspace.intent_coverage_report is None:
+            raise ValueError("delivery bundle requires an intent coverage report")
         revisions = (
             self.workspace.workspace_revision,
             self.fact_snapshot.fact_data_revision,
@@ -2854,30 +3200,44 @@ class DeliveryBundle(StrictModel):
                 != _immutable_source_payload(item)
                 for item in packet.source_records
             ):
-                raise ValueError("research packet source is absent from current fact snapshot")
+                raise ValueError(
+                    "research packet source is absent from current fact snapshot"
+                )
             if any(
                 _immutable_fact_payload(fact_index.get(item.fact_assertion_id))
                 != _immutable_fact_payload(item)
                 for item in packet.fact_assertions
             ):
-                raise ValueError("research packet fact is absent from current fact snapshot")
+                raise ValueError(
+                    "research packet fact is absent from current fact snapshot"
+                )
             if any(
-                json.dumps(item.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+                json.dumps(
+                    item.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+                )
                 not in provenance
                 for item in packet.field_provenance
             ):
-                raise ValueError("research packet provenance is absent from current fact snapshot")
+                raise ValueError(
+                    "research packet provenance is absent from current fact snapshot"
+                )
         for weather_day in self.weather_snapshot.days:
-            expected_entity_id = f"weather:{weather_day.destination_id}:{weather_day.date.isoformat()}"
+            expected_entity_id = (
+                f"weather:{weather_day.destination_id}:{weather_day.date.isoformat()}"
+            )
             for assertion_id in weather_day.fact_assertion_ids:
                 assertion = fact_index.get(assertion_id)
                 if assertion is None:
-                    raise ValueError("weather context fact is absent from current fact snapshot")
+                    raise ValueError(
+                        "weather context fact is absent from current fact snapshot"
+                    )
                 if (
                     assertion.entity_ref.entity_type != EntityType.WEATHER_DAY
                     or assertion.entity_ref.entity_id != expected_entity_id
                 ):
-                    raise ValueError("weather context fact targets another destination/date")
+                    raise ValueError(
+                        "weather context fact targets another destination/date"
+                    )
         for impact in self.weather_snapshot.impacts:
             if not set(impact.fact_assertion_ids) <= fact_index.keys():
                 raise ValueError("weather impact references a missing fact assertion")
@@ -2889,7 +3249,9 @@ class DeliveryBundle(StrictModel):
                 raise ValueError("candidate references a missing weather impact")
         for admission in catalog.admission_results:
             if not set(admission.weather_impact_ids) <= weather_impact_ids:
-                raise ValueError("candidate admission references a missing weather impact")
+                raise ValueError(
+                    "candidate admission references a missing weather impact"
+                )
         for entity in [
             *self.workspace.itinerary.visit_stops,
             *self.workspace.itinerary.dining_stops,
@@ -2900,7 +3262,8 @@ class DeliveryBundle(StrictModel):
                 raise ValueError("canonical entity references a missing weather impact")
         itinerary = self.workspace.itinerary
         scheduled_ids = {
-            item.item_id for item in [
+            item.item_id
+            for item in [
                 *itinerary.visit_stops,
                 *itinerary.dining_stops,
                 *itinerary.custom_blocks,
@@ -2919,11 +3282,15 @@ class DeliveryBundle(StrictModel):
             if not set(proposal.fact_assertion_ids) <= fact_index.keys():
                 raise ValueError("weather proposal references a missing fact assertion")
             if proposal.base_workspace_revision > self.workspace.workspace_revision:
-                raise ValueError("weather proposal cannot reference a future workspace revision")
+                raise ValueError(
+                    "weather proposal cannot reference a future workspace revision"
+                )
             for operation in proposal.operations:
                 if isinstance(operation, WeatherRescheduleOperation):
                     if operation.item_id not in scheduled_ids:
-                        raise ValueError("weather reschedule references a missing scheduled item")
+                        raise ValueError(
+                            "weather reschedule references a missing scheduled item"
+                        )
                 elif isinstance(operation, WeatherSelectionOperation):
                     if operation.selection_slot_id not in slot_ids:
                         raise ValueError("weather selection references a missing slot")
@@ -2936,10 +3303,14 @@ class DeliveryBundle(StrictModel):
                         or admission is None
                         or admission.status != "passed"
                     ):
-                        raise ValueError("weather visit replacement is not an admitted visit")
+                        raise ValueError(
+                            "weather visit replacement is not an admitted visit"
+                        )
                 elif isinstance(operation, WeatherTransportModeOperation):
                     if operation.transport_leg_id not in transport_ids:
-                        raise ValueError("weather transport adjustment references a missing leg")
+                        raise ValueError(
+                            "weather transport adjustment references a missing leg"
+                        )
                 elif operation.target_entity_id not in timeline_by_day.get(
                     operation.day_id, set()
                 ):
@@ -2949,47 +3320,69 @@ class DeliveryBundle(StrictModel):
             self.report_projection.source_fact_data_revision,
             self.report_projection.source_weather_data_revision,
         )
-        if self.report_projection.status == "ready" and projection_revisions != revisions:
+        if (
+            self.report_projection.status == "ready"
+            and projection_revisions != revisions
+        ):
             raise ValueError("ready report projection is not based on bundle revisions")
         if self.report_projection.status == "stale":
-            if any(source > current for source, current in zip(projection_revisions, revisions)):
-                raise ValueError("stale report projection cannot reference a future revision")
+            if any(
+                source > current
+                for source, current in zip(projection_revisions, revisions)
+            ):
+                raise ValueError(
+                    "stale report projection cannot reference a future revision"
+                )
         if self.map_projection.source_workspace_revision != revisions[0]:
             raise ValueError("map projection is not based on workspace revision")
         if self.source_index.source_fact_data_revision != revisions[1]:
             raise ValueError("source index is not based on fact revision")
-        real_workspace_entity_refs = {
-            (EntityType.VISIT_STOP, item.item_id)
-            for item in self.workspace.itinerary.visit_stops
-        } | {
-            (EntityType.DINING_STOP, item.item_id)
-            for item in self.workspace.itinerary.dining_stops
-        } | {
-            (EntityType.LODGING_STAY, item.stay_id)
-            for item in self.workspace.itinerary.lodging_stays
-        } | {
-            (EntityType.TRANSPORT_LEG, item.transport_leg_id)
-            for item in self.workspace.itinerary.transport_legs
-        } | {
-            (EntityType.CUSTOM_BLOCK, item.item_id)
-            for item in self.workspace.itinerary.custom_blocks
-        }
+        real_workspace_entity_refs = (
+            {
+                (EntityType.VISIT_STOP, item.item_id)
+                for item in self.workspace.itinerary.visit_stops
+            }
+            | {
+                (EntityType.DINING_STOP, item.item_id)
+                for item in self.workspace.itinerary.dining_stops
+            }
+            | {
+                (EntityType.LODGING_STAY, item.stay_id)
+                for item in self.workspace.itinerary.lodging_stays
+            }
+            | {
+                (EntityType.TRANSPORT_LEG, item.transport_leg_id)
+                for item in self.workspace.itinerary.transport_legs
+            }
+            | {
+                (EntityType.CUSTOM_BLOCK, item.item_id)
+                for item in self.workspace.itinerary.custom_blocks
+            }
+        )
         workspace_entity_refs = real_workspace_entity_refs
         projection_fact_ids_by_ref: Dict[tuple[EntityType, str], set[str]] = {
             **{
-                (EntityType.VISIT_STOP, item.item_id): set(item.lineage.fact_assertion_ids)
+                (EntityType.VISIT_STOP, item.item_id): set(
+                    item.lineage.fact_assertion_ids
+                )
                 for item in self.workspace.itinerary.visit_stops
             },
             **{
-                (EntityType.DINING_STOP, item.item_id): set(item.lineage.fact_assertion_ids)
+                (EntityType.DINING_STOP, item.item_id): set(
+                    item.lineage.fact_assertion_ids
+                )
                 for item in self.workspace.itinerary.dining_stops
             },
             **{
-                (EntityType.LODGING_STAY, item.stay_id): set(item.lineage.fact_assertion_ids)
+                (EntityType.LODGING_STAY, item.stay_id): set(
+                    item.lineage.fact_assertion_ids
+                )
                 for item in self.workspace.itinerary.lodging_stays
             },
             **{
-                (EntityType.TRANSPORT_LEG, item.transport_leg_id): set(item.lineage.fact_assertion_ids)
+                (EntityType.TRANSPORT_LEG, item.transport_leg_id): set(
+                    item.lineage.fact_assertion_ids
+                )
                 if item.route_status == "ready"
                 else set()
                 for item in self.workspace.itinerary.transport_legs
@@ -3022,7 +3415,9 @@ class DeliveryBundle(StrictModel):
             ref = (citation.entity_ref.entity_type, citation.entity_ref.entity_id)
             allowed_fact_ids = projection_fact_ids_by_ref.get(ref)
             if allowed_fact_ids is None:
-                raise ValueError("source projection contains a dangling entity reference")
+                raise ValueError(
+                    "source projection contains a dangling entity reference"
+                )
             if not set(citation.fact_assertion_ids) <= allowed_fact_ids:
                 raise ValueError(
                     "source projection attributes facts to the wrong entity or selection option"
@@ -3034,21 +3429,31 @@ class DeliveryBundle(StrictModel):
                 raise ValueError("source projection references a missing source record")
         map_refs = {
             (item.entity_ref.entity_type, item.entity_ref.entity_id)
-            for item in [*self.map_projection.content.places, *self.map_projection.content.routes]
+            for item in [
+                *self.map_projection.content.places,
+                *self.map_projection.content.routes,
+            ]
         }
         if not map_refs <= real_workspace_entity_refs:
-            raise ValueError("map projection references an entity outside the itinerary")
+            raise ValueError(
+                "map projection references an entity outside the itinerary"
+            )
         known_citations = set(citation_ids)
         map_citations = {
             citation_id
-            for item in [*self.map_projection.content.places, *self.map_projection.content.routes]
+            for item in [
+                *self.map_projection.content.places,
+                *self.map_projection.content.routes,
+            ]
             for citation_id in item.citation_ids
         }
         if not map_citations <= known_citations:
             raise ValueError("map projection references a missing public citation")
         if self.report_projection.status == "ready":
             if self.report_projection.citations != citations:
-                raise ValueError("report and source index must share one citation projection")
+                raise ValueError(
+                    "report and source index must share one citation projection"
+                )
             document = self.report_projection.document
             assert document is not None
             report_refs = {
@@ -3057,48 +3462,67 @@ class DeliveryBundle(StrictModel):
                 for block in day.blocks
             }
             if not report_refs <= workspace_entity_refs:
-                raise ValueError("report projection contains a dangling workspace entity reference")
+                raise ValueError(
+                    "report projection contains a dangling workspace entity reference"
+                )
             if any(
                 block.entity_kind != _report_entity_kind(block.entity_ref.entity_type)
                 for day in document.days
                 for block in day.blocks
             ):
-                raise ValueError("report projection renders an entity with the wrong content type")
+                raise ValueError(
+                    "report projection renders an entity with the wrong content type"
+                )
             if any(
                 not set(block.weather_impact_ids) <= weather_impact_ids
                 for day in document.days
                 for block in day.blocks
             ):
-                raise ValueError("report projection references a missing weather impact")
+                raise ValueError(
+                    "report projection references a missing weather impact"
+                )
             expected_timeline = [
                 (day.day_id, ref.entity_type, ref.entity_id, ref.projection_role)
                 for day in self.workspace.itinerary.day_plans
                 for ref in day.timeline
             ]
             projected_timeline = [
-                (day.day_id, block.entity_ref.entity_type, block.entity_ref.entity_id, block.projection_role)
+                (
+                    day.day_id,
+                    block.entity_ref.entity_type,
+                    block.entity_ref.entity_id,
+                    block.projection_role,
+                )
                 for day in document.days
                 for block in day.blocks
             ]
             if projected_timeline != expected_timeline:
-                raise ValueError("report projection must preserve the canonical timeline and projection roles")
-            report_citations = {
-                citation_id
-                for day in document.days
-                for block in day.blocks
-                for citation_id in block.citation_ids
-            } | {
-                citation_id
-                for selection in document.selections
-                for option in selection.options
-                for citation_id in option.citation_ids
-            } | {
-                citation_id
-                for day in document.weather
-                for citation_id in day.citation_ids
-            }
+                raise ValueError(
+                    "report projection must preserve the canonical timeline and projection roles"
+                )
+            report_citations = (
+                {
+                    citation_id
+                    for day in document.days
+                    for block in day.blocks
+                    for citation_id in block.citation_ids
+                }
+                | {
+                    citation_id
+                    for selection in document.selections
+                    for option in selection.options
+                    for citation_id in option.citation_ids
+                }
+                | {
+                    citation_id
+                    for day in document.weather
+                    for citation_id in day.citation_ids
+                }
+            )
             if not report_citations <= known_citations:
-                raise ValueError("report projection references a missing public citation")
+                raise ValueError(
+                    "report projection references a missing public citation"
+                )
         expected_hashes = bundle_content_hashes(
             workspace=self.workspace,
             fact_snapshot=self.fact_snapshot,
@@ -3135,8 +3559,7 @@ def _normalize_canonical_json_numbers(value: Any) -> Any:
 
     if isinstance(value, dict):
         return {
-            key: _normalize_canonical_json_numbers(item)
-            for key, item in value.items()
+            key: _normalize_canonical_json_numbers(item) for key, item in value.items()
         }
     if isinstance(value, list):
         return [_normalize_canonical_json_numbers(item) for item in value]

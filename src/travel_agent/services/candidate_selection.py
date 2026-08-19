@@ -9,18 +9,155 @@ from ..entities.candidate_selection import (
     CandidateSelectionEntry,
     CandidateSelectionPlan,
     CandidateSelectionRole,
+    SelectedCandidateCapability,
+    SelectionPolicy,
 )
-from ..entities.delivery_bundle import RecommendationCatalog, ResearchCandidate
+from ..entities.delivery_bundle import (
+    DiningCandidate,
+    LodgingCandidate,
+    RecommendationCatalog,
+    ResearchCandidate,
+    TransportCandidate,
+    VisitCandidate,
+)
 from ..entities.intent_spec import (
+    AlternativeIntentValue,
     IntentKind,
     IntentSpec,
     IntentTarget,
+    ScalarIntentValue,
     canonical_json_hash,
 )
 from ..entities.research_domain import ResearchDomain
 
 
 CANDIDATE_SELECTION_POLICY_VERSION = "candidate_selection.v1"
+
+
+def rebind_candidate_selection_catalog_revision(
+    plan: CandidateSelectionPlan,
+    catalog_revision: int,
+) -> CandidateSelectionPlan:
+    material = {
+        "generation_id": plan.generation_id,
+        "intent_spec_revision": plan.intent_spec_revision,
+        "catalog_revision": catalog_revision,
+        "entries": [entry.model_dump(mode="json") for entry in plan.entries],
+        "covered_intent_ids": plan.covered_intent_ids,
+        "uncovered_intent_ids": plan.uncovered_intent_ids,
+        "selection_policy": plan.selection_policy.model_dump(mode="json"),
+    }
+    content_hash = canonical_json_hash(material)
+    return plan.model_copy(
+        update={
+            "selection_plan_id": f"selection_plan_{content_hash[:24]}",
+            "catalog_revision": catalog_revision,
+            "content_hash": content_hash,
+        }
+    )
+
+
+def selection_policy_from_intent_spec(
+    intent_spec: IntentSpec,
+    *,
+    avoid_previous_candidate_ids: Iterable[str] = (),
+) -> SelectionPolicy:
+    explore_intents = [
+        intent
+        for intent in intent_spec.active_items
+        if intent.kind in {IntentKind.DIVERSITY, IntentKind.ALTERNATIVES}
+    ]
+    if not explore_intents:
+        return SelectionPolicy(policy_version=CANDIDATE_SELECTION_POLICY_VERSION)
+    alternative_count = max(
+        (
+            intent.value.count
+            for intent in explore_intents
+            if isinstance(intent.value, AlternativeIntentValue)
+        ),
+        default=1,
+    )
+    theme_clusters = sorted(
+        {
+            intent.value.value
+            for intent in explore_intents
+            if isinstance(intent.value, ScalarIntentValue)
+        }
+    )
+    seed_material = {
+        "generation_id": intent_spec.generation_id,
+        "intent_spec_revision": intent_spec.revision,
+        "explore_intent_ids": sorted(intent.intent_id for intent in explore_intents),
+    }
+    seed = int(canonical_json_hash(seed_material)[:16], 16)
+    return SelectionPolicy(
+        mode="explore",
+        selection_seed=seed,
+        alternative_count=alternative_count,
+        diversity_strength=0.65,
+        avoid_previous_candidate_ids=sorted(set(avoid_previous_candidate_ids)),
+        preferred_theme_clusters=theme_clusters,
+        policy_version=CANDIDATE_SELECTION_POLICY_VERSION,
+    )
+
+
+def _ranking_quality(score: CandidateRankingScore) -> float:
+    return (
+        score.high_priority_coverage_score
+        + score.semantic_fit
+        + score.evidence_confidence
+        + score.budget_fit
+        + score.weather_fit
+        + score.constraint_fit
+        + score.regional_fit
+        + score.diversity_potential
+        - score.generic_fallback_penalty
+        - score.redundancy_penalty
+        - score.travel_cost_penalty
+    )
+
+
+def _apply_explore_order(
+    candidate_ids: list[str],
+    *,
+    candidates: dict[str, ResearchCandidate],
+    rankings: dict[str, CandidateRankingScore],
+    policy: SelectionPolicy,
+) -> list[str]:
+    if policy.mode != "explore" or policy.selection_seed is None:
+        return candidate_ids
+    previous = set(policy.avoid_previous_candidate_ids)
+    leader_quality: dict[tuple[ResearchDomain, str], float] = {}
+    for candidate_id in candidate_ids:
+        candidate = candidates[candidate_id]
+        key = (_domain(candidate), candidate.destination_id)
+        leader_quality.setdefault(key, _ranking_quality(rankings[candidate_id]))
+    threshold = 0.2 * policy.diversity_strength
+
+    def key(candidate_id: str):
+        candidate = candidates[candidate_id]
+        group = (_domain(candidate), candidate.destination_id)
+        score = rankings[candidate_id]
+        quality = _ranking_quality(score)
+        close_to_leader = leader_quality[group] - quality <= threshold
+        seeded_order = canonical_json_hash(
+            {
+                "seed": policy.selection_seed,
+                "candidate_id": candidate_id,
+                "policy_version": policy.policy_version,
+            }
+        )
+        return (
+            group[0].value,
+            group[1],
+            candidate_id in previous,
+            not close_to_leader,
+            seeded_order if close_to_leader else "",
+            tuple(-value for value in score.ranking_tuple),
+            candidate_id,
+        )
+
+    return sorted(candidate_ids, key=key)
 
 
 def _domain(candidate: ResearchCandidate) -> ResearchDomain:
@@ -49,7 +186,12 @@ def _positive_intent_ids(intent_spec: IntentSpec) -> set[str]:
         intent.intent_id
         for intent in intent_spec.active_items
         if intent.target in targets
-        and intent.kind is not IntentKind.MUST_EXCLUDE
+        and intent.kind
+        not in {
+            IntentKind.MUST_EXCLUDE,
+            IntentKind.DIVERSITY,
+            IntentKind.ALTERNATIVES,
+        }
         and any(stage in intent.impact_stages for stage in ("research", "ranking"))
     }
 
@@ -75,6 +217,7 @@ def build_candidate_selection_plan(
     ranking_scores: Iterable[CandidateRankingScore],
     duration_days: int,
     destination_count: int,
+    selection_policy: SelectionPolicy | None = None,
 ) -> CandidateSelectionPlan:
     candidates = catalog.candidate_index()
     rankings = {score.candidate_id: score for score in ranking_scores}
@@ -91,6 +234,13 @@ def build_candidate_selection_plan(
             tuple(-value for value in rankings[candidate_id].ranking_tuple),
             candidate_id,
         )
+    )
+    policy = selection_policy or selection_policy_from_intent_spec(intent_spec)
+    eligible = _apply_explore_order(
+        eligible,
+        candidates=candidates,
+        rankings=rankings,
+        policy=policy,
     )
     positive_intents = _positive_intent_ids(intent_spec)
     required_intents = {
@@ -181,12 +331,13 @@ def build_candidate_selection_plan(
         add(candidate_id, CandidateSelectionRole.PRIMARY)
 
     for domain in ResearchDomain:
+        alternative_limit = max(policy.alternative_count - 1, 1)
         alternatives = [
             candidate_id
             for candidate_id in eligible
             if candidate_id not in selected
             and _domain(candidates[candidate_id]) is domain
-        ][:2]
+        ][:alternative_limit]
         for candidate_id in alternatives:
             add(candidate_id, CandidateSelectionRole.ALTERNATIVE)
 
@@ -217,7 +368,7 @@ def build_candidate_selection_plan(
                 rank=rank_by_domain[domain],
                 covered_intent_ids=covered_ids,
                 selection_reasons=reasons,
-                eligible_for_composition=True,
+                eligible_for_composition=role is not CandidateSelectionRole.ALTERNATIVE,
             )
         )
     covered_ids = sorted(covered)
@@ -229,7 +380,7 @@ def build_candidate_selection_plan(
         "entries": [entry.model_dump(mode="json") for entry in entries],
         "covered_intent_ids": covered_ids,
         "uncovered_intent_ids": uncovered_ids,
-        "policy_version": CANDIDATE_SELECTION_POLICY_VERSION,
+        "selection_policy": policy.model_dump(mode="json"),
     }
     content_hash = canonical_json_hash(material)
     return CandidateSelectionPlan(
@@ -240,7 +391,7 @@ def build_candidate_selection_plan(
         entries=entries,
         covered_intent_ids=covered_ids,
         uncovered_intent_ids=uncovered_ids,
-        policy_version=CANDIDATE_SELECTION_POLICY_VERSION,
+        selection_policy=policy,
         content_hash=content_hash,
     )
 
@@ -267,3 +418,75 @@ def catalog_for_candidate_selection(
             ]
         }
     )
+
+
+def _schedule_capabilities(candidate: ResearchCandidate) -> dict[str, object]:
+    if isinstance(candidate, VisitCandidate):
+        return {
+            "recommended_duration_minutes": candidate.recommended_duration_minutes,
+            "opening_window": candidate.opening_window,
+        }
+    if isinstance(candidate, DiningCandidate):
+        return {
+            "meal_types": list(candidate.meal_types),
+            "opening_window": candidate.opening_window,
+        }
+    if isinstance(candidate, LodgingCandidate):
+        return {
+            "check_in_date": candidate.check_in_date.isoformat(),
+            "check_out_date": candidate.check_out_date.isoformat(),
+            "nights": candidate.nights,
+        }
+    assert isinstance(candidate, TransportCandidate)
+    return {
+        "transport_class": candidate.transport_class,
+        "selected_mode": candidate.selected_mode.value,
+        "departure_at": candidate.departure_at.isoformat()
+        if candidate.departure_at
+        else None,
+        "arrival_at": candidate.arrival_at.isoformat()
+        if candidate.arrival_at
+        else None,
+        "duration_minutes": candidate.duration_minutes,
+        "from_place_id": candidate.from_endpoint.place_id,
+        "to_place_id": candidate.to_endpoint.place_id,
+    }
+
+
+def selected_candidate_capabilities(
+    *,
+    catalog: RecommendationCatalog,
+    selection_plan: CandidateSelectionPlan,
+) -> tuple[list[SelectedCandidateCapability], list[SelectedCandidateCapability]]:
+    candidates = catalog.candidate_index()
+    rankings = {score.candidate_id: score for score in catalog.candidate_ranking_scores}
+    selected: list[SelectedCandidateCapability] = []
+    alternatives: list[SelectedCandidateCapability] = []
+    for entry in selection_plan.entries:
+        candidate = candidates.get(entry.candidate_id)
+        ranking = rankings.get(entry.candidate_id)
+        if candidate is None or ranking is None:
+            raise ValueError("candidate capability is missing catalog or ranking data")
+        place_id = getattr(candidate, "place_id", None)
+        capability = SelectedCandidateCapability(
+            candidate_id=entry.candidate_id,
+            candidate_kind=candidate.candidate_kind,
+            destination_id=candidate.destination_id,
+            selection_role=entry.role,
+            rank=entry.rank,
+            matched_intent_ids=ranking.matched_intent_ids,
+            unknown_intent_ids=ranking.unknown_intent_ids,
+            hard_violation_intent_ids=ranking.hard_violation_intent_ids,
+            selection_reasons=entry.selection_reasons,
+            evidence_confidence=ranking.evidence_confidence,
+            budget_fit=ranking.budget_fit,
+            weather_fit=ranking.weather_fit,
+            constraint_fit=ranking.constraint_fit,
+            place_id=place_id,
+            schedule_capabilities=_schedule_capabilities(candidate),
+        )
+        if entry.role is CandidateSelectionRole.ALTERNATIVE:
+            alternatives.append(capability)
+        else:
+            selected.append(capability)
+    return selected, alternatives

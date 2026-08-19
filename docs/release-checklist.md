@@ -50,6 +50,15 @@ amd64/arm64 镜像、非 root 与 PDF 字体验证、容器扫描、SBOM。
 - [ ] Candidate Discovery Lineage 来自服务端执行记录，不接受模型自报 Intent/Query ID
 - [ ] Admission、Intent Evaluation、Ranking 与 Selection 分层，软主题变化不改写 Admission
 - [ ] Composer 只读取 `CandidateSelectionPlan` 允许的候选
+- [ ] Composition Rule 覆盖数量、频率、时段、顺序、必须包含与禁止项
+- [ ] Backfill 只填合法槽位，所有确定性后处理都有 Mutation 且重跑硬规则
+- [ ] Intent Fidelity Gate 位于 Typed Artifact Gate 与 Delivery Quality Gate 之间
+- [ ] 禁止型硬规则永不降级；义务型硬规则耗尽后有公开偏差；软偏好不虚报满足
+- [ ] Workspace 与 Delivery Bundle 当前合同均为 v10，旧版不会被补空 Coverage
+- [ ] 用户编辑、撤销和天气刷新后重新生成 Intent Coverage
+- [ ] 默认 Selection 无 seed；Explore 只由显式 Intent 启用且相同 seed 可回放
+- [ ] Completion Audit 含各层版本与 Hash，不保存原始用户长文本
+- [ ] Run Diff 能区分 Intent、Query、Provider、Candidate、Selection、Composition 与 Coverage 差异
 
 ## 检索质量变化
 

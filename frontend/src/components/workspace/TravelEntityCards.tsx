@@ -12,6 +12,7 @@ import type {
   PublicLodgingStay,
   PublicVisitStop,
 } from '../../types/delivery';
+import { IntentExplanationList } from './IntentExplanationList';
 
 const money = new Intl.NumberFormat('zh-CN', {
   style: 'currency',
@@ -106,6 +107,7 @@ export function VisitStopCard({
             ]} />
             {stop.visit_highlights.length > 0 && <p className="mt-1 break-words text-xs leading-5 text-ink-secondary"><strong className="font-semibold text-ink">重点体验：</strong>{stop.visit_highlights.join('、')}</p>}
             <p className="mt-1 break-words text-xs leading-5 text-ink-secondary"><strong className="font-semibold text-ink">安排理由：</strong>{stop.selection_reason}</p>
+            <IntentExplanationList items={stop.intent_explanations} />
             {sourceMarkers}
           </div>
         </div>
@@ -141,6 +143,7 @@ export function DiningStopCard({
             ]} />
             {stop.recommended_dishes.length > 0 && <p className="mt-1 break-words text-xs leading-5 text-ink-secondary"><strong className="font-semibold text-ink">推荐菜：</strong>{stop.recommended_dishes.join('、')}</p>}
             <p className="mt-1 break-words text-xs leading-5 text-ink-secondary"><strong className="font-semibold text-ink">选择理由：</strong>{stop.selection_reason}</p>
+            <IntentExplanationList items={stop.intent_explanations} />
             {stop.dining_reminders.map((reminder) => (
               <p key={reminder} className="mt-1.5 max-w-[70ch] break-words text-xs leading-5 text-ink-secondary">
                 <strong className="font-semibold text-ink">用餐提醒：</strong>{reminder}
@@ -188,6 +191,7 @@ export function LodgingStayCard({
           stay.total_price_cny == null ? null : lodgingPriceLabel(stay.price_kind, 'total', stay.total_price_cny),
         ]} />
         <p className="mt-1 break-words text-xs leading-5 text-ink-secondary"><strong className="font-semibold text-ink">选择理由：</strong>{stay.selection_reason}</p>
+        <IntentExplanationList items={stay.intent_explanations} />
         {sourceMarkers}
       </div>
     </article>

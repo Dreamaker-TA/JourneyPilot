@@ -690,6 +690,7 @@ function ReadyInteractiveItinerary({
               summaries={daySummaries}
               costCoverageStatement={bundle.report_projection.document?.cost_coverage_statement ?? null}
               importantNotes={bundle.report_projection.document?.important_notes ?? []}
+              fulfillmentSummary={bundle.workspace.fulfillment_summary}
               onOpenDay={openDay}
               registerDayCard={registerDayCard}
             />

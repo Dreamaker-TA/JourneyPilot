@@ -352,18 +352,16 @@ export interface PlanGateStep {
  */
 export type { PlanGateDecisionAction } from './api';
 
-/**
- * 后端在计划门上声称「本轮必须遵守」的一条硬约束。
- *
- * 只留下这一屏真的会说出来的两样：识别用的 `constraintId`，和给旅行者读的
- * `summary`（后端 `panels/constraint.py::_public_summary` 已经把它写成人话）。
- * 后端 `_build_plan_gate_payload` 这一帧也不再下 `category` 与
- * `enforcement_scope` —— 那两个是系统词（`budget_cap` / `composition`），照
- * UX Copy 口径不上屏；后端发下来而两端都不显示，正是这条缺陷本身的形状。
- */
-export interface PlanGateMustObey {
-  constraintId: string;
+/** 计划确认前向旅行者展示的一条规范化要求。 */
+export interface PlanGateRequirement {
+  requirementId: string;
   summary: string;
+}
+
+export interface PlanGateRecognizedRequirements {
+  hard: PlanGateRequirement[];
+  preferences: PlanGateRequirement[];
+  attention: PlanGateRequirement[];
 }
 
 export interface PlanApprovalGate {
@@ -378,13 +376,5 @@ export interface PlanApprovalGate {
   planText: string;
   /** 这一轮可用的决策动作（后端下发）：首轮含 edit/supplement，二轮仅 approve/cancel。 */
   decisionOptions: PlanGateDecisionAction[];
-  /**
-   * 本轮必须遵守的硬约束（后端 `plan_gate.must_obey`）。用户要在批准之前看见它们。
-   *
-   * 这里此前**没有**这个字段，而整份 payload 落在一个 `rawPayload: Record<string, unknown>`
-   * 里 —— 那个字段全仓除了类型声明和赋值那一行之外没有任何读者。计划门算好了
-   * 「本轮必须遵守这几条」，一路投影到前端，然后被丢掉。`rawPayload` 随这次接线删除：
-   * 一个没人读的兜底口袋，会让「下发了但没接」看起来像已经接上了。
-   */
-  mustObey: PlanGateMustObey[];
+  recognizedRequirements: PlanGateRecognizedRequirements;
 }

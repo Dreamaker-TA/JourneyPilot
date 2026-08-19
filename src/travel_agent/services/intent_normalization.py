@@ -95,10 +95,14 @@ class NormalizedClauseDraft(StrictModel):
             raise ValueError("mapped clause requires an intent draft")
         if self.disposition is not ClauseDisposition.MAPPED_TO_INTENT and self.intents:
             raise ValueError("only mapped clauses may contain intent drafts")
-        if self.disposition in {
-            ClauseDisposition.UNSUPPORTED,
-            ClauseDisposition.UNRESOLVED,
-        } and not self.reason_code:
+        if (
+            self.disposition
+            in {
+                ClauseDisposition.UNSUPPORTED,
+                ClauseDisposition.UNRESOLVED,
+            }
+            and not self.reason_code
+        ):
             raise ValueError("unsupported or unresolved clause requires a reason code")
         return self
 
@@ -277,25 +281,33 @@ def _fallback_clause(
     mentions_identity = any(token and token in text for token in identity_tokens)
 
     intents: List[IntentDraft] = []
-    if match := re.search(r"(?:每天|每日).{0,10}(?:最多|不超过)\s*(\d+)\s*(?:个|处|家)", text):
+    if match := re.search(
+        r"(?:每天|每日).{0,10}(?:最多|不超过)\s*(\d+)\s*(?:个|处|家)", text
+    ):
         intents.append(
             _intent(
                 IntentKind.QUANTITY,
-                IntentTarget.ITINERARY,
+                _target_for_text(text),
                 IntentStrength.HARD,
-                CountIntentValue(operator="at_most", count=int(match.group(1)), unit="day"),
+                CountIntentValue(
+                    operator="at_most", count=int(match.group(1)), unit="day"
+                ),
                 "每天主要安排数量受上限约束",
                 ["composition"],
                 VerificationMode.DETERMINISTIC,
             )
         )
-    elif match := re.search(r"(?:每天|每日).{0,10}(?:至少)\s*(\d+)\s*(?:个|处|家)", text):
+    elif match := re.search(
+        r"(?:每天|每日).{0,10}(?:至少)\s*(\d+)\s*(?:个|处|家)", text
+    ):
         intents.append(
             _intent(
                 IntentKind.QUANTITY,
-                IntentTarget.ITINERARY,
+                _target_for_text(text),
                 IntentStrength.HARD,
-                CountIntentValue(operator="at_least", count=int(match.group(1)), unit="day"),
+                CountIntentValue(
+                    operator="at_least", count=int(match.group(1)), unit="day"
+                ),
                 "每天主要安排数量有最低要求",
                 ["research", "composition"],
                 VerificationMode.DETERMINISTIC,
@@ -317,7 +329,9 @@ def _fallback_clause(
                 VerificationMode.MIXED,
             )
         )
-    if any(token in lowered for token in ("不要", "不去", "避开", "禁止", "avoid", "no ")):
+    if any(
+        token in lowered for token in ("不要", "不去", "避开", "禁止", "avoid", "no ")
+    ):
         intents.append(
             _intent(
                 IntentKind.MUST_EXCLUDE,
@@ -345,12 +359,37 @@ def _fallback_clause(
         intents.append(
             _intent(
                 IntentKind.OUTPUT_REQUIREMENT,
-                IntentTarget.DELIVERY,
+                _target_for_text(text),
                 IntentStrength.HARD,
                 OutputRequirementValue(required_field=text, applies_to="each_item"),
                 text,
                 ["projection"],
                 VerificationMode.MIXED,
+            )
+        )
+    if any(
+        token in lowered
+        for token in (
+            "再来一套",
+            "换一套",
+            "换一批",
+            "不同风格",
+            "更小众",
+            "小众一点",
+            "another version",
+            "different set",
+            "more niche",
+        )
+    ):
+        intents.append(
+            _intent(
+                IntentKind.DIVERSITY,
+                IntentTarget.VISIT,
+                IntentStrength.SOFT,
+                ScalarIntentValue(value=text),
+                "探索另一组同等合规的候选",
+                ["research", "ranking", "composition"],
+                VerificationMode.DETERMINISTIC,
             )
         )
     if match := re.search(r"([二两三四五六七八九十\d]+)\s*套.{0,12}方案", text):
@@ -449,25 +488,49 @@ def _target_for_text(text: str) -> IntentTarget:
 
 
 def _time_window(text: str) -> Optional[str]:
-    for value in ("上午", "中午", "下午", "傍晚", "晚上", "morning", "afternoon", "evening"):
+    for value in (
+        "上午",
+        "中午",
+        "下午",
+        "傍晚",
+        "晚上",
+        "morning",
+        "afternoon",
+        "evening",
+    ):
         if value in text.lower():
             return value
     return None
 
 
 def _attributes(text: str) -> List[str]:
-    return [value for value in ("安静", "无障碍", "亲子", "本地", "室内") if value in text]
+    return [
+        value for value in ("安静", "无障碍", "亲子", "本地", "室内") if value in text
+    ]
 
 
 def _chinese_number(value: str) -> int:
     if value.isdigit():
         return int(value)
-    return {"二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}.get(value, 0)
+    return {
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }.get(value, 0)
 
 
 def _dedupe_drafts(items: List[IntentDraft]) -> List[IntentDraft]:
     unique: Dict[str, IntentDraft] = {}
     for item in items:
-        key = json.dumps(item.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+        key = json.dumps(
+            item.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+        )
         unique.setdefault(key, item)
     return list(unique.values())

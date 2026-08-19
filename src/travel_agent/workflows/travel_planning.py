@@ -35,6 +35,10 @@ from ..agents.orchestrator.delivery_quality_gate import (
     delivery_quality_gate_node,
     route_after_delivery_quality_gate,
 )
+from ..agents.orchestrator.intent_fidelity_gate import (
+    intent_fidelity_gate_node,
+    route_after_intent_fidelity_gate,
+)
 from ..agents.orchestrator.planner import planner_node
 from ..agents.orchestrator.intent_amendment_router import (
     intent_amendment_router_node,
@@ -107,6 +111,7 @@ NODE_TRANSPORT = "transport_researcher"
 NODE_ACCOMMODATION = "accommodation_researcher"
 NODE_ITINERARY = "itinerary_planner"
 NODE_ARTIFACT_GATE = "artifact_gate"
+NODE_INTENT_FIDELITY_GATE = "intent_fidelity_gate"
 NODE_DELIVERY_QUALITY_GATE = "delivery_quality_gate"
 NODE_BUDGET_ESTIMATE = "budget_estimate"
 NODE_DELIVERY_PROJECTOR = "delivery_projector"
@@ -122,6 +127,13 @@ WORKER_NODES = [
 
 # 计划批准门：唯一一次修改（编辑全文 / 补充要求），用满后二轮只接受 approve/cancel。
 _MAX_PLAN_GATE_REVISIONS = 1
+
+
+def _configured_model_versions() -> Dict[str, str]:
+    settings = get_settings()
+    primary = str(settings.primary_model.model_name or "").strip()
+    fast = str(settings.fast_model.model_name or "").strip() or primary
+    return {"primary": primary, "fast": fast}
 
 # 图上每个环都有自己的预算，正常一轮深度规划是几十个 superstep 量级。250 给足余量，
 # 同时让任何失控的自转环在秒级失败，而不是耗到墙钟截止。
@@ -189,23 +201,42 @@ def _build_plan_gate_payload(state: TravelAgentState) -> Dict[str, Any]:
     revision = int(state.plan_gate_revision_count or 0)
     limit_reached = revision >= _MAX_PLAN_GATE_REVISIONS
     constraint_pack = state.constraint_pack if isinstance(state.constraint_pack, dict) else {}
-    must_obey = [
+    hard_requirements = [
         {
-            "constraint_id": str(item.get("constraint_id") or ""),
-            "public_summary": str(item.get("public_summary") or ""),
+            "requirement_id": str(item.get("constraint_id") or ""),
+            "summary": str(item.get("public_summary") or ""),
         }
         for item in constraint_pack.get("hard_constraints") or []
         if isinstance(item, dict) and item.get("status") in (None, "active")
     ]
+    preferences: List[Dict[str, str]] = []
+    attention: List[Dict[str, str]] = []
     if state.intent_spec is not None:
-        existing = {item["constraint_id"] for item in must_obey}
-        must_obey.extend(
-            {
-                "constraint_id": item.intent_id,
-                "public_summary": item.public_summary,
+        existing_summaries = {item["summary"] for item in hard_requirements}
+        for item in state.intent_spec.active_items:
+            row = {
+                "requirement_id": item.intent_id,
+                "summary": item.public_summary,
             }
-            for item in state.intent_spec.active_items
-            if item.strength.value == "hard" and item.intent_id not in existing
+            if item.strength.value == "hard":
+                if row["summary"] not in existing_summaries:
+                    hard_requirements.append(row)
+                    existing_summaries.add(row["summary"])
+            else:
+                preferences.append(row)
+        attention.extend(
+            {
+                "requirement_id": conflict.conflict_id,
+                "summary": conflict.user_visible_summary,
+            }
+            for conflict in state.intent_spec.conflicts
+        )
+        attention.extend(
+            {
+                "requirement_id": clause.clause_id,
+                "summary": f"暂未纳入：{clause.source_text}",
+            }
+            for clause in state.intent_spec.unresolved_clauses
         )
     return {
         # `gate` is this payload's only name for itself.  It used to also
@@ -222,7 +253,11 @@ def _build_plan_gate_payload(state: TravelAgentState) -> Dict[str, Any]:
         },
         # 首轮：批准 / 编辑 / 补充 / 取消；用满修改后：仅批准 / 取消。
         "plan_text": _serialize_plan_text(state),
-        "must_obey": must_obey,
+        "recognized_requirements": {
+            "hard": hard_requirements,
+            "preferences": preferences,
+            "attention": attention,
+        },
         "decision_options": ["approve", "cancel"] if limit_reached else ["approve", "edit", "supplement", "cancel"],
     }
 
@@ -458,6 +493,12 @@ def _route_after_artifact_gate_with_amendments(state: TravelAgentState) -> str:
     return route_after_artifact_gate(state)
 
 
+def _route_after_intent_fidelity_with_amendments(state: TravelAgentState) -> str:
+    if state.pending_intent_amendments:
+        return NODE_INTENT_AMENDMENT_ROUTER
+    return route_after_intent_fidelity_gate(state)
+
+
 def _route_after_delivery_quality_gate_with_amendments(
     state: TravelAgentState,
 ) -> str:
@@ -478,7 +519,8 @@ def build_travel_workflow() -> StateGraph:
     构建深度调研工作流图（三层架构）。
 
     v2 主链：Scope/Constraint/Weather → Research Packets → Candidate Gate →
-    typed Itinerary Workspace → deterministic Delivery Quality Gate →
+    typed Itinerary Workspace → deterministic Intent Fidelity Gate →
+    deterministic Delivery Quality Gate →
     deterministic report/map/source projections → atomic Bundle finalizer → END。
     图上只有 delivery_finalizer 一个出口（destination_researcher 的 ask_user HALT 仍在，
     但那是 Worker 侧的中断，不是 Scope 澄清）；缺口只回到对应 Worker 或 Itinerary
@@ -529,6 +571,10 @@ def build_travel_workflow() -> StateGraph:
         with_run_control(NODE_CANDIDATE_GATE, candidate_gate_node),
     )
     graph.add_node(NODE_ARTIFACT_GATE, with_run_control(NODE_ARTIFACT_GATE, artifact_gate_node))
+    graph.add_node(
+        NODE_INTENT_FIDELITY_GATE,
+        with_run_control(NODE_INTENT_FIDELITY_GATE, intent_fidelity_gate_node),
+    )
     graph.add_node(
         NODE_DELIVERY_QUALITY_GATE,
         with_run_control(NODE_DELIVERY_QUALITY_GATE, delivery_quality_gate_node),
@@ -609,7 +655,6 @@ def build_travel_workflow() -> StateGraph:
     graph.add_edge(NODE_CLARIFIER, NODE_REQUEST_CONTRACT_NORMALIZER)
 
     # ── 条件边：dispatcher ─────────────────────────────────────────────────
-    # dispatcher 完成后先过 typed artifact gate，再进入 deterministic quality gate。
     graph.add_conditional_edges(
         NODE_PLAN_GATE,
         route_after_plan_gate,
@@ -636,6 +681,7 @@ def build_travel_workflow() -> StateGraph:
         NODE_ACCOMMODATION,
         NODE_ITINERARY,
         NODE_ARTIFACT_GATE,
+        NODE_INTENT_FIDELITY_GATE,
         NODE_DELIVERY_QUALITY_GATE,
         NODE_BUDGET_ESTIMATE,
         NODE_DELIVERY_PROJECTOR,
@@ -680,10 +726,21 @@ def build_travel_workflow() -> StateGraph:
         _route_after_artifact_gate_with_amendments,
         {
             NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
-            "accepted": NODE_DELIVERY_QUALITY_GATE,
+            "accepted": NODE_INTENT_FIDELITY_GATE,
             # Typed Artifact Gate hands explicit provider/model content
             # failures to Candidate Gate, which owns its circuit/retry budget.
             NODE_CANDIDATE_GATE: NODE_CANDIDATE_GATE,
+            "composition_repair": NODE_ITINERARY,
+        },
+    )
+
+    graph.add_conditional_edges(
+        NODE_INTENT_FIDELITY_GATE,
+        _route_after_intent_fidelity_with_amendments,
+        {
+            NODE_INTENT_AMENDMENT_ROUTER: NODE_INTENT_AMENDMENT_ROUTER,
+            "passed": NODE_DELIVERY_QUALITY_GATE,
+            "candidate_gate": NODE_CANDIDATE_GATE,
             "composition_repair": NODE_ITINERARY,
         },
     )
@@ -819,6 +876,7 @@ class TravelPlanningWorkflow:
             session_compressed=session_compressed,
             preset_context=preset_context,
             preset_pack_constraints=dict(preset_pack_constraints or {}),
+            model_versions=_configured_model_versions(),
         )
 
         config = {
@@ -884,6 +942,7 @@ class TravelPlanningWorkflow:
                 preset_pack_constraints=dict(preset_pack_constraints or {}),
                 controlled_trip_identity=controlled_trip_identity or {},
                 route_decision=route_decision or {},
+                model_versions=_configured_model_versions(),
             )
 
         effective_plan_gate_enabled = (

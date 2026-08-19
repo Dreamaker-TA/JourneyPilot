@@ -26,6 +26,12 @@ from .candidate_readmission import (
     workspace_hard_constraint_pack,
 )
 from .weather_adjustment import build_weather_adjustment_proposals
+from .composition_mutations import (
+    mark_mutations_revalidated,
+    user_workspace_mutation,
+)
+from .composition_rule_compiler import compile_composition_rules
+from .intent_verification import revalidate_workspace_intent
 from ..entities.workspace_v2_mutations import (
     ApplyWeatherAdjustmentMutation,
     DeleteCustomBlockMutation,
@@ -68,7 +74,10 @@ class WorkspaceMutationPreview:
 
     @property
     def requires_confirmation(self) -> bool:
-        return self.explicit_confirmation or self.total_cost_delta_cny not in (None, 0.0)
+        return self.explicit_confirmation or self.total_cost_delta_cny not in (
+            None,
+            0.0,
+        )
 
 
 def _mutation_bundle(
@@ -138,17 +147,12 @@ def _weather_with_readmission_impacts(
     place just to add a Candidate-specific derived impact.
     """
 
-    merged = {
-        item.weather_impact_id: item for item in current.weather_snapshot.impacts
-    }
+    merged = {item.weather_impact_id: item for item in current.weather_snapshot.impacts}
     for impact in impacts:
         merged[impact.weather_impact_id] = impact
-    if (
-        len(merged) == len(current.weather_snapshot.impacts)
-        and all(
-            merged[item.weather_impact_id] == item
-            for item in current.weather_snapshot.impacts
-        )
+    if len(merged) == len(current.weather_snapshot.impacts) and all(
+        merged[item.weather_impact_id] == item
+        for item in current.weather_snapshot.impacts
     ):
         return current.weather_snapshot
     merged_impacts = sorted(merged.values(), key=lambda item: item.weather_impact_id)
@@ -178,7 +182,9 @@ def _weather_with_readmission_impacts(
     )
 
 
-def _canonical_candidate_scopes(workspace: TripWorkspaceV2) -> dict[tuple[str, str], tuple[str, str | None]]:
+def _canonical_candidate_scopes(
+    workspace: TripWorkspaceV2,
+) -> dict[tuple[str, str], tuple[str, str | None]]:
     """Index every canonical Candidate materialization by stable entity identity."""
 
     itinerary = workspace.itinerary
@@ -186,7 +192,10 @@ def _canonical_candidate_scopes(workspace: TripWorkspaceV2) -> dict[tuple[str, s
         *(("visit", item.item_id, item) for item in itinerary.visit_stops),
         *(("dining", item.item_id, item) for item in itinerary.dining_stops),
         *(("lodging", item.stay_id, item) for item in itinerary.lodging_stays),
-        *(("transport", item.transport_leg_id, item) for item in itinerary.transport_legs),
+        *(
+            ("transport", item.transport_leg_id, item)
+            for item in itinerary.transport_legs
+        ),
     )
     return {
         (kind, entity_id): (item.lineage.candidate_id, item.lineage.selection_slot_id)
@@ -205,9 +214,7 @@ def _new_candidate_materializations(
     current = _canonical_candidate_scopes(after)
     return tuple(
         dict.fromkeys(
-            value
-            for key, value in current.items()
-            if previous.get(key) != value
+            value for key, value in current.items() if previous.get(key) != value
         )
     )
 
@@ -262,9 +269,7 @@ class WorkspaceV2Service:
             (item.candidate_id, item.selection_slot_id): item
             for item in readmission.admissions
         }
-        candidates = {
-            item.candidate_id: item for item in readmission.candidates
-        }
+        candidates = {item.candidate_id: item for item in readmission.candidates}
         for candidate_id, selection_slot_id in materializations:
             candidate = candidates.get(candidate_id)
             admission = admissions.get((candidate_id, selection_slot_id))
@@ -288,6 +293,69 @@ class WorkspaceV2Service:
                 "Refresh the current Candidate choices before confirming this replacement",
             )
 
+    def _revalidate_intent_application(
+        self,
+        application: WorkspaceV2MutationApplication,
+        operation: dict,
+        previous_workspace: TripWorkspaceV2,
+    ) -> WorkspaceV2MutationApplication:
+        if not application.changed:
+            return application
+        workspace = application.workspace
+        affected_intent_ids = {
+            requirement.intent_id
+            for requirement in workspace.intent_contract_snapshot.requirements
+            if "composition" in requirement.impact_stages
+            or "projection" in requirement.impact_stages
+        }
+        rules = compile_composition_rules(workspace.intent_contract_snapshot)
+        affected_rule_ids = [
+            rule.rule_id for rule in rules if rule.intent_id in affected_intent_ids
+        ]
+        ledger_entry = user_workspace_mutation(
+            generation_id=workspace.generation_id,
+            workspace_revision=workspace.workspace_revision,
+            operation=operation,
+            affected_intent_ids=sorted(affected_intent_ids),
+            affected_rule_ids=affected_rule_ids,
+        )
+        workspace = workspace.model_copy(
+            update={
+                "composition_mutations": [
+                    *workspace.composition_mutations,
+                    ledger_entry,
+                ]
+            }
+        )
+        try:
+            workspace, report, _gaps = revalidate_workspace_intent(workspace)
+        except ValueError as exc:
+            raise WorkspaceV2MutationError(
+                "intent_contract_violation",
+                str(exc),
+            ) from exc
+        previous_report = previous_workspace.intent_coverage_report
+        coverage_before = (
+            {item.intent_id: item.status.value for item in previous_report.items}
+            if previous_report is not None
+            else {}
+        )
+        coverage_after = {item.intent_id: item.status.value for item in report.items}
+        workspace = workspace.model_copy(
+            update={
+                "composition_mutations": [
+                    *workspace.composition_mutations[:-1],
+                    *mark_mutations_revalidated(
+                        workspace.composition_mutations[-1:],
+                        coverage_before=coverage_before,
+                        coverage_after=coverage_after,
+                    ),
+                ]
+            }
+        )
+        workspace = TripWorkspaceV2.model_validate(workspace.model_dump(mode="json"))
+        return application.model_copy(update={"workspace": workspace})
+
     async def preview(
         self,
         *,
@@ -302,6 +370,11 @@ class WorkspaceV2Service:
             current.workspace,
             mutation,
             current.weather_snapshot,
+        )
+        application = self._revalidate_intent_application(
+            application,
+            mutation.model_dump(mode="json"),
+            current.workspace,
         )
         self._require_current_candidate_materializations(current, application)
         before = current.workspace.itinerary.cost_summary.known_subtotal_cny
@@ -371,6 +444,11 @@ class WorkspaceV2Service:
             mutation,
             current.weather_snapshot,
         )
+        application = self._revalidate_intent_application(
+            application,
+            mutation_payload,
+            current.workspace,
+        )
         self._require_current_candidate_materializations(current, application)
         if not application.changed:
             receipt = await self._store.record_noop_receipt(
@@ -386,7 +464,9 @@ class WorkspaceV2Service:
                     "label": application.label,
                 },
             )
-            return WorkspaceBundleMutationResult(application=application, commit=receipt)
+            return WorkspaceBundleMutationResult(
+                application=application, commit=receipt
+            )
         bundle = _mutation_bundle(
             current,
             application.workspace,
@@ -398,7 +478,9 @@ class WorkspaceV2Service:
             kind=BundleCommitKind.WORKSPACE_MUTATION,
             idempotency_key=idempotency_key,
             expected=expected,
-            inverse_patch=application.inverse.model_dump(mode="json") if application.inverse else None,
+            inverse_patch=application.inverse.model_dump(mode="json")
+            if application.inverse
+            else None,
             metadata={
                 "mutation": mutation_payload,
                 "mutation_request": mutation_request,
@@ -436,7 +518,8 @@ class WorkspaceV2Service:
         head = await self._store.get_undo_head(run_id)
         if head is None or head.mutation_id != undo_of_mutation_id:
             raise WorkspaceV2MutationError(
-                "undo_head_changed", "The current workspace operation is no longer undoable"
+                "undo_head_changed",
+                "The current workspace operation is no longer undoable",
             )
         inverse = INVERSE_ADAPTER.validate_python(head.inverse_patch)
         current = await self._current(run_id, expected)
@@ -451,17 +534,23 @@ class WorkspaceV2Service:
                 current.workspace.workspace_revision > head.workspace_revision
             ),
         )
+        undo_application = self._revalidate_intent_application(
+            WorkspaceV2MutationApplication(
+                workspace=workspace,
+                changed=workspace != current.workspace,
+                label=head.label,
+            ),
+            {"type": "undo", "undo_of_mutation_id": undo_of_mutation_id},
+            current.workspace,
+        )
+        workspace = undo_application.workspace
         # Undo can re-materialize a Candidate that a later mutation removed.
         # Treat that revival exactly like every other Candidate->canonical
         # transition; a stale source/cache/constraint verdict must not come
         # back merely because the inverse patch was valid when first written.
         self._require_current_candidate_materializations(
             current,
-            WorkspaceV2MutationApplication(
-                workspace=workspace,
-                changed=workspace != current.workspace,
-                label=head.label,
-            ),
+            undo_application,
         )
         bundle = _mutation_bundle(
             current,
@@ -494,10 +583,14 @@ class WorkspaceV2Service:
         )
         return result
 
-    async def _current(self, run_id: str, expected: BundleRevisionVector) -> DeliveryBundle:
+    async def _current(
+        self, run_id: str, expected: BundleRevisionVector
+    ) -> DeliveryBundle:
         current = await self._store.get_current(run_id)
         if current is None or BundleRevisionVector.from_bundle(current) != expected:
             raise BundleRevisionConflict(
-                BundleRevisionVector.from_bundle(current) if current is not None else None
+                BundleRevisionVector.from_bundle(current)
+                if current is not None
+                else None
             )
         return current

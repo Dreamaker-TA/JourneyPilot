@@ -343,7 +343,9 @@ def _public_source(source: SourceRecord) -> PublicSourceSummary:
     chunk_content = None
     chunk_locator = None
     if source.source_kind == "rag_chunk":
-        chunk_content = source.snapshot.get("chunk_content") or source.snapshot.get("content")
+        chunk_content = source.snapshot.get("chunk_content") or source.snapshot.get(
+            "content"
+        )
         if not isinstance(chunk_content, str) or not chunk_content.strip():
             raise DeliveryProjectionError(
                 f"RAG source {source.source_record_id} is missing the complete chunk"
@@ -354,7 +356,9 @@ def _public_source(source: SourceRecord) -> PublicSourceSummary:
             source.snapshot.get("chunk_id"),
             source.snapshot.get("section") or source.snapshot.get("page"),
         ]
-        chunk_locator = " / ".join(str(part) for part in locator_parts if part is not None)
+        chunk_locator = " / ".join(
+            str(part) for part in locator_parts if part is not None
+        )
     title, public_excerpt, canonical_url = _public_source_presentation(source)
     return PublicSourceSummary(
         source_record_id=source.source_record_id,
@@ -376,24 +380,37 @@ def _citation_id(entity_ref: EntityRef, fact: FactAssertion) -> str:
     return f"cite_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:20]}"
 
 
-def _entity_lineage_targets(workspace: TripWorkspaceV2) -> list[tuple[EntityRef, Sequence[str]]]:
+def _entity_lineage_targets(
+    workspace: TripWorkspaceV2,
+) -> list[tuple[EntityRef, Sequence[str]]]:
     itinerary = workspace.itinerary
     targets: list[tuple[EntityRef, Sequence[str]]] = []
     targets.extend(
-        (EntityRef(entity_type=EntityType.VISIT_STOP, entity_id=item.item_id), item.lineage.fact_assertion_ids)
+        (
+            EntityRef(entity_type=EntityType.VISIT_STOP, entity_id=item.item_id),
+            item.lineage.fact_assertion_ids,
+        )
         for item in itinerary.visit_stops
     )
     targets.extend(
-        (EntityRef(entity_type=EntityType.DINING_STOP, entity_id=item.item_id), item.lineage.fact_assertion_ids)
+        (
+            EntityRef(entity_type=EntityType.DINING_STOP, entity_id=item.item_id),
+            item.lineage.fact_assertion_ids,
+        )
         for item in itinerary.dining_stops
     )
     targets.extend(
-        (EntityRef(entity_type=EntityType.LODGING_STAY, entity_id=item.stay_id), item.lineage.fact_assertion_ids)
+        (
+            EntityRef(entity_type=EntityType.LODGING_STAY, entity_id=item.stay_id),
+            item.lineage.fact_assertion_ids,
+        )
         for item in itinerary.lodging_stays
     )
     targets.extend(
         (
-            EntityRef(entity_type=EntityType.TRANSPORT_LEG, entity_id=item.transport_leg_id),
+            EntityRef(
+                entity_type=EntityType.TRANSPORT_LEG, entity_id=item.transport_leg_id
+            ),
             item.lineage.fact_assertion_ids if item.route_status == "ready" else [],
         )
         for item in itinerary.transport_legs
@@ -440,17 +457,25 @@ def project_public_citations(
         for assertion_id in assertion_ids:
             fact = fact_index.get(assertion_id)
             if fact is None:
-                raise DeliveryProjectionError(f"projection fact is missing: {assertion_id}")
+                raise DeliveryProjectionError(
+                    f"projection fact is missing: {assertion_id}"
+                )
             source_ids = [
                 link.source_record_id
                 for link in fact.source_links
                 if link.relation in {"supports", "qualifies"}
             ]
             if not source_ids:
-                raise DeliveryProjectionError(f"projection fact has no public source: {assertion_id}")
-            missing = [source_id for source_id in source_ids if source_id not in source_index]
+                raise DeliveryProjectionError(
+                    f"projection fact has no public source: {assertion_id}"
+                )
+            missing = [
+                source_id for source_id in source_ids if source_id not in source_index
+            ]
             if missing:
-                raise DeliveryProjectionError(f"projection source is missing: {missing[0]}")
+                raise DeliveryProjectionError(
+                    f"projection source is missing: {missing[0]}"
+                )
             citation_id = _citation_id(target_ref, fact)
             projections[citation_id] = PublicCitationProjection(
                 citation_id=citation_id,
@@ -465,27 +490,41 @@ def project_public_citations(
                         currency=fact.currency,
                     )
                 ],
-                sources=[_public_source(source_index[source_id]) for source_id in dict.fromkeys(source_ids)],
+                sources=[
+                    _public_source(source_index[source_id])
+                    for source_id in dict.fromkeys(source_ids)
+                ],
                 fact_assertion_ids=[assertion_id],
             )
     return sorted(projections.values(), key=lambda item: item.citation_id)
 
 
-def _citation_lookup(citations: Iterable[PublicCitationProjection]) -> tuple[dict[str, str], dict[str, list[str]]]:
+def _citation_lookup(
+    citations: Iterable[PublicCitationProjection],
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     by_fact: dict[str, str] = {}
     by_entity: dict[str, list[str]] = {}
     for citation in citations:
         for fact_id in citation.fact_assertion_ids:
             by_fact[f"{citation.entity_ref.entity_id}:{fact_id}"] = citation.citation_id
-        by_entity.setdefault(citation.entity_ref.entity_id, []).append(citation.citation_id)
+        by_entity.setdefault(citation.entity_ref.entity_id, []).append(
+            citation.citation_id
+        )
     return by_fact, by_entity
 
 
 def _trip_level_requirements(workspace: TripWorkspaceV2) -> list[str]:
-    categories = {"budget_cap", "elderly_mobility", "health_condition", "pace_preference"}
+    categories = {
+        "budget_cap",
+        "elderly_mobility",
+        "health_condition",
+        "pace_preference",
+    }
     requirements: list[str] = []
     for anchor in workspace.user_input_anchors:
-        if anchor.input_kind != "hard_constraint" or not isinstance(anchor.value, Mapping):
+        if anchor.input_kind != "hard_constraint" or not isinstance(
+            anchor.value, Mapping
+        ):
             continue
         if str(anchor.value.get("category") or "") not in categories:
             continue
@@ -500,12 +539,10 @@ _LONG_DISTANCE_GAP_NOTES = {
         "出行前请自行确认往返的可用班次与票务。"
     ),
     ("outbound",): (
-        "本方案尚未给出前往目的地的长途交通路径；"
-        "出行前请自行确认去程的可用班次与票务。"
+        "本方案尚未给出前往目的地的长途交通路径；出行前请自行确认去程的可用班次与票务。"
     ),
     ("return",): (
-        "本方案尚未给出返回出发地的长途交通路径；"
-        "出行前请自行确认返程的可用班次与票务。"
+        "本方案尚未给出返回出发地的长途交通路径；出行前请自行确认返程的可用班次与票务。"
     ),
 }
 
@@ -515,7 +552,9 @@ _UNBOUND_LONG_DISTANCE_NOTE = (
 )
 
 
-def _controlled_trip_identity(workspace: TripWorkspaceV2) -> Mapping[str, object] | None:
+def _controlled_trip_identity(
+    workspace: TripWorkspaceV2,
+) -> Mapping[str, object] | None:
     """The Draft-authored trip identity every composed Workspace carries."""
 
     for anchor in workspace.user_input_anchors:
@@ -650,7 +689,9 @@ def _report_destinations(workspace: TripWorkspaceV2) -> list[ReportDestination]:
             )
         names[destination_id] = public_name
 
-    missing = [item for item in workspace.itinerary.destination_ids if item not in names]
+    missing = [
+        item for item in workspace.itinerary.destination_ids if item not in names
+    ]
     if missing:
         raise DeliveryProjectionError(
             f"report destinations are missing controlled public identities: {missing}"
@@ -661,7 +702,9 @@ def _report_destinations(workspace: TripWorkspaceV2) -> list[ReportDestination]:
     ]
 
 
-def _destination_name(destination_names: Mapping[str, str], destination_id: str | None) -> str:
+def _destination_name(
+    destination_names: Mapping[str, str], destination_id: str | None
+) -> str:
     if destination_id is None or destination_id not in destination_names:
         raise DeliveryProjectionError(
             f"public report references an unknown destination: {destination_id}"
@@ -716,16 +759,16 @@ def _weather_data_state(
     if day.data_kind == "seasonal_baseline":
         return "historical"
     return (
-        "historical"
-        if (day.destination_id, day.date) in historical_days
-        else "current"
+        "historical" if (day.destination_id, day.date) in historical_days else "current"
     )
 
 
 def _public_report_title(title: str) -> str:
     """Keep a formal delivery document from implying a reservation record."""
 
-    if any(marker in title.casefold() for marker in _BOOKING_CONFIRMATION_TITLE_MARKERS):
+    if any(
+        marker in title.casefold() for marker in _BOOKING_CONFIRMATION_TITLE_MARKERS
+    ):
         return "旅行计划"
     return title
 
@@ -752,7 +795,9 @@ def _entity_block(
         summary = entity.selection_reason
         day_id = None
     elif isinstance(entity, TransportLeg):
-        ref = EntityRef(entity_type=EntityType.TRANSPORT_LEG, entity_id=entity.transport_leg_id)
+        ref = EntityRef(
+            entity_type=EntityType.TRANSPORT_LEG, entity_id=entity.transport_leg_id
+        )
         kind = "transport"
         summary = f"{entity.from_endpoint.name} → {entity.to_endpoint.name}"
         day_id = None
@@ -762,8 +807,19 @@ def _entity_block(
         summary = entity.note or entity.title
         day_id = entity.day_id
     else:
-        raise DeliveryProjectionError(f"unsupported report entity: {type(entity).__name__}")
+        raise DeliveryProjectionError(
+            f"unsupported report entity: {type(entity).__name__}"
+        )
     payload = entity.model_dump(mode="json", exclude={"lineage", "type"})
+    if "intent_explanations" in payload:
+        payload["intent_explanations"] = [
+            {
+                "label": item.label,
+                "explanation": item.explanation,
+                "evidence_basis": item.evidence_basis,
+            }
+            for item in getattr(entity, "intent_explanations", [])
+        ]
     for field in ("item_id", "stay_id", "transport_leg_id", "day_id", "name"):
         payload.pop(field, None)
     if isinstance(entity, LodgingStay) and projection_role == "check_out":
@@ -820,7 +876,9 @@ def candidate_display_name(candidate: object) -> str:
         return candidate.property_name
     if isinstance(candidate, TransportCandidate):
         return f"{candidate.from_endpoint.name} → {candidate.to_endpoint.name}"
-    raise DeliveryProjectionError("selection option references an unsupported candidate")
+    raise DeliveryProjectionError(
+        "selection option references an unsupported candidate"
+    )
 
 
 def candidate_place_id(candidate: object) -> str:
@@ -836,7 +894,9 @@ def candidate_place_id(candidate: object) -> str:
         return candidate.place_id
     if isinstance(candidate, TransportCandidate):
         return ""
-    raise DeliveryProjectionError("selection option references an unsupported candidate")
+    raise DeliveryProjectionError(
+        "selection option references an unsupported candidate"
+    )
 
 
 def project_report(
@@ -872,7 +932,9 @@ def project_report(
         for ref in day.timeline:
             entity = entities.get((ref.entity_type, ref.entity_id))
             if entity is None:
-                raise DeliveryProjectionError(f"report timeline reference is missing: {ref.entity_id}")
+                raise DeliveryProjectionError(
+                    f"report timeline reference is missing: {ref.entity_id}"
+                )
             blocks.append(
                 _entity_block(
                     entity,
@@ -887,7 +949,9 @@ def project_report(
                 day=day.day,
                 date=day.date,
                 destination_id=day.destination_id,
-                destination_name=_destination_name(destination_names, day.destination_id),
+                destination_name=_destination_name(
+                    destination_names, day.destination_id
+                ),
                 theme=day.theme,
                 blocks=blocks,
             )
@@ -924,9 +988,7 @@ def project_report(
                         if option.tradeoff
                         else None
                     ),
-                    comparison_facts=_public_comparison_facts(
-                        option.comparison_facts
-                    ),
+                    comparison_facts=_public_comparison_facts(option.comparison_facts),
                     availability_status=option.availability_status,
                     citation_ids=option_citations,
                 )
@@ -936,7 +998,9 @@ def project_report(
                 selection_slot_id=slot.selection_slot_id,
                 slot_type=slot.slot_type,
                 context=slot.context,
-                status="needs_user_decision" if slot.status == "needs_user_decision" else "ready",
+                status="needs_user_decision"
+                if slot.status == "needs_user_decision"
+                else "ready",
                 options=options,
             )
         )
@@ -955,7 +1019,9 @@ def project_report(
             precipitation_probability_pct=day.precipitation_probability_pct,
             wind_speed_kph=day.wind_speed_kph,
             citation_ids=[
-                citation_by_fact[f"weather:{day.destination_id}:{day.date.isoformat()}:{fact_id}"]
+                citation_by_fact[
+                    f"weather:{day.destination_id}:{day.date.isoformat()}:{fact_id}"
+                ]
                 for fact_id in day.fact_assertion_ids
             ],
         )
@@ -963,10 +1029,16 @@ def project_report(
     ]
     start = itinerary.day_plans[0].date
     end = itinerary.day_plans[-1].date
-    date_text = f"{start.isoformat()} 至 {end.isoformat()}" if start and end else f"{itinerary.duration_days} 天"
+    date_text = (
+        f"{start.isoformat()} 至 {end.isoformat()}"
+        if start and end
+        else f"{itinerary.duration_days} 天"
+    )
     destination_text = "、".join(item.display_name for item in destinations)
     document = TripReportDocument(
-        title=_public_report_title(f"{destination_text} {itinerary.duration_days} 日旅行计划"),
+        title=_public_report_title(
+            f"{destination_text} {itinerary.duration_days} 日旅行计划"
+        ),
         overview=f"{date_text}，前往{destination_text}的可执行旅行方案。",
         destinations=destinations,
         duration_days=itinerary.duration_days,
@@ -1007,9 +1079,18 @@ def project_map(
     itinerary = workspace.itinerary
     places: list[MapPlaceProjection] = []
     for entity, entity_type, entity_id, name, place_id in [
-        *[(item, EntityType.VISIT_STOP, item.item_id, item.name, item.place_id) for item in itinerary.visit_stops],
-        *[(item, EntityType.DINING_STOP, item.item_id, item.name, item.place_id) for item in itinerary.dining_stops],
-        *[(item, EntityType.LODGING_STAY, item.stay_id, item.name, item.place_id) for item in itinerary.lodging_stays],
+        *[
+            (item, EntityType.VISIT_STOP, item.item_id, item.name, item.place_id)
+            for item in itinerary.visit_stops
+        ],
+        *[
+            (item, EntityType.DINING_STOP, item.item_id, item.name, item.place_id)
+            for item in itinerary.dining_stops
+        ],
+        *[
+            (item, EntityType.LODGING_STAY, item.stay_id, item.name, item.place_id)
+            for item in itinerary.lodging_stays
+        ],
     ]:
         latitude, longitude = entity_coordinates(entity, fact_index)
         places.append(
@@ -1024,7 +1105,9 @@ def project_map(
         )
     routes = [
         MapRouteProjection(
-            entity_ref=EntityRef(entity_type=EntityType.TRANSPORT_LEG, entity_id=leg.transport_leg_id),
+            entity_ref=EntityRef(
+                entity_type=EntityType.TRANSPORT_LEG, entity_id=leg.transport_leg_id
+            ),
             transport_class=leg.transport_class,
             selected_mode=leg.selected_mode,
             route_status=leg.route_status,

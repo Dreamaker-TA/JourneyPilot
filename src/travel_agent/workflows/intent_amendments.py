@@ -59,7 +59,10 @@ _IMPACT_PRECEDENCE = {
 
 
 def classify_amendment(amendment: IntentAmendment) -> AmendmentImpact:
-    if classify_locked_identity_intent(amendment.content).classification == "change_requested":
+    if (
+        classify_locked_identity_intent(amendment.content).classification
+        == "change_requested"
+    ):
         return AmendmentImpact.IDENTITY_CHANGE
     lowered = amendment.content.lower()
     if any(cue in lowered for cue in _UNSUPPORTED_CUES):
@@ -126,6 +129,11 @@ def apply_runtime_amendments(state: TravelAgentState) -> Dict[str, Any]:
                 "action": "runtime_amendment",
                 "revision": state.plan_gate_revision_count + 1,
             },
+            "previous_selected_candidate_ids": sorted(
+                state.candidate_selection_plan.composition_candidate_ids()
+            )
+            if state.candidate_selection_plan is not None
+            else state.previous_selected_candidate_ids,
             **invalidation_update(impact),
         }
     )
@@ -163,20 +171,28 @@ def _rejection_for_stage(
             impact=impact,
             reason_code="delivery_already_committed",
         )
-    if impact in {
-        AmendmentImpact.RESEARCH_AFFECTING,
-        AmendmentImpact.ADMISSION_AFFECTING,
-    } and research_closed:
+    if (
+        impact
+        in {
+            AmendmentImpact.RESEARCH_AFFECTING,
+            AmendmentImpact.ADMISSION_AFFECTING,
+        }
+        and research_closed
+    ):
         return IntentAmendmentRejection(
             command_id=amendment.command_id,
             impact=impact,
             reason_code="research_window_closed",
             requires_new_run=True,
         )
-    if impact in {
-        AmendmentImpact.COMPOSITION_AFFECTING,
-        AmendmentImpact.RANKING_AFFECTING,
-    } and composition_closed:
+    if (
+        impact
+        in {
+            AmendmentImpact.COMPOSITION_AFFECTING,
+            AmendmentImpact.RANKING_AFFECTING,
+        }
+        and composition_closed
+    ):
         return IntentAmendmentRejection(
             command_id=amendment.command_id,
             impact=impact,

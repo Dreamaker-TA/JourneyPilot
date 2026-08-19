@@ -11,6 +11,7 @@ from travel_agent.entities.candidate_intent import (
     CandidateIntentMatch,
     IntentMatchStatus,
 )
+from travel_agent.entities.candidate_selection import SelectionPolicy
 from travel_agent.entities.delivery_bundle import (
     CandidateAdmissionResult,
     EntityRef,
@@ -26,6 +27,7 @@ from travel_agent.entities.delivery_bundle import (
 )
 from travel_agent.entities.intent_spec import (
     CategoryIntentValue,
+    CountIntentValue,
     IntentItem,
     IntentKind,
     IntentSpec,
@@ -48,7 +50,9 @@ from travel_agent.services.candidate_ranking import rank_candidates
 from travel_agent.services.candidate_selection import (
     build_candidate_selection_plan,
     catalog_for_candidate_selection,
+    selected_candidate_capabilities,
 )
+from travel_agent.services.composition_rule_compiler import compile_composition_rules
 from travel_agent.services.research_query_planner import (
     append_targeted_repair_query,
     build_research_query_plan,
@@ -457,6 +461,148 @@ def test_admission_is_stable_while_ranking_and_selection_change_with_theme():
     assert [
         result.candidate_id for result in composition_catalog.admission_results
     ] == ["candidate_arch"]
+
+
+def test_composition_rules_preserve_prohibition_and_daily_capacity_semantics():
+    exclusion = _intent(
+        "intent_no_museum",
+        "museum",
+        kind=IntentKind.MUST_EXCLUDE,
+        strength=IntentStrength.HARD,
+        verification=VerificationMode.DETERMINISTIC,
+    ).model_copy(update={"impact_stages": ["research", "admission", "composition"]})
+    capacity = IntentItem(
+        intent_id="intent_two_visits",
+        kind=IntentKind.QUANTITY,
+        target=IntentTarget.VISIT,
+        strength=IntentStrength.HARD,
+        priority=100,
+        value=CountIntentValue(operator="at_most", count=2, unit="day"),
+        source_kind="current_request",
+        source_ref_id="source_capacity",
+        linked_constraint_ids=[],
+        verification_mode=VerificationMode.DETERMINISTIC,
+        impact_stages=["composition"],
+        public_summary="每天最多两个主要景点",
+    )
+
+    rules = compile_composition_rules(_spec(exclusion, capacity))
+
+    assert [(rule.rule_kind.value, rule.policy_on_failure) for rule in rules] == [
+        ("must_not_place", "never_violate"),
+        ("max_per_day", "never_violate"),
+    ]
+    assert rules[1].parameters.model_dump() == {
+        "parameter_kind": "count",
+        "count": 2,
+        "unit": "day",
+    }
+
+
+def test_selected_capabilities_exclude_alternatives_from_composition_pool():
+    intent = _intent("intent_arch", "contemporary architecture")
+    spec = _spec(intent)
+    catalog = _catalog(
+        _packet(
+            "candidate_arch",
+            "Tokyo International Forum",
+            origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+            query_id="query_arch",
+            intent_id=intent.intent_id,
+        )
+    )
+    matches = [
+        CandidateIntentMatch(
+            candidate_id="candidate_arch",
+            intent_id=intent.intent_id,
+            status=IntentMatchStatus.MATCHED,
+            score=1,
+            method="semantic_batch_evaluation",
+            supporting_fact_assertion_ids=["fact_candidate_arch"],
+            supporting_source_record_ids=["source_candidate_arch"],
+            reason_code="semantic_match",
+        )
+    ]
+    ranking = rank_candidates(catalog=catalog, intent_spec=spec, matches=matches)
+    plan = build_candidate_selection_plan(
+        catalog=catalog,
+        intent_spec=spec,
+        ranking_scores=ranking,
+        duration_days=1,
+        destination_count=1,
+    )
+    catalog = catalog.model_copy(update={"candidate_ranking_scores": ranking})
+
+    selected, alternatives = selected_candidate_capabilities(
+        catalog=catalog,
+        selection_plan=plan,
+    )
+
+    assert [item.candidate_id for item in selected] == ["candidate_arch"]
+    assert alternatives == []
+    assert selected[0].matched_intent_ids == [intent.intent_id]
+    assert selected[0].schedule_capabilities["recommended_duration_minutes"] == 90
+
+
+def test_explore_selection_is_seeded_reproducible_and_diverse():
+    intent = _intent("intent_arch", "contemporary architecture")
+    spec = _spec(intent)
+    catalog = _catalog(
+        *[
+            _packet(
+                f"candidate_{index}",
+                f"Architecture {index}",
+                origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+                query_id=f"query_{index}",
+                intent_id=intent.intent_id,
+            )
+            for index in range(1, 6)
+        ]
+    )
+    matches = [
+        CandidateIntentMatch(
+            candidate_id=f"candidate_{index}",
+            intent_id=intent.intent_id,
+            status=IntentMatchStatus.MATCHED,
+            score=1,
+            method="semantic_batch_evaluation",
+            supporting_fact_assertion_ids=[f"fact_candidate_{index}"],
+            supporting_source_record_ids=[f"source_candidate_{index}"],
+            reason_code="semantic_match",
+        )
+        for index in range(1, 6)
+    ]
+    ranking = rank_candidates(catalog=catalog, intent_spec=spec, matches=matches)
+
+    def selected(seed: int):
+        return build_candidate_selection_plan(
+            catalog=catalog,
+            intent_spec=spec,
+            ranking_scores=ranking,
+            duration_days=1,
+            destination_count=1,
+            selection_policy=SelectionPolicy(
+                mode="explore",
+                selection_seed=seed,
+                diversity_strength=1,
+                policy_version="candidate_selection.v1",
+            ),
+        )
+
+    first = selected(1)
+    replay = selected(1)
+    variants = {
+        tuple(
+            entry.candidate_id
+            for entry in selected(seed).entries
+            if entry.eligible_for_composition
+        )
+        for seed in range(1, 8)
+    }
+
+    assert first == replay
+    assert len(variants) > 1
+    assert all(len(candidate_ids) == 2 for candidate_ids in variants)
 
 
 def test_fallback_candidate_is_penalized_and_targeted_repair_is_stable():
