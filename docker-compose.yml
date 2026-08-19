@@ -1,3 +1,8 @@
+# 项目名钉死，不跟目录名走：container_name 是固定值，而 compose 默认拿目录名
+# 当项目名 —— 仓库换个目录名（OpenJourneyPilot vs journeypilot）就会撞名启动
+# 失败，并把既有数据留在旧项目的卷里。理由同文末卷名不改。
+name: journeypilot
+
 services:
   # ──────────────────────────────────────────────────────────
   # PostgreSQL + pgvector

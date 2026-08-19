@@ -546,7 +546,17 @@ step_infra() {
     return 0
   fi
 
-  docker compose -f "$compose_file" up -d postgres redis >/dev/null 2>&1
+  # 输出不能丢：这一步失败时（撞名、端口被占、镜像拉不动）它是唯一说明原因的地方。
+  # 没有守卫的话 set -e 会让整个 start 在这里无声退出。
+  local compose_out
+  if ! compose_out=$(docker compose -f "$compose_file" up -d postgres redis 2>&1); then
+    print_item "docker" fail "compose up 失败 — 未启动任何服务"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      printf "  ${DIM}│${RESET}      ${DIM}%s${RESET}\n" "$line"
+    done <<< "$compose_out"
+    return 1
+  fi
 
   local waited=0 max_wait=60
   local pg_status="starting" rd_status="starting"
@@ -641,8 +651,14 @@ step_mcp() {
 step_frontend_deps() {
   if [[ ! -x "$FRONTEND_DIR/node_modules/.bin/vite" ]]; then
     start_spinner "npm install..."
-    npm --prefix "$FRONTEND_DIR" install >/dev/null 2>&1
+    local npm_out npm_ok=0
+    npm_out=$(npm --prefix "$FRONTEND_DIR" install 2>&1) && npm_ok=1 || true
     stop_spinner
+    if (( npm_ok == 0 )); then
+      print_item "frontend" fail "npm install 失败"
+      printf "  ${DIM}│${RESET}      ${DIM}%s${RESET}\n" "$(echo "$npm_out" | tail -5)"
+      return 1
+    fi
     print_item "frontend" ok "npm install done"
   else
     print_item "frontend" ok "node_modules OK"
@@ -770,11 +786,11 @@ cmd_start() {
   refuse_running_instance || exit 1
 
   step_config
-  step_infra
+  step_infra || exit 1
   step_python || exit 1
   step_migrate || exit 1
   step_mcp
-  step_frontend_deps
+  step_frontend_deps || exit 1
   resolve_backend_port || exit 1
   resolve_frontend_port || exit 1
   step_start_backend || exit 1
