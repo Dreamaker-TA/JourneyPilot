@@ -391,3 +391,14 @@ Owner: `api/routes/knowledge.py` 与 `frontend/src/lib/knowledgeIngestFailure.ts
 Enforced by: 前端测试**读后端源文件**，要求两张表差集为空
 Tests:
 - `frontend/src/lib/knowledgeIngestFailure.test.ts`（双向差集 + 每个 code 有自己的话）
+
+### INV-UI-003：产品面永远不印工具原始载荷
+Owner: `tools/governance.py` 的 `summarize_tool_result`（唯一决定**说什么**）、
+`frontend/src/lib/toolDisplay.ts` 的 `toolResultText`（只决定**不印什么**）
+Enforced by: 认得出的形状读成人话，零结果与失败分开说；认不出形状时也绝不 `json.dumps`
+载荷 —— 那一坨 `{"success": true, "provider": "nominatim", …}` 曾经两次原样落到思维链上。
+前端再挡一次的对象是后端已经够不到的那一半：历史会话里存着的 `tool_result` 是当时那版
+摘要器留下的，翻回去照样会把 JSON 铺在屏幕上
+Tests:
+- `test_tool_result_summary.py::*`
+- `frontend/src/lib/toolDisplay.test.ts`

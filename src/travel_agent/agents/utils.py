@@ -38,6 +38,8 @@ from ..tools.governance import (
     ToolExecutionStatus,
     build_tool_execution_envelope,
     is_tool_execution_envelope,
+    looks_like_machine_payload,
+    summarize_tool_result,
 )
 from ..entities.tool_gateway import ToolGatewayDecision
 from ..tools.gateway import get_tool_gateway
@@ -1206,34 +1208,6 @@ def _summarize_args(arguments: Dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _summarize_result(result: Dict[str, Any]) -> str:
-    """通用工具返回值压缩摘要。"""
-    if not result:
-        return "无结果"
-    if result.get("type") == "user_input_required":
-        return "等待用户输入"
-    if not result.get("success", True):
-        # One wording, owned by ``tools/governance``: the summary is the line a
-        # traveller reads, and the reason lives in the envelope's ``error``.
-        # Never format the raw exception text here — that bypasses even the
-        # sanitizing the envelope path does.
-        return TOOL_FAILURE_SUMMARY
-
-    inner = result.get("result") or result.get("content") or result.get("data")
-    if inner is None:
-        return str(result)[:120].replace("\n", " ")
-    if isinstance(inner, str):
-        return inner.strip()[:120].replace("\n", " ")
-    if isinstance(inner, dict):
-        for key in ("total_cny", "converted", "rate", "destination"):
-            if key in inner:
-                return f"{key}: {inner[key]}"
-        return str(inner)[:120]
-    if isinstance(inner, list):
-        return f"共 {len(inner)} 条结果"
-    return str(inner)[:120]
-
-
 # 工具分类（用于 UI 展示优先级）
 TOOL_CATEGORIES: Dict[str, str] = {
     "global_place_search": "search",
@@ -1339,7 +1313,9 @@ def _extract_web_search_summary(result: Dict[str, Any]) -> str:
         if isinstance(content_str, str):
             lines = [line.strip() for line in content_str.split("\n") if line.strip()]
             if lines:
-                preview = lines[0][:60]
+                # 首行整个是一坨 JSON 时不拿它当预览（INV-UI-003）：free_web_search 的
+                # content 有时就是一行 JSON，那一行不是给人读的。
+                preview = "" if looks_like_machine_payload(lines[0]) else lines[0][:60]
                 return f"搜索到 {len(lines)} 条结果" + (f"：{preview}…" if preview else "")
     except Exception:
         pass
@@ -1427,7 +1403,9 @@ def _summarize_tool_result(tool_name: str, result: Dict[str, Any]) -> str:
                 return summary
         except Exception as e:  # 工具返回格式不可预测，摘要失败不影响主流程
             logger.debug(f"工具摘要器 [{tool_name}] 异常: {e}")
-    return _summarize_result(result)
+    # 非信封结果走 governance 那一份**同一个**压缩器：这里曾经另写一份，于是它认不出的
+    # 形状被 `str(result)[:120]` 原样印上屏，而 governance 那份早就不再这么做了。
+    return summarize_tool_result(result)
 
 
 # ---------------------------------------------------------------------------

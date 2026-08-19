@@ -22,6 +22,7 @@ import {
   countToolSources,
   describeToolGroup,
   describeToolStep,
+  toolResultText,
   toolSourceLabel,
   toolStatusLabel,
 } from '../../lib/toolDisplay';
@@ -82,6 +83,7 @@ function inspectLabel(step: ThinkingStep): string {
  */
 function ToolStepInspectPanel({ step, showResult = false }: { step: ThinkingStep; showResult?: boolean }) {
   const display = describeToolStep(step);
+  const resultText = toolResultText(step);
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <InspectSectionTitle>{display.categoryLabel}</InspectSectionTitle>
@@ -97,11 +99,11 @@ function ToolStepInspectPanel({ step, showResult = false }: { step: ThinkingStep
           }
         />
       )}
-      {showResult && step.toolResult && (
+      {showResult && resultText && (
         <div className="mt-1 border-t border-stroke/60 pt-2">
           <p className="text-[11px] font-semibold text-ink-muted">这一步拿到了</p>
           <p className="mt-1 max-h-28 overflow-y-auto break-words text-[11px] leading-relaxed text-ink-secondary">
-            {step.toolResult}
+            {resultText}
           </p>
         </div>
       )}
@@ -480,13 +482,15 @@ const MergedToolGroupItem: React.FC<{
         ? 'text-ink-secondary'
         : 'text-success';
   // 产品面：列出每次检索词/摘要；参数/归因细节走检查面 i。
+  // 摘要读起来是 provider 载荷时 `toolResultText` 给 null，这一行退回「这次查的是什么」——
+  // 一个查询词读者读得懂，一坨 JSON 读不懂。
   const queryItems = group.steps
-    .map((step) => ({ step, display: describeToolStep(step) }))
-    .filter((item) => Boolean(item.step.toolResult || item.display.subject));
+    .map((step) => ({ step, display: describeToolStep(step), result: toolResultText(step) }))
+    .filter((item) => Boolean(item.result || item.display.subject));
   const canExpand = queryItems.length > 0;
   const collapsedContent = isRunning
     ? (latestDisplay.subject || '')
-    : (lastStep.toolResult || '');
+    : (toolResultText(lastStep) || latestDisplay.subject || '');
 
   return (
     <div
@@ -543,7 +547,7 @@ const MergedToolGroupItem: React.FC<{
 
       {expanded && (
         <ul className="mt-1 space-y-1 pl-1">
-          {queryItems.map(({ step, display }) => {
+          {queryItems.map(({ step, display, result }) => {
             const stepRunning = step.toolStatus === 'running';
             const stepFailed = step.toolStatus === 'failed' && !isConsumerCompleted;
             const stepCapability = step.toolStatus === 'capability_declared';
@@ -551,7 +555,7 @@ const MergedToolGroupItem: React.FC<{
               ? (display.subject || display.actionText)
               : step.toolStatus === 'failed' && isConsumerCompleted
                 ? (display.subject || groupDisplay.actionText)
-                : (step.toolResult || display.subject);
+                : (result || display.subject);
             return (
               <li key={step.id} className="flex items-start gap-1.5 text-[13px] leading-relaxed text-ink-secondary">
                 <ToolStatusIcon
@@ -699,7 +703,7 @@ const ThinkingStepItem: React.FC<{
     // （能力判定的摘要就是服务端写的能力说明）。参数/归因 → 检查面 i。
     const preview = isRunning
       ? (display.subject || '')
-      : (step.toolResult || display.subject || '');
+      : (toolResultText(step) || display.subject || '');
 
     return (
       <div

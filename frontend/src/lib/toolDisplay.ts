@@ -321,6 +321,29 @@ export function describeToolStep(step: ThinkingStep): ToolDisplay {
 }
 
 /**
+ * 这一行摘要读起来是**载荷**而不是话吗 —— 后端 `tools/governance.looks_like_machine_payload`
+ * 同一条判据的镜像（INV-UI-003）。
+ *
+ * 判据只有一条、也只能有一条：以 `{` 或 `[` 开头。它不是在这里第二次决定「该说什么」——
+ * 该说什么只有后端一个 owner（`result_summary`）——它决定的是**不该印什么**：屏幕上永远
+ * 不出现一坨 provider JSON。两件事分开的理由是这道闸挡的东西后端已经挡不到了：历史会话里
+ * 存着的 `tool_result` 是当时那版摘要器留下的，翻回去照样会把 JSON 铺在思维链上。
+ */
+export function looksLikeMachinePayload(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith('{') || trimmed.startsWith('[');
+}
+
+/**
+ * 这一步在产品面上印得出的那句话；印不出时是 `null`，由调用方退回「这次查的是什么」。
+ */
+export function toolResultText(step: Pick<ThinkingStep, 'toolResult'>): string | null {
+  const text = step.toolResult?.trim();
+  if (!text || looksLikeMachinePayload(text)) return null;
+  return text;
+}
+
+/**
  * 一个工具名在旅行者语言里叫什么（「地图查询」而不是 `maps_text_search`）。
  *
  * 降级通道**不许逐字印原始工具名对**（`maps_text_search → free_web_search` 那种）：原始

@@ -198,11 +198,82 @@ def sanitize_tool_result(result: Any) -> Any:
     return _sanitize_value("", result, depth=0)
 
 
+# 一轮成功但零结果：和失败分开说。provider 答了，只是没有匹配项，
+# 说成 TOOL_FAILURE_SUMMARY 就是把「这里没有」谎报成「这一步坏了」。
+_EMPTY_RESULT_SUMMARY = "没有匹配的结果"
+
+# 认不出形状时的兜底。**这里绝不许 json.dumps 载荷** —— 那一坨
+# `{"success": true, "provider": "nominatim", …}` 会原样落到思维链上。
+_OPAQUE_RESULT_SUMMARY = "已取到结果"
+
+# 归一后路线的 `selected_mode` 词表（`services/global_route_search._PROVIDER_MODE`
+# 与 `services/amap_route_search._LINE_KIND_MODES` 是它的两个上游）。
+_ROUTE_MODE_LABELS: Dict[str, str] = {
+    "walk": "步行",
+    "bike": "骑行",
+    "drive": "驾车",
+    "bus": "公交",
+    "coach": "长途客车",
+    "ferry": "轮渡",
+    "metro": "地铁",
+    "tram": "有轨电车",
+    "train": "火车",
+    "high_speed_rail": "高铁",
+}
+
+# 值本身就是一句话的键：直接印值，不带英文键名前缀。
+_VALUE_ONLY_KEYS = ("summary", "title", "name", "destination")
+# 只是一个数的键：必须带中文标签，否则屏幕上出现的是 `total_cny: 320` 这种半机器行。
+_LABELLED_KEYS = (("converted", "换算结果"), ("rate", "汇率"), ("total_cny", "合计（元）"))
+
+
+def _endpoint_name(route: Any, key: str) -> str:
+    node = route.get(key) if isinstance(route, dict) else None
+    return str(node.get("name") or "").strip() if isinstance(node, dict) else ""
+
+
+def _summarize_route(route: Any) -> Optional[str]:
+    """一条路线读成一句话：`地铁 · 深圳北站 → 深圳湾公园 · 约 42 分钟`。
+
+    两种形状都收：归一后的（`selected_mode` / `from_endpoint` / `duration_minutes`，
+    builtin `global_route_search` 返回的那种）与 provider 原样的（`distance` / `duration`
+    两个秒/米读数，amap MCP direction 系列返回的那种）。
+    """
+    if not isinstance(route, dict):
+        return None
+    parts: list[str] = []
+    label = _ROUTE_MODE_LABELS.get(str(route.get("selected_mode") or ""))
+    if label:
+        parts.append(label)
+    origin = _endpoint_name(route, "from_endpoint")
+    destination = _endpoint_name(route, "to_endpoint")
+    if origin and destination:
+        parts.append(f"{origin} → {destination}")
+    minutes = route.get("duration_minutes")
+    if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and minutes > 0:
+        parts.append(f"约 {int(minutes)} 分钟")
+    if parts:
+        return " · ".join(parts)
+
+    # provider 原样形状：距离米、时长秒。
+    raw: list[str] = []
+    distance = route.get("distance")
+    duration = route.get("duration")
+    if str(distance).isdigit():
+        raw.append(f"{int(distance) / 1000:.1f}km")
+    if str(duration).isdigit():
+        raw.append(f"约 {int(duration) // 60} 分钟")
+    return "路线：" + "，".join(raw) if raw else None
+
+
 def _summarize_structured_collection(value: Any) -> Optional[str]:
     """Human-readable summary for the common structured tool payloads (place
     search / weather / route), so envelope summaries read as "找到 5 个结果：…"
     instead of dumping raw provider JSON.  Returns None when the shape is not
     recognized so the caller falls back to the generic compaction.
+
+    **空列表也算认得出的形状。** 只认非空的话，一次「查了但没找到」会掉进通用压缩，
+    而通用压缩过去就是在那里把整个 payload 印上屏幕的。
     """
     data: Any = value
     # MCP text-content shape: [{"text": "{...json...}"}] — lift and parse.
@@ -223,7 +294,9 @@ def _summarize_structured_collection(value: Any) -> Optional[str]:
         return None
     try:
         results = data.get("results")
-        if isinstance(results, list) and results:
+        if isinstance(results, list):
+            if not results:
+                return _EMPTY_RESULT_SUMMARY
             names = [
                 str(item.get("name") or item.get("title") or "").strip()
                 for item in results
@@ -251,24 +324,21 @@ def _summarize_structured_collection(value: Any) -> Optional[str]:
                 return summary or None
 
         routes = data.get("routes")
-        if isinstance(routes, list) and routes and isinstance(routes[0], dict):
-            route = routes[0]
-            distance = route.get("distance")
-            duration = route.get("duration")
-            parts: list[str] = []
-            if str(distance).isdigit():
-                parts.append(f"{int(distance) / 1000:.1f}km")
-            if str(duration).isdigit():
-                parts.append(f"约 {int(duration) // 60} 分钟")
-            if parts:
-                return "路线：" + "，".join(parts)
+        if isinstance(routes, list):
+            if not routes:
+                return _EMPTY_RESULT_SUMMARY
+            route_summary = _summarize_route(routes[0])
+            if route_summary:
+                return route_summary
 
         # Web 搜索 / 网页抓取：{web:[...]}、{data:{web:[...]}}，或单条 {url,title}。
         # 这类结果最常在思维链里泄成整坨原始 JSON——收敛成「找到 N 条网页：标题…」。
         web = data.get("web")
         if web is None and isinstance(data.get("data"), dict):
             web = data["data"].get("web")
-        if isinstance(web, list) and web:
+        if isinstance(web, list):
+            if not web:
+                return _EMPTY_RESULT_SUMMARY
             titles = [
                 str(item.get("title") or item.get("name") or "").strip()
                 for item in web
@@ -550,21 +620,44 @@ def _sanitize_value(
     return value
 
 
+def _dict_summary(value: Dict[str, Any]) -> str:
+    """认不出形状的 dict 说什么。
+
+    **不许 json.dumps。** `result_summary` 是给旅行者读的那一行，而一坨 provider 载荷
+    既不给人读也不给模型读（模型读的是 `sanitized_result`）；它只会从这条缝漏到屏幕上。
+    """
+    for key in _VALUE_ONLY_KEYS:
+        if value.get(key):
+            return str(value[key])
+    for key, label in _LABELLED_KEYS:
+        if value.get(key):
+            return f"{label}：{value[key]}"
+    return _OPAQUE_RESULT_SUMMARY
+
+
+def looks_like_machine_payload(text: str) -> bool:
+    """这一行读起来是载荷而不是话吗。
+
+    判据只有一条、也只能有一条：**以 `{` 或 `[` 开头**。MCP 那批工具把 JSON 装在
+    text content 里返回，压缩到这一步时它仍然是一个字符串，形状认不出来就会原样上屏。
+    前端 `lib/toolDisplay.ts` 有同一条判据的镜像 —— 那是给历史会话里已经存下的
+    摘要用的最后一道闸（见 INV-UI-003）。
+    """
+    return text.lstrip().startswith(("{", "["))
+
+
 def _compact_summary(value: Any, *, limit: int = _MAX_SUMMARY) -> str:
     if isinstance(value, str):
         text = value
     elif isinstance(value, list):
         return f"共 {len(value)} 条结果"
     elif isinstance(value, dict):
-        for key in ("summary", "title", "name", "destination", "converted", "rate", "total_cny"):
-            if key in value and value[key]:
-                text = f"{key}: {value[key]}"
-                break
-        else:
-            text = json.dumps(sanitize_tool_result(value), ensure_ascii=False, default=str)
+        text = _dict_summary(value)
     else:
         text = str(value)
     text = re.sub(r"\s+", " ", text).strip()
+    if looks_like_machine_payload(text):
+        return _OPAQUE_RESULT_SUMMARY
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
     return text or "无结果"
