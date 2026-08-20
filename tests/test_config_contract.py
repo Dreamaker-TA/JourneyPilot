@@ -305,6 +305,33 @@ def test_json_object_downgrade_does_not_duplicate_an_embedded_schema():
     assert prepared == messages
 
 
+def test_task_scoped_output_limit_replaces_both_openrouter_token_fields():
+    from langchain_core.messages import HumanMessage
+
+    from travel_agent.models.router import ModelTier, OpenAICompatibleLLM
+
+    llm = OpenAICompatibleLLM(
+        api_key="test-key",
+        model_name="test-model",
+        base_url="https://openrouter.ai/api/v1",
+        temperature=0,
+        max_tokens=8192,
+        tier=ModelTier.PRIMARY,
+    )
+
+    kwargs, limit = llm._apply_output_token_limit(
+        {"temperature": 0, "max_output_tokens": 16384}
+    )
+    payload = llm._client._get_request_payload(
+        [HumanMessage(content="JSON only")], **kwargs
+    )
+
+    assert limit == 16384
+    assert payload["max_completion_tokens"] == 16384
+    assert payload["extra_body"]["max_tokens"] == 16384
+    assert payload["extra_body"]["reasoning"] == {"effort": "none"}
+
+
 # --- 生成物一致性 --------------------------------------------------------- #
 
 

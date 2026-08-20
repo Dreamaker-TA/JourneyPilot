@@ -422,6 +422,13 @@ _COMPOSITION_FAILURE_VALIDATION_ERRORS = 3
 # How many blocking delivery-quality gaps a repair prompt restates.
 _COMPOSITION_REPAIR_GAP_LIMIT = 8
 
+# Composition carries all Days and placements, so it gets a wider task-scoped
+# ceiling than short classifiers and contract normalizers.  It remains well below
+# the provider/default 32768 ceiling: the prompt reductions should keep normal
+# outputs far under this value, while 16384 leaves recovery room for a genuinely
+# dense multi-day draft.
+ITINERARY_COMPOSITION_OUTPUT_TOKENS = 16384
+
 
 # What an output-ceiling truncation looks like coming back through the SDK.  The
 # provider does not raise a typed error for it: the completion simply stops at the
@@ -3052,6 +3059,7 @@ async def itinerary_planner_node(
                     },
                 },
                 "temperature": 0,
+                "max_output_tokens": ITINERARY_COMPOSITION_OUTPUT_TOKENS,
             }
             response = await llm.ainvoke(messages, **response_kwargs)
             content = response.content if hasattr(response, "content") else response
@@ -3365,6 +3373,7 @@ async def itinerary_planner_node(
                 },
             },
             "temperature": 0,
+            "max_output_tokens": ITINERARY_COMPOSITION_OUTPUT_TOKENS,
         }
         response = await llm.ainvoke(messages, **response_kwargs)
         content = response.content if hasattr(response, "content") else response

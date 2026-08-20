@@ -129,9 +129,11 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
 
         def __init__(self):
             self.response_format = None
+            self.max_output_tokens = None
 
         async def ainvoke(self, *_args, **kwargs):
             self.response_format = kwargs["response_format"]
+            self.max_output_tokens = kwargs["max_output_tokens"]
             return json.dumps(
                 {
                     "clauses": [
@@ -149,6 +151,7 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
     )
 
     wrapper = model.response_format["json_schema"]
+    assert model.max_output_tokens == 4096
     assert wrapper["strict"] is supports_native_schema
     params_schema = wrapper["schema"]["$defs"]["ConstraintParamsDraft"]
     if supports_native_schema:
@@ -206,6 +209,59 @@ async def test_contract_rejection_gets_one_llm_semantic_repair_before_fallback()
     assert "校验反馈" in model.calls[1][-1]["content"]
     [intent] = result.clauses[0].intents
     assert intent.kind is IntentKind.ALTERNATIVES
+    assert intent.strength is IntentStrength.HARD
+    assert intent.target is IntentTarget.DELIVERY
+
+
+@pytest.mark.asyncio
+async def test_repeated_repair_failure_gets_an_unanchored_semantic_regeneration():
+    clause = _clause(0, "并给出备选方案")
+
+    class _Model:
+        capabilities = SimpleNamespace(supports_json_schema=False)
+
+        def __init__(self):
+            self.calls = []
+
+        async def ainvoke(self, messages, **_kwargs):
+            self.calls.append(messages)
+            valid = len(self.calls) == 3
+            return json.dumps(
+                {
+                    "clauses": [
+                        {
+                            "clause_id": clause.clause_id,
+                            "disposition": "mapped_to_intent",
+                            "intents": [
+                                {
+                                    "kind": "alternatives",
+                                    "target": "delivery" if valid else "itinerary",
+                                    "strength": "hard" if valid else "soft",
+                                    "priority": 90,
+                                    "value": {
+                                        "value_type": "alternative",
+                                        "count": 2,
+                                    },
+                                    "verification_mode": "semantic",
+                                    "impact_stages": ["composition", "projection"],
+                                    "public_summary": "提供备选方案",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
+
+    model = _Model()
+    result = await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=model
+    )
+
+    assert len(model.calls) == 3
+    assert any(message["role"] == "assistant" for message in model.calls[1])
+    assert not any(message["role"] == "assistant" for message in model.calls[2])
+    assert "独立的语义归一化" in model.calls[2][-1]["content"]
+    [intent] = result.clauses[0].intents
     assert intent.strength is IntentStrength.HARD
     assert intent.target is IntentTarget.DELIVERY
 

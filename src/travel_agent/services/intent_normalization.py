@@ -33,6 +33,10 @@ from ..utils.json_helpers import safe_parse_json
 
 
 INTENT_NORMALIZATION_PROMPT_VERSION = "request_contract_normalization.v1"
+# A request contract is a bounded clause ledger, not a long-form answer.  Keep
+# its ceiling tight even when the primary model is configured generously for
+# itinerary composition.
+INTENT_NORMALIZATION_OUTPUT_TOKENS = 4096
 
 logger = logging.getLogger(__name__)
 
@@ -251,13 +255,14 @@ async def normalize_clauses(
     }
     messages = _normalization_prompt(clauses, controlled_identity)
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         raw = ""
         try:
             raw = await llm.ainvoke(
                 messages,
                 response_format=response_format,
                 temperature=0,
+                max_output_tokens=INTENT_NORMALIZATION_OUTPUT_TOKENS,
             )
             parsed = safe_parse_json(raw, strip_think_tags=True)
             result = RequestContractNormalizationResult.model_validate(parsed)
@@ -285,12 +290,53 @@ async def normalize_clauses(
                     error=exc,
                 )
                 continue
+            if attempt == 1:
+                logger.info(
+                    "request contract semantic repair rejected; requesting fresh semantic "
+                    "regeneration | error_type=%s",
+                    type(exc).__name__,
+                )
+                messages = _normalization_fresh_retry_prompt(
+                    clauses=clauses,
+                    controlled_identity=controlled_identity,
+                    error=exc,
+                )
+                continue
     logger.warning(
         "request contract model normalization failed after semantic repair; "
         "using deterministic fallback | error_type=%s",
         type(last_error).__name__ if last_error is not None else "unknown",
     )
     return _fallback_normalization(clauses, controlled_identity)
+
+
+def _normalization_fresh_retry_prompt(
+    *,
+    clauses: List[SourceClause],
+    controlled_identity: Dict[str, object],
+    error: Exception,
+) -> List[Dict[str, str]]:
+    """Regenerate independently when editing the rejected draft stays anchored.
+
+    The original clauses and schema remain authoritative.  Omitting the previous
+    JSON is intentional: an otherwise capable model can repeat a structural
+    mistake simply because the repair conversation presents that mistake as its
+    latest assistant answer.
+    """
+
+    messages = _normalization_prompt(clauses, controlled_identity)
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "前两次结构化结果均未通过合同校验。请从原始 clauses 重新做一次独立的"
+                "语义归一化，不要沿用或猜测之前的 JSON。每个 clause 仍须按原顺序恰好返回一次；"
+                "复合要求要拆成各自可验收的 Intent。只输出完整 JSON 对象。"
+                f"最近校验反馈：{str(error)[:1200]}"
+            ),
+        }
+    )
+    return messages
 
 
 def _normalization_repair_prompt(

@@ -29,6 +29,7 @@ from typing import (
 
 from ..config import (
     FastModelConfig,
+    MAX_COMPLETION_TOKENS,
     PrimaryModelConfig,
     ProviderCapabilities,
     capabilities_for,
@@ -448,7 +449,13 @@ class OpenAICompatibleLLM(BaseLLM):
         limit = int(getattr(get_settings().provider_channels, name))
         return channel_gate(f"llm.{name}", limit)
 
-    def _guard_budget(self, operation: str, messages: List[Dict[str, Any]]) -> None:
+    def _guard_budget(
+        self,
+        operation: str,
+        messages: List[Dict[str, Any]],
+        *,
+        output_tokens: Optional[int] = None,
+    ) -> None:
         """在花掉这次调用之前判预算，按最坏开销估账。
 
         输入侧按字符数粗估（供应商还没告诉我们真实 token），输出侧按配置上限 ——
@@ -459,8 +466,36 @@ class OpenAICompatibleLLM(BaseLLM):
             operation,
             llm_calls=1,
             input_tokens=estimate_tokens(_messages_text(messages)),
-            output_tokens=self._max_tokens,
+            output_tokens=output_tokens or self._max_tokens,
         )
+
+    def _apply_output_token_limit(
+        self, kwargs: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], int]:
+        """Apply one task-scoped output ceiling in both provider dialects.
+
+        ``langchain-openai`` serializes ``max_tokens`` as
+        ``max_completion_tokens`` while DeepSeek-compatible providers may only
+        read the former inside ``extra_body``.  A per-call limit therefore has
+        to replace both fields together; changing just one leaves the client's
+        configured default active on the other path.
+        """
+
+        requested = kwargs.pop("max_output_tokens", None)
+        if requested is None:
+            return kwargs, self._max_tokens
+        limit = int(requested)
+        if limit < 1 or limit > MAX_COMPLETION_TOKENS:
+            raise ValueError(
+                f"max_output_tokens must be between 1 and {MAX_COMPLETION_TOKENS}"
+            )
+        scoped = dict(kwargs)
+        scoped["max_tokens"] = limit
+        scoped["extra_body"] = _provider_extra_body(
+            self.capabilities,
+            max_tokens=limit,
+        )
+        return scoped, limit
 
     async def _in_channel(self, awaitable: Awaitable[Any], *, operation: str) -> Any:
         """在通道配额内发起一次调用，并受 Run 的时间窗约束。
@@ -597,12 +632,13 @@ class OpenAICompatibleLLM(BaseLLM):
         )
 
     async def ainvoke(self, messages: List[Dict[str, Any]], **kwargs: Any) -> str:
+        kwargs, output_limit = self._apply_output_token_limit(kwargs)
         dropped_schema = _downgraded_json_schema(kwargs, capabilities=self.capabilities)
         kwargs = _normalize_response_format(kwargs, capabilities=self.capabilities)
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
-        self._guard_budget("model.ainvoke", messages)
+        self._guard_budget("model.ainvoke", messages, output_tokens=output_limit)
         record = self._start_record("ainvoke", stream=False)
         started = time.perf_counter()
         try:
@@ -629,12 +665,15 @@ class OpenAICompatibleLLM(BaseLLM):
         tools: List[Dict[str, Any]],
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        kwargs, output_limit = self._apply_output_token_limit(kwargs)
         dropped_schema = _downgraded_json_schema(kwargs, capabilities=self.capabilities)
         kwargs = _normalize_response_format(kwargs, capabilities=self.capabilities)
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
-        self._guard_budget("model.ainvoke_with_tools", messages)
+        self._guard_budget(
+            "model.ainvoke_with_tools", messages, output_tokens=output_limit
+        )
         record = self._start_record("ainvoke_with_tools", stream=False)
         started = time.perf_counter()
         bound = self._client.bind_tools(tools)
@@ -664,12 +703,13 @@ class OpenAICompatibleLLM(BaseLLM):
         messages: List[Dict[str, Any]],
         **kwargs: Any,
     ) -> AsyncIterator[str]:
+        kwargs, output_limit = self._apply_output_token_limit(kwargs)
         dropped_schema = _downgraded_json_schema(kwargs, capabilities=self.capabilities)
         kwargs = _normalize_response_format(kwargs, capabilities=self.capabilities)
         messages = _satisfy_json_object_prompt_requirement(
             messages, kwargs, dropped_schema=dropped_schema
         )
-        self._guard_budget("model.astream", messages)
+        self._guard_budget("model.astream", messages, output_tokens=output_limit)
         record = self._start_record("astream", stream=True)
         started = time.perf_counter()
         full: Any = None
