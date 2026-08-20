@@ -275,7 +275,7 @@ def test_reasoning_dialects_follow_the_declaration():
     )
     assert set(direct) == {"thinking", "max_tokens"}
     assert set(proxied) == {"reasoning", "max_tokens"}
-    assert proxied["reasoning"] == {"effort": "none"}
+    assert proxied["reasoning"] == {"effort": "none", "enabled": False}
     # 保守档全都发：认不出的那种会被对方忽略，少发一种的代价是开关静默失效。
     assert set(conservative) == {"thinking", "reasoning", "max_tokens"}
 
@@ -329,7 +329,10 @@ def test_task_scoped_output_limit_replaces_both_openrouter_token_fields():
     assert limit == 16384
     assert payload["max_completion_tokens"] == 16384
     assert payload["extra_body"]["max_tokens"] == 16384
-    assert payload["extra_body"]["reasoning"] == {"effort": "none"}
+    assert payload["extra_body"]["reasoning"] == {
+        "effort": "none",
+        "enabled": False,
+    }
 
 
 # --- 生成物一致性 --------------------------------------------------------- #

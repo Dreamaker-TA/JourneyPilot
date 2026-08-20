@@ -154,7 +154,7 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
     )
 
     wrapper = model.response_format["json_schema"]
-    assert model.max_output_tokens == 8192
+    assert model.max_output_tokens == 12288
     assert wrapper["strict"] is supports_native_schema
     clause_array = wrapper["schema"]["properties"]["clauses"]
     assert clause_array["minItems"] == clause_array["maxItems"] == 1

@@ -38,7 +38,7 @@ INTENT_NORMALIZATION_PROMPT_VERSION = "request_contract_normalization.v1"
 # ceiling still needs room for every clause and the provider's structured
 # planning tokens; the operation budget below prevents that headroom from
 # turning a slow completion into an unbounded pre-approval wait.
-INTENT_NORMALIZATION_OUTPUT_TOKENS = 8192
+INTENT_NORMALIZATION_OUTPUT_TOKENS = 12288
 INTENT_NORMALIZATION_CALL_TIMEOUT_SECONDS = 120.0
 INTENT_NORMALIZATION_OPERATION_TIMEOUT_SECONDS = 240.0
 

@@ -282,10 +282,14 @@ def _provider_extra_body(
     if control in ("deepseek", "all_dialects"):
         body["thinking"] = {"type": "disabled"}
     if control in ("openrouter", "all_dialects"):
-        # OpenRouter 当前统一方言用 effort="none" 关闭 reasoning。旧的
-        # enabled=false 会被部分模型忽略，结构化提取可能把整个 completion 上限都耗在
-        # reasoning_tokens，最后没有正文可解析。
-        body["reasoning"] = {"effort": "none"}
+        # Send both normalized disable signals.  OpenRouter models whose
+        # supported_efforts omit ``none`` can otherwise keep their
+        # default_enabled reasoning path even though reasoning is not mandatory;
+        # an incremental JSON repair then spends the whole completion allowance
+        # on hidden reasoning and returns no document.  ``enabled=false`` makes
+        # the desired state explicit while ``effort=none`` preserves the common
+        # OpenAI-style dialect.
+        body["reasoning"] = {"effort": "none", "enabled": False}
     if capabilities.token_limit_field in ("max_tokens", "both"):
         body["max_tokens"] = max_tokens
     return body
