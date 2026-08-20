@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -33,10 +34,13 @@ from ..utils.json_helpers import safe_parse_json
 
 
 INTENT_NORMALIZATION_PROMPT_VERSION = "request_contract_normalization.v1"
-# A request contract is a bounded clause ledger, not a long-form answer.  Keep
-# its ceiling tight even when the primary model is configured generously for
-# itinerary composition.
-INTENT_NORMALIZATION_OUTPUT_TOKENS = 4096
+# A request contract is a bounded clause ledger, not a long-form answer.  Its
+# ceiling still needs room for every clause and the provider's structured
+# planning tokens; the operation budget below prevents that headroom from
+# turning a slow completion into an unbounded pre-approval wait.
+INTENT_NORMALIZATION_OUTPUT_TOKENS = 8192
+INTENT_NORMALIZATION_CALL_TIMEOUT_SECONDS = 120.0
+INTENT_NORMALIZATION_OPERATION_TIMEOUT_SECONDS = 240.0
 
 logger = logging.getLogger(__name__)
 
@@ -238,9 +242,7 @@ async def normalize_clauses(
         raise ValueError("request normalization requires at least one clause")
     model_schema = RequestContractNormalizationResult.model_json_schema()
     capabilities = getattr(llm, "capabilities", None)
-    supports_native_schema = bool(
-        getattr(capabilities, "supports_json_schema", False)
-    )
+    supports_native_schema = bool(getattr(capabilities, "supports_json_schema", False))
     # 原生 Structured Output 要求所有字段 required；json_object 降级则把 Schema
     # 放进 prompt，此时保留 Pydantic 的可选/default 语义，避免模型把数十个可选字段
     # 全部展开成 null/[] 并撞上输出上限。两条路径最后都由同一 Pydantic 模型校验。
@@ -255,20 +257,52 @@ async def normalize_clauses(
     }
     messages = _normalization_prompt(clauses, controlled_identity)
     last_error: Exception | None = None
+    loop = asyncio.get_running_loop()
+    operation_deadline = loop.time() + INTENT_NORMALIZATION_OPERATION_TIMEOUT_SECONDS
     for attempt in range(3):
         raw = ""
+        remaining_seconds = operation_deadline - loop.time()
+        if remaining_seconds <= 0:
+            last_error = TimeoutError(
+                "request contract normalization operation budget exhausted"
+            )
+            break
         try:
-            raw = await llm.ainvoke(
-                messages,
-                response_format=response_format,
-                temperature=0,
-                max_output_tokens=INTENT_NORMALIZATION_OUTPUT_TOKENS,
+            raw = await asyncio.wait_for(
+                llm.ainvoke(
+                    messages,
+                    response_format=response_format,
+                    temperature=0,
+                    max_output_tokens=INTENT_NORMALIZATION_OUTPUT_TOKENS,
+                ),
+                timeout=min(
+                    INTENT_NORMALIZATION_CALL_TIMEOUT_SECONDS,
+                    remaining_seconds,
+                ),
             )
             parsed = safe_parse_json(raw, strip_think_tags=True)
             result = RequestContractNormalizationResult.model_validate(parsed)
             _validate_clause_coverage(result, clauses)
             _validate_model_contract(result, clauses)
             return result
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            remaining_seconds = operation_deadline - loop.time()
+            if attempt < 2 and remaining_seconds > 0:
+                logger.info(
+                    "request contract model normalization timed out; requesting "
+                    "fresh semantic regeneration | remaining_seconds=%.1f",
+                    remaining_seconds,
+                )
+                messages = _normalization_fresh_retry_prompt(
+                    clauses=clauses,
+                    controlled_identity=controlled_identity,
+                    error=TimeoutError(
+                        "the previous semantic normalization exceeded its call budget"
+                    ),
+                )
+                continue
+            break
         except (
             OpenAIError,
             ValidationError,
@@ -560,12 +594,13 @@ def _validate_model_contract(
                 and constraint.params.per == expected["per"]
                 for constraint in draft.constraints
             ):
-                raise ValueError("model changed or omitted an explicit numeric budget cap")
+                raise ValueError(
+                    "model changed or omitted an explicit numeric budget cap"
+                )
 
         source_text = source.source_text.casefold()
         if not any(cue in source_text for cue in _MONETARY_CUES) and any(
-            constraint.category == "budget_cap"
-            and constraint.params.amount is not None
+            constraint.category == "budget_cap" and constraint.params.amount is not None
             for constraint in draft.constraints
         ):
             raise ValueError("model inferred a numeric budget from non-monetary text")
@@ -770,10 +805,7 @@ def _fallback_clause(
                     VerificationMode.DETERMINISTIC,
                 )
             )
-    elif any(
-        token in lowered
-        for token in _ALTERNATIVE_REQUEST_CUES
-    ):
+    elif any(token in lowered for token in _ALTERNATIVE_REQUEST_CUES):
         # A singular request for an alternative means one primary plus one
         # fallback option.  Unlike the numbered grammar above there is no count
         # to infer, so two is the smallest contract that satisfies the request.

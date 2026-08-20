@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -151,7 +152,7 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
     )
 
     wrapper = model.response_format["json_schema"]
-    assert model.max_output_tokens == 4096
+    assert model.max_output_tokens == 8192
     assert wrapper["strict"] is supports_native_schema
     params_schema = wrapper["schema"]["$defs"]["ConstraintParamsDraft"]
     if supports_native_schema:
@@ -264,6 +265,47 @@ async def test_repeated_repair_failure_gets_an_unanchored_semantic_regeneration(
     [intent] = result.clauses[0].intents
     assert intent.strength is IntentStrength.HARD
     assert intent.target is IntentTarget.DELIVERY
+
+
+@pytest.mark.asyncio
+async def test_slow_normalization_calls_share_one_operation_budget(monkeypatch):
+    from travel_agent.services import intent_normalization as normalization_module
+
+    clause = _clause(0, "并给出备选方案")
+
+    class _Model:
+        capabilities = SimpleNamespace(supports_json_schema=False)
+
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, *_args, **_kwargs):
+            self.calls += 1
+            await asyncio.sleep(1)
+            raise AssertionError("operation timeout must cancel the slow call")
+
+    monkeypatch.setattr(
+        normalization_module,
+        "INTENT_NORMALIZATION_CALL_TIMEOUT_SECONDS",
+        0.02,
+    )
+    monkeypatch.setattr(
+        normalization_module,
+        "INTENT_NORMALIZATION_OPERATION_TIMEOUT_SECONDS",
+        0.035,
+    )
+    model = _Model()
+
+    result = await normalize_clauses(
+        clauses=[clause],
+        controlled_identity=_identity(),
+        llm=model,
+    )
+
+    assert model.calls == 2
+    [intent] = result.clauses[0].intents
+    assert intent.kind is IntentKind.ALTERNATIVES
+    assert intent.strength is IntentStrength.HARD
 
 
 def _contract():
