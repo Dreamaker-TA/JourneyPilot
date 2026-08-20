@@ -125,16 +125,14 @@ def _deterministic_match(
     ):
         return None
     matched_terms = [term for term in _terms(intent) if term in searchable]
-    if not matched_terms and intent.verification_mode is VerificationMode.MIXED:
-        return None
     if not matched_terms:
-        return CandidateIntentMatch(
-            candidate_id=candidate.candidate_id,
-            intent_id=intent.intent_id,
-            status=IntentMatchStatus.UNKNOWN,
-            method="deterministic",
-            reason_code="deterministic_evidence_not_found",
-        )
+        # Exact evidence matching is a cheap proof, not a semantic parser.  The
+        # IntentSpec has already been authored by the LLM; when its canonical
+        # category and the Provider's typed value use different languages or
+        # vocabularies (for example a localized request and an enum value), let
+        # the bounded structured semantic evaluator decide.  With no model this
+        # still resolves to UNKNOWN below, so the safety boundary is unchanged.
+        return None
     status = (
         IntentMatchStatus.VIOLATED
         if intent.kind is IntentKind.MUST_EXCLUDE
@@ -322,36 +320,69 @@ async def evaluate_candidate_intents(
                 },
                 "required": ["matches"],
             }
-            payload = [
-                {
-                    "candidate_id": candidate.candidate_id,
-                    "candidate": candidate.model_dump(mode="json"),
-                    "intent_id": intent.intent_id,
-                    "intent": intent.public_summary,
-                    "facts": [fact.model_dump(mode="json") for fact in facts],
-                    "sources": [
-                        {
-                            "source_record_id": source_id,
-                            "title": source_index[source_id].title,
-                            "public_excerpt": source_index[source_id].public_excerpt,
-                        }
-                        for source_id in source_ids
-                        if source_id in source_index
-                    ],
-                }
-                for candidate, intent, facts, source_ids in batch
-            ]
+            candidate_payload: dict[str, dict[str, Any]] = {}
+            intent_payload: dict[str, dict[str, Any]] = {}
+            evaluation_pairs: list[dict[str, str]] = []
+            for candidate, intent, facts, source_ids in batch:
+                candidate_payload.setdefault(
+                    candidate.candidate_id,
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "candidate": candidate.model_dump(mode="json"),
+                        "facts": [fact.model_dump(mode="json") for fact in facts],
+                        "sources": [
+                            {
+                                "source_record_id": source_id,
+                                "title": source_index[source_id].title,
+                                "public_excerpt": source_index[
+                                    source_id
+                                ].public_excerpt,
+                            }
+                            for source_id in source_ids
+                            if source_id in source_index
+                        ],
+                    },
+                )
+                intent_payload.setdefault(
+                    intent.intent_id,
+                    {
+                        "intent_id": intent.intent_id,
+                        "kind": intent.kind.value,
+                        "target": intent.target.value,
+                        "summary": intent.public_summary,
+                        "value": intent.value.model_dump(mode="json"),
+                    },
+                )
+                evaluation_pairs.append(
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "intent_id": intent.intent_id,
+                    }
+                )
+            payload = {
+                "domain": domain,
+                # Candidate evidence and intent semantics are each serialized
+                # once.  The old row-per-pair shape repeated a full candidate,
+                # every fact and every source for every intent in the batch.
+                "candidates": list(candidate_payload.values()),
+                "intents": list(intent_payload.values()),
+                "evaluations": evaluation_pairs,
+            }
             try:
                 response = await llm.ainvoke(
                     [
                         {
                             "role": "system",
-                            "content": "只根据给定事实批量判断候选与意图。没有直接证据必须返回 unknown，不得补写属性。",
+                            "content": (
+                                "只根据给定候选事实批量判断结构化意图。"
+                                "evaluations 中每一对必须恰好返回一行；"
+                                "没有直接证据必须返回 unknown，不得补写属性。"
+                            ),
                         },
                         {
                             "role": "user",
                             "content": json.dumps(
-                                {"domain": domain, "evaluations": payload},
+                                payload,
                                 ensure_ascii=False,
                                 separators=(",", ":"),
                             ),
@@ -366,6 +397,7 @@ async def evaluate_candidate_intents(
                         },
                     },
                     temperature=0,
+                    max_output_tokens=16384,
                 )
                 content = response.content if hasattr(response, "content") else response
                 parsed = json.loads(

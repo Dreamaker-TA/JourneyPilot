@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ...entities.delivery_bundle import DeliveryContractViolation, GateClass
+from ...entities.intent_coverage import IntentFidelityGap
+from ...entities.intent_spec import IntentTarget
 from ...entities.state import TravelAgentState
 from ...services.composition_rule_compiler import compile_composition_rules
 from ...services.composition_mutations import mark_mutations_revalidated
@@ -12,6 +14,38 @@ from ...workflows.composition_repair import (
     apply_composition_repair_budget,
     composition_repair_budget_exhausted,
 )
+from .candidate_gate import worker_targeted_research_exhausted
+
+
+_TARGET_RESEARCH_WORKER = {
+    IntentTarget.VISIT: "destination_researcher",
+    IntentTarget.DINING: "destination_researcher",
+    IntentTarget.LODGING: "accommodation_researcher",
+    IntentTarget.LOCAL_TRANSPORT: "transport_researcher",
+    IntentTarget.LONG_DISTANCE_TRANSPORT: "transport_researcher",
+}
+
+
+def _candidate_retry_available(
+    state: TravelAgentState,
+    gaps: list[IntentFidelityGap],
+) -> bool:
+    """Return whether Candidate Gate can still buy evidence for these gaps."""
+
+    intent_by_id = {
+        intent.intent_id: intent
+        for intent in (state.intent_spec.active_items if state.intent_spec else [])
+    }
+    workers = {
+        worker
+        for gap in gaps
+        if gap.retry_target in {"candidate_gate", "candidate_selection"}
+        if (intent := intent_by_id.get(gap.intent_id)) is not None
+        if (worker := _TARGET_RESEARCH_WORKER.get(intent.target)) is not None
+    }
+    return any(
+        not worker_targeted_research_exhausted(state, worker) for worker in workers
+    )
 
 
 async def intent_fidelity_gate_node(state: TravelAgentState) -> Dict[str, Any]:
@@ -73,12 +107,23 @@ async def intent_fidelity_gate_node(state: TravelAgentState) -> Dict[str, Any]:
     if not blocking:
         update["intent_fidelity_route"] = "passed"
         return update
-    if any(
-        gap.retry_target in {"candidate_gate", "candidate_selection"}
+    candidate_gaps = [
+        gap
         for gap in blocking
-    ):
+        if gap.retry_target in {"candidate_gate", "candidate_selection"}
+    ]
+    if candidate_gaps and _candidate_retry_available(state, candidate_gaps):
         update["intent_fidelity_route"] = "candidate_gate"
         return update
+    if candidate_gaps:
+        # Candidate Gate already settled these domains.  Sending the same
+        # immutable catalog back around the graph cannot change fidelity; carry
+        # the audited gap forward.  If composition also has a distinct gap
+        # (for example missing alternatives), the bounded composition repair
+        # below may still improve that independent part of the delivery.
+        if len(candidate_gaps) == len(blocking):
+            update["intent_fidelity_route"] = "passed"
+            return update
     update["intent_fidelity_route"] = "composition_repair"
     return apply_composition_repair_budget(
         state,

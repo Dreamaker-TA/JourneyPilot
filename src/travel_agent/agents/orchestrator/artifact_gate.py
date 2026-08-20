@@ -30,6 +30,7 @@ from ...workflows.composition_repair import apply_composition_repair_budget
 from ...workflows.run_deadline import observe_run_deadline
 from ..utils import strip_round_suffix
 from .candidate_gate import (
+    _latest_packets,
     worker_research_satisfied_by_a_later_round,
     worker_targeted_research_exhausted,
 )
@@ -65,6 +66,27 @@ def _planned_agent_keys(state: TravelAgentState) -> list[str]:
     return [agent for group in state.execution_plan or [] for agent in group]
 
 
+def _current_research_packet(
+    state: TravelAgentState,
+    agent_key: str,
+):
+    """Resolve a worker packet through its generation-qualified state key.
+
+    Worker writes are keyed ``task[@generation]`` so stale generations can
+    coexist safely during recovery.  Execution plans and statuses remain keyed
+    by task.  Artifact Gate used to join those maps by raw key and therefore
+    called a completed, valid packet "missing" on every pass, creating an
+    artifact → intent → candidate → dispatcher loop.
+    """
+
+    if state.planning_generation is None:
+        return None
+    return _latest_packets(
+        state.research_packets or {},
+        generation_id=state.planning_generation.generation_id,
+    ).get(strip_round_suffix(agent_key))
+
+
 def _attribution(
     state: TravelAgentState,
     *,
@@ -74,7 +96,9 @@ def _attribution(
     gap_id: str,
     deterministic: bool = False,
 ) -> Dict[str, GateFailureAttribution]:
-    draft_id = state.minimum_delivery_draft.draft_id if state.minimum_delivery_draft else None
+    draft_id = (
+        state.minimum_delivery_draft.draft_id if state.minimum_delivery_draft else None
+    )
     material = "|".join(
         [
             draft_id or "",
@@ -84,7 +108,9 @@ def _attribution(
             gap_id,
         ]
     )
-    attribution_id = f"gate_failure_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
+    attribution_id = (
+        f"gate_failure_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
+    )
     records = dict(state.gate_failure_attributions or {})
     records[attribution_id] = GateFailureAttribution(
         attribution_id=attribution_id,
@@ -175,7 +201,7 @@ async def artifact_gate_node(state: TravelAgentState) -> Dict[str, Any]:
         status = str((state.agent_status or {}).get(agent_key) or "")
 
         if base in _RESEARCH_WORKERS:
-            packet = (state.research_packets or {}).get(agent_key)
+            packet = _current_research_packet(state, agent_key)
             if packet is not None:
                 if packet.worker_kind != base or packet.run_id != state.run_id:
                     return _integrity_result(

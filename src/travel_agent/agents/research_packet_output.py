@@ -40,6 +40,7 @@ from ..entities.provider_evidence import (
 from ..services.candidate_admission import (
     provider_place_type_matches_candidate_kind,
 )
+
 # Explicit re-export for tests/workers that import constraint helpers from this module.
 from ..services.constraint_applicability import (
     active_hard_constraint_ids as active_hard_constraint_ids,
@@ -78,13 +79,13 @@ ResearchWorkerKind = Literal[
 _SCHEMA_REPAIR_TRANSIENT_RETRIES = 1
 
 # Finalization is the only fast-tier call that carries the whole worker
-# transcript (~87 kB) and must emit a complete typed packet, so it gets its own
-# bound instead of the tier's 30-second default — measured worst case was 20.6s
-# for a 3932-token repair.  (The provider does not cap a completion at 8192;
-# ``config.MAX_COMPLETION_TOKENS`` is our own ceiling and the one definition
-# site for it.)
-# Scope clarification, brief generation and fast answer keep the tier default.
-_PACKET_MODEL_CALL_TIMEOUT_SECONDS = 60.0
+# transcript.  Provider-selection normally returns quickly, but real runs with
+# 20+ verified place options have crossed 60 seconds before emitting their small
+# JSON choice.  This is an operation bound, not an output allowance: the compact
+# selection call below still has a task-local 4096-token ceiling, while a full
+# packet repair may use the deployment's larger configured ceiling.
+_PACKET_MODEL_CALL_TIMEOUT_SECONDS = 120.0
+_PROVIDER_SELECTION_MAX_OUTPUT_TOKENS = 4096
 
 
 def _is_transient_model_call_failure(error: BaseException) -> bool:
@@ -116,6 +117,7 @@ async def _bounded_packet_model_call(
         raise ResearchPacketOutputError(
             f"packet model operation exceeded configured timeout ({timeout:g}s)"
         ) from exc
+
 
 _WORKER_CANDIDATE_MODELS: dict[ResearchWorkerKind, tuple[tuple[str, str], ...]] = {
     "destination_researcher": (
@@ -232,6 +234,8 @@ _PLACE_ENTITY_TYPE = {
     "dining": EntityType.DINING_STOP,
     "lodging": EntityType.LODGING_STAY,
 }
+
+
 def _drop_fields_the_model_must_not_author(schema: dict[str, Any]) -> None:
     """Remove server-owned fields from the model output contract."""
 
@@ -268,9 +272,7 @@ def _drop_fields_the_model_must_not_author(schema: dict[str, Any]) -> None:
             definition_properties.pop(field_name, None)
         required = definition.get("required")
         if isinstance(required, list):
-            definition["required"] = [
-                name for name in required if name != field_name
-            ]
+            definition["required"] = [name for name in required if name != field_name]
 
 
 _PROVIDER_SELECTION_SERVER_FIELDS = {
@@ -413,10 +415,7 @@ def authoritative_retry_source_records(
     fact_data_revision: int,
 ) -> tuple[SourceRecord, ...]:
     """Return the admitted prior source closure for one scoped worker retry."""
-    if (
-        catalog is None
-        or catalog.fact_data_revision != fact_data_revision
-    ):
+    if catalog is None or catalog.fact_data_revision != fact_data_revision:
         return ()
     passed_ids = {
         admission.candidate_id
@@ -478,8 +477,7 @@ def _prune_payload_to_candidate_closure(payload: dict[str, Any]) -> None:
         fact
         for fact in facts
         if isinstance(fact, Mapping)
-        and str((fact.get("entity_ref") or {}).get("entity_id") or "")
-        in candidate_ids
+        and str((fact.get("entity_ref") or {}).get("entity_id") or "") in candidate_ids
     ]
     retained_fact_ids = {
         str(fact.get("fact_assertion_id") or "")
@@ -583,9 +581,11 @@ def _retrieved_source_snapshots(
     def walk(value: Any, whole_return: Mapping[str, Any]) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
-                if str(key).casefold() in {"url", "canonical_url", "link"} and isinstance(
-                    item, str
-                ):
+                if str(key).casefold() in {
+                    "url",
+                    "canonical_url",
+                    "link",
+                } and isinstance(item, str):
                     normalized = _normalized_source_url(item)
                     if normalized and normalized not in snapshots:
                         snapshots[normalized] = dict(whole_return)
@@ -764,7 +764,9 @@ def _ground_rag_chunk_sources(
     kept = [
         source
         for source in sources
-        if not (isinstance(source, Mapping) and source.get("source_kind") == "rag_chunk")
+        if not (
+            isinstance(source, Mapping) and source.get("source_kind") == "rag_chunk"
+        )
     ]
 
     cited: set[str] = set()
@@ -959,9 +961,7 @@ def _failed_tool_sources(
             continue
         audit_id = str(envelope.get("audit_id") or "").strip()
         failure_detail = str(
-            envelope.get("degradation_reason")
-            or envelope.get("error")
-            or ""
+            envelope.get("degradation_reason") or envelope.get("error") or ""
         ).strip()
         fallback_from = str(envelope.get("fallback_from") or "").strip()
         if (
@@ -1069,9 +1069,13 @@ def _controlled_worker_return_failure_source(
         or expected_worker not in raw_node_names
     ):
         return None
-    plan_hash = str(controlled_worker_return_failure.get("eval_plan_hash") or "").strip()
+    plan_hash = str(
+        controlled_worker_return_failure.get("eval_plan_hash") or ""
+    ).strip()
     plan_id = str(controlled_worker_return_failure.get("eval_plan_id") or "").strip()
-    fault_kind = str(controlled_worker_return_failure.get("eval_fault_kind") or "").strip()
+    fault_kind = str(
+        controlled_worker_return_failure.get("eval_fault_kind") or ""
+    ).strip()
     error = str(controlled_worker_return_failure.get("error") or "").strip()
     if not plan_hash or not plan_id or not fault_kind or not error:
         return None
@@ -1289,7 +1293,8 @@ def _successful_route_records(
                 not audit_id
                 or not isinstance(route_id, str)
                 or not route_id.strip()
-                or transport_class not in {"long_distance", "public_transit", "flexible"}
+                or transport_class
+                not in {"long_distance", "public_transit", "flexible"}
                 or not isinstance(selected_mode, str)
                 or not isinstance(segments, list)
                 or not segments
@@ -1326,7 +1331,9 @@ def _controlled_destination_ids(base_payload: Mapping[str, Any]) -> list[str]:
         if isinstance(query_context, Mapping)
         else None
     )
-    destinations = identity.get("destinations") if isinstance(identity, Mapping) else None
+    destinations = (
+        identity.get("destinations") if isinstance(identity, Mapping) else None
+    )
     if not isinstance(destinations, list):
         return []
     return list(
@@ -1356,10 +1363,7 @@ def _eligible_route_selection_options(
     # option whenever the day has at least as many routes as legs.
     scopes_by_date: dict[date, list[ProviderEvidenceScope]] = {}
     for scope in required_route_scopes:
-        if (
-            scope.transport_class == "long_distance"
-            and scope.route_leg is not None
-        ):
+        if scope.transport_class == "long_distance" and scope.route_leg is not None:
             scopes_by_date.setdefault(scope.route_leg.service_date, []).append(scope)
     date_route_index: dict[date, int] = {}
     options: list[dict[str, Any]] = []
@@ -1442,8 +1446,7 @@ def has_required_provider_route_selection_options(
     if not expected_scope_ids:
         return bool(options)
     option_scope_ids = {
-        str(option.get("provider_evidence_scope_id") or "")
-        for option in options
+        str(option.get("provider_evidence_scope_id") or "") for option in options
     }
     return expected_scope_ids <= option_scope_ids
 
@@ -1517,6 +1520,12 @@ def _eligible_place_selection_options(
                 in forbidden
             ):
                 continue
+            result = envelope.get("sanitized_result")
+            provider_query = (
+                str(result.get("query") or "").strip()
+                if isinstance(result, Mapping)
+                else ""
+            )
             options[candidate_kind].append(
                 {
                     "candidate_kind": candidate_kind,
@@ -1527,6 +1536,10 @@ def _eligible_place_selection_options(
                         provider_place["provider_country_code"]
                     ),
                     "audit_id": audit_id,
+                    # The query is server-echoed Provider input.  It is retained
+                    # so a model timeout can reuse the LLM-authored Research
+                    # Query Plan instead of choosing an arbitrary place id.
+                    "provider_query": provider_query,
                 }
             )
             seen.add(key)
@@ -1611,7 +1624,9 @@ def observed_place_nominations(
                 identities.append(
                     ProviderIdentity(
                         place_id=place_id,
-                        name=name if isinstance(name, str) and name.strip() else place_id,
+                        name=name
+                        if isinstance(name, str) and name.strip()
+                        else place_id,
                     )
                 )
         lookups.append(PlaceLookup(query=query, identities=tuple(identities)))
@@ -1704,7 +1719,9 @@ def has_required_provider_place_selection(
 ) -> bool:
     """Return whether every requested place domain already has a Provider option."""
     options = _eligible_place_selection_options(context_messages, expected_worker)
-    return all(options.get(candidate_kind) for candidate_kind in required_candidate_kinds)
+    return all(
+        options.get(candidate_kind) for candidate_kind in required_candidate_kinds
+    )
 
 
 def provider_evidence_outcomes(
@@ -1717,8 +1734,7 @@ def provider_evidence_outcomes(
     """Project one worker attempt into independently resolvable scope outcomes."""
 
     if any(
-        assignment.scope.worker_kind != expected_worker
-        for assignment in assignments
+        assignment.scope.worker_kind != expected_worker for assignment in assignments
     ):
         raise ValueError("Provider evidence assignment belongs to another worker")
     place_options = (
@@ -1741,10 +1757,7 @@ def provider_evidence_outcomes(
         else []
     )
     source_by_id = (
-        {
-            source.source_record_id: source
-            for source in packet.source_records
-        }
+        {source.source_record_id: source for source in packet.source_records}
         if packet is not None
         else {}
     )
@@ -1924,10 +1937,16 @@ def _provider_selection_base_payload(
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("worker_kind") != expected_worker or payload.get("run_id") != expected_run_id:
+    if (
+        payload.get("worker_kind") != expected_worker
+        or payload.get("run_id") != expected_run_id
+    ):
         return None
     for field_name in ("research_packet_id", "task_id"):
-        if not isinstance(payload.get(field_name), str) or not payload[field_name].strip():
+        if (
+            not isinstance(payload.get(field_name), str)
+            or not payload[field_name].strip()
+        ):
             return None
     for field_name in ("constraint_pack_revision", "fact_data_revision"):
         value = payload.get(field_name)
@@ -1999,7 +2018,8 @@ def _provider_snapshot_source_fields(
     metadata = envelope.get("metadata")
     cache_metadata = (
         metadata.get("snapshot_cache")
-        if isinstance(metadata, Mapping) and isinstance(metadata.get("snapshot_cache"), Mapping)
+        if isinstance(metadata, Mapping)
+        and isinstance(metadata.get("snapshot_cache"), Mapping)
         else None
     )
     if not isinstance(result, dict) or not isinstance(cache_metadata, Mapping):
@@ -2009,7 +2029,11 @@ def _provider_snapshot_source_fields(
     origin = str(cache_metadata.get("origin") or "")
     provider_name = str(result.get("provider") or "").strip()
     tool_name = str(envelope.get("tool_name") or "").strip()
-    if origin not in {"live", "provider_snapshot_cache"} or not provider_name or not tool_name:
+    if (
+        origin not in {"live", "provider_snapshot_cache"}
+        or not provider_name
+        or not tool_name
+    ):
         observed = _source_retrieved_at(envelope, fallback_observed_at)
         return dict(envelope), None, observed, observed, None
     observed_at = _source_datetime(
@@ -2034,7 +2058,9 @@ def _provider_snapshot_source_fields(
             provider_valid_until=provider_valid_until,
             cache_valid_until=cache_valid_until,
             provider_contract_version=str(cache_metadata.get("contract_version") or ""),
-            payload_schema_version=str(cache_metadata.get("payload_schema_version") or ""),
+            payload_schema_version=str(
+                cache_metadata.get("payload_schema_version") or ""
+            ),
         )
     except (TypeError, ValueError):
         observed = _source_retrieved_at(envelope, fallback_observed_at)
@@ -2391,7 +2417,9 @@ def _bind_successful_place_identity(
                 entity_id=candidate_id,
             )
             coordinate_source_prefix = (
-                "results" if cache_provenance is not None else "sanitized_result.results"
+                "results"
+                if cache_provenance is not None
+                else "sanitized_result.results"
             )
             for coordinate_field, coordinate_value in (
                 ("latitude", coordinate_pair[0]),
@@ -2694,15 +2722,52 @@ def _bind_authoritative_packet_metadata(
             candidate["research_packet_id"] = packet_id
 
 
+def _normalized_semantic_key(value: Any) -> str:
+    """Normalize an already-structured semantic label for exact fallback joins."""
+
+    return re.sub(r"[^\w]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def _query_row_matches_provider_identity(
+    row: Mapping[str, Any],
+    *,
+    provider_query: str,
+    candidate_name: str,
+) -> bool:
+    """Join Provider identity to an LLM-authored query without new NLP rules.
+
+    The Query Plan already contains the model's canonical aliases and query
+    text.  This function only performs normalized equality/containment over
+    those structured fields and the Provider's echoed query/name.  It is used
+    for provenance and as the last-resort selector after the semantic model
+    call is unavailable; it never parses the user's prose.
+    """
+
+    provider_key = _normalized_semantic_key(provider_query)
+    name_key = _normalized_semantic_key(candidate_name)
+    query_key = _normalized_semantic_key(row.get("query_text"))
+    if provider_key and query_key and provider_key == query_key:
+        return True
+    aliases = [
+        _normalized_semantic_key(alias)
+        for alias in row.get("aliases") or []
+        if _normalized_semantic_key(alias)
+    ]
+    return any(
+        alias == name_key
+        or (provider_key and alias in provider_key)
+        or (name_key and alias in name_key)
+        for alias in aliases
+    )
+
+
 def _bind_candidate_discovery_lineage(payload: dict[str, Any]) -> None:
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         return
     query_context = payload.get("query_context")
     query_rows = (
-        query_context.get("query_lineage")
-        if isinstance(query_context, Mapping)
-        else []
+        query_context.get("query_lineage") if isinstance(query_context, Mapping) else []
     )
     query_rows = [row for row in (query_rows or []) if isinstance(row, Mapping)]
     executed_ids = {
@@ -2746,15 +2811,53 @@ def _bind_candidate_discovery_lineage(payload: dict[str, Any]) -> None:
                 else "local_transport"
             }
         )
-        relevant = [
+        domain_rows = [
             row
             for row in query_rows
             if str(row.get("query_id") or "") in executed_ids
             and str(row.get("domain") or "") in domain_values
         ]
-        query_ids = list(
-            dict.fromkeys(str(row["query_id"]) for row in relevant)
+        provider_queries: list[str] = []
+        for source_id in candidate.get("source_record_ids") or []:
+            source = source_by_id.get(str(source_id))
+            snapshot = source.get("snapshot") if isinstance(source, Mapping) else None
+            query = snapshot.get("query") if isinstance(snapshot, Mapping) else None
+            if isinstance(query, str) and query.strip():
+                provider_queries.append(query.strip())
+        candidate_name = str(
+            candidate.get("name")
+            or candidate.get("property_name")
+            or candidate.get("route_id")
+            or ""
         )
+        traced_rows = [
+            row
+            for row in domain_rows
+            if any(
+                _query_row_matches_provider_identity(
+                    row,
+                    provider_query=provider_query,
+                    candidate_name=candidate_name,
+                )
+                for provider_query in provider_queries
+            )
+        ]
+        # Older or non-place providers may not echo a query in their snapshot.
+        # Preserve their prior domain-level lineage rather than inventing an
+        # association.  For place providers, an exact trace is authoritative:
+        # a generic museum result must not inherit every hard place intent.  A
+        # model-nominated place that does not exactly join an intent alias keeps
+        # only structural/fallback lineage, never a fabricated hard-intent join.
+        if provider_queries and candidate_kind in {"visit", "dining"}:
+            relevant = traced_rows or [
+                row
+                for row in domain_rows
+                if str(row.get("query_kind") or "")
+                not in {"intent_primary", "targeted_repair"}
+            ]
+        else:
+            relevant = domain_rows
+        query_ids = list(dict.fromkeys(str(row["query_id"]) for row in relevant))
         intent_ids = list(
             dict.fromkeys(
                 str(intent_id)
@@ -3084,8 +3187,7 @@ def _provider_selection_response_schema(
         }
         properties["place_id"] = {
             "enum": [
-                option["place_id"]
-                for option in eligible_place_options[candidate_kind]
+                option["place_id"] for option in eligible_place_options[candidate_kind]
             ],
             "title": "Place Id",
             "type": "string",
@@ -3098,9 +3200,7 @@ def _provider_selection_response_schema(
         if "candidate_kind" not in candidate_schema["required"]:
             candidate_schema["required"].append("candidate_kind")
     candidate_items = {
-        "oneOf": [
-            {"$ref": f"#/$defs/{model_name}"} for _, model_name in allowed
-        ],
+        "oneOf": [{"$ref": f"#/$defs/{model_name}"} for _, model_name in allowed],
         "discriminator": {
             "mapping": {
                 candidate_kind: f"#/$defs/{model_name}"
@@ -3137,16 +3237,35 @@ def _default_provider_place_selections(
     *,
     base_payload: Mapping[str, Any],
     scoped_options: Mapping[str, Sequence[Mapping[str, str]]],
+    selection_limit: int | None = None,
 ) -> dict[str, Any]:
-    """Formal deterministic selector when the bounded planning call is unavailable."""
+    """Safe selector when the bounded semantic planning call is unavailable.
+
+    Semantic authority remains with the LLM: this path reads only its typed
+    Query Plan aliases/query kinds.  It first preserves options that can be
+    joined to intent-scoped queries, then fills remaining capacity in Provider
+    result order.  No user-prose grammar or destination-specific vocabulary is
+    interpreted here.
+    """
 
     destinations = _controlled_destination_ids(base_payload)
     if not destinations:
-        raise ResearchPacketOutputError("provider default selection requires a controlled destination")
+        raise ResearchPacketOutputError(
+            "provider default selection requires a controlled destination"
+        )
     destination_id = destinations[0]
     query_context = base_payload.get("query_context")
     query_context = query_context if isinstance(query_context, Mapping) else {}
     selections: list[dict[str, Any]] = []
+    query_rows = query_context.get("query_lineage")
+    query_rows = [
+        row
+        for row in (query_rows or [])
+        if isinstance(row, Mapping)
+        and str(row.get("query_kind") or "") in {"intent_primary", "targeted_repair"}
+        and row.get("intent_ids")
+    ]
+    ceiling = max(int(selection_limit or 0), 1)
     weather = {
         "exposure": "mixed",
         "rain_sensitivity": "low",
@@ -3156,79 +3275,119 @@ def _default_provider_place_selections(
         "requires_clear_visibility": False,
     }
     for candidate_kind, options in scoped_options.items():
-        if not options:
+        remaining = ceiling - len(selections)
+        if not options or remaining <= 0:
             continue
-        option = min(options, key=lambda item: str(item.get("place_id") or ""))
-        common = {
-            "candidate_kind": candidate_kind,
-            "place_id": option["place_id"],
-            "destination_id": destination_id,
-            "weather_sensitivity": weather,
-            "selection_reasons": ["Provider 实体身份闭包完整", "位于当前受控目的地范围"],
-            "tradeoff": "动态营业、库存与价格信息仍需临行确认",
-        }
-        if candidate_kind == "visit":
-            common.update({
-                "visit_type": "attraction",
-                "recommended_duration_minutes": 90,
-                "highlights": [str(option.get("name") or "实体景点")],
-            })
-        elif candidate_kind == "dining":
-            common.update({
-                "meal_types": ["lunch", "dinner"],
-                "cuisine_types": ["local"],
-                "recommended_dishes": ["按当日菜单与过敏要求现场选择"],
-                "opening_window": "营业时间待确认",
-                "availability_status": "needs_confirmation",
-            })
-        elif candidate_kind == "lodging":
-            # The stay interval comes from the controlled identity, which every
-            # worker's ``query_context`` already carries.  It used to be read from
-            # ``query_context["check_in_date"]``/``["check_out_date"]`` -- two keys
-            # **no code in this repository has ever written**, so this branch could
-            # only ever raise.  That mattered far more than "a fallback lost its
-            # fallback": whenever ``discover_deterministic_hotels`` succeeded it
-            # deliberately hands off here with an empty model response, so five real
-            # provider-bound hotels were thrown away and the trip shipped with no
-            # lodging at all -- and the resulting
-            # permanently-exhausted lodging gap then kept ``candidate_gate``'s
-            # ``blocked_workers`` non-empty, which starves local-transport connector
-            # research for the rest of the run, so every city hop also shipped an
-            # invented duration.  One unwritten key, two visibly broken domains.
-            #
-            # Whole-trip bounds are the right thing to send from here: which nights
-            # belong to which city is decided later, once the Day scaffold exists,
-            # by ``itinerary_composition_v2::_destination_stay_window`` -- that is
-            # the single owner of the per-destination clamp, and duplicating its
-            # arithmetic here would be a second answer to the same question.
-            identity = query_context.get("controlled_trip_identity")
-            identity = identity if isinstance(identity, Mapping) else {}
-            check_in = str(
-                query_context.get("check_in_date") or identity.get("start_date") or ""
-            )[:10]
-            check_out = str(
-                query_context.get("check_out_date") or identity.get("end_date") or ""
-            )[:10]
-            try:
-                nights = (
-                    datetime.fromisoformat(check_out).date()
-                    - datetime.fromisoformat(check_in).date()
-                ).days
-            except ValueError:
-                nights = 0
-            if not check_in or not check_out or nights < 1:
-                raise ResearchPacketOutputError(
-                    "provider default lodging selection requires an exact stay interval"
+        selected_options: list[Mapping[str, str]] = []
+        for row in query_rows:
+            domain = str(row.get("domain") or "")
+            if domain != candidate_kind:
+                continue
+            match = next(
+                (
+                    option
+                    for option in options
+                    if option not in selected_options
+                    and _query_row_matches_provider_identity(
+                        row,
+                        provider_query=str(option.get("provider_query") or ""),
+                        candidate_name=str(option.get("name") or ""),
+                    )
+                ),
+                None,
+            )
+            if match is not None:
+                selected_options.append(match)
+            if len(selected_options) >= remaining:
+                break
+        for option in options:
+            if len(selected_options) >= remaining:
+                break
+            if option not in selected_options:
+                selected_options.append(option)
+        for option in selected_options:
+            semantic_joined = any(
+                _query_row_matches_provider_identity(
+                    row,
+                    provider_query=str(option.get("provider_query") or ""),
+                    candidate_name=str(option.get("name") or ""),
                 )
-            common.update({
-                "check_in_date": check_in,
-                "check_out_date": check_out,
-                "nights": nights,
-                "availability_status": "needs_confirmation",
-            })
-        selections.append(common)
+                for row in query_rows
+                if str(row.get("domain") or "") == candidate_kind
+            )
+            common = {
+                "candidate_kind": candidate_kind,
+                "place_id": option["place_id"],
+                "destination_id": destination_id,
+                "weather_sensitivity": weather,
+                "selection_reasons": [
+                    (
+                        "命中 LLM 结构化意图查询并完成 Provider 实体闭包"
+                        if semantic_joined
+                        else "Provider 实体身份闭包完整"
+                    ),
+                    "位于当前受控目的地范围",
+                ],
+                "tradeoff": "动态营业、库存与价格信息仍需临行确认",
+            }
+            if candidate_kind == "visit":
+                common.update(
+                    {
+                        "visit_type": "attraction",
+                        "recommended_duration_minutes": 90,
+                        "highlights": [str(option.get("name") or "实体景点")],
+                    }
+                )
+            elif candidate_kind == "dining":
+                common.update(
+                    {
+                        "meal_types": ["lunch", "dinner"],
+                        "cuisine_types": ["local"],
+                        "recommended_dishes": ["按当日菜单与过敏要求现场选择"],
+                        "opening_window": "营业时间待确认",
+                        "availability_status": "needs_confirmation",
+                    }
+                )
+            elif candidate_kind == "lodging":
+                # The stay interval comes from the controlled identity, which every
+                # worker's ``query_context`` already carries.  Whole-trip bounds are
+                # later clamped per destination by the composition owner.
+                identity = query_context.get("controlled_trip_identity")
+                identity = identity if isinstance(identity, Mapping) else {}
+                check_in = str(
+                    query_context.get("check_in_date")
+                    or identity.get("start_date")
+                    or ""
+                )[:10]
+                check_out = str(
+                    query_context.get("check_out_date")
+                    or identity.get("end_date")
+                    or ""
+                )[:10]
+                try:
+                    nights = (
+                        datetime.fromisoformat(check_out).date()
+                        - datetime.fromisoformat(check_in).date()
+                    ).days
+                except ValueError:
+                    nights = 0
+                if not check_in or not check_out or nights < 1:
+                    raise ResearchPacketOutputError(
+                        "provider default lodging selection requires an exact stay interval"
+                    )
+                common.update(
+                    {
+                        "check_in_date": check_in,
+                        "check_out_date": check_out,
+                        "nights": nights,
+                        "availability_status": "needs_confirmation",
+                    }
+                )
+            selections.append(common)
     if not selections:
-        raise ResearchPacketOutputError("provider default selection has no eligible option")
+        raise ResearchPacketOutputError(
+            "provider default selection has no eligible option"
+        )
     return {"selections": selections}
 
 
@@ -3330,6 +3489,7 @@ async def _repair_from_provider_selection(
                     },
                 },
                 temperature=0,
+                max_output_tokens=_PROVIDER_SELECTION_MAX_OUTPUT_TOKENS,
             )
             selection_payload = json.loads(selected_raw)
         except (
@@ -3354,6 +3514,7 @@ async def _repair_from_provider_selection(
             selection_payload = _default_provider_place_selections(
                 base_payload=base_payload,
                 scoped_options=scoped_options,
+                selection_limit=selection_ceiling,
             )
         selections = (
             selection_payload.get("selections")
@@ -3365,9 +3526,7 @@ async def _repair_from_provider_selection(
                 "provider place selection requires at least one explicit choice"
             )
         allowed_properties = {
-            candidate_kind: set(
-                selection_schema["$defs"][model_name]["properties"]
-            )
+            candidate_kind: set(selection_schema["$defs"][model_name]["properties"])
             for candidate_kind, model_name in _WORKER_CANDIDATE_MODELS[expected_worker]
             if scoped_options.get(candidate_kind)
         }
@@ -3475,7 +3634,9 @@ def _provider_route_selection_response_schema(
                     "additionalProperties": False,
                     "properties": {
                         "route_id": {
-                            "enum": [option["route_id"] for option in eligible_route_options],
+                            "enum": [
+                                option["route_id"] for option in eligible_route_options
+                            ],
                             "type": "string",
                         },
                         "destination_id": {
@@ -3529,7 +3690,9 @@ def _default_provider_route_selection(
     destination_ids: Sequence[str],
 ) -> dict[str, Any]:
     if not eligible_route_options or not destination_ids:
-        raise ResearchPacketOutputError("provider default route selection requires options and destination")
+        raise ResearchPacketOutputError(
+            "provider default route selection requires options and destination"
+        )
     options_by_scope: dict[str, list[Mapping[str, Any]]] = {}
     for option in eligible_route_options:
         scope_key = str(option.get("provider_evidence_scope_id") or "unscoped")
@@ -3546,21 +3709,28 @@ def _default_provider_route_selection(
         transport_class = str(option["transport_class"])
         selected_mode = str(option["selected_mode"])
         exposed = transport_class == "flexible" and selected_mode in {"walk", "bike"}
-        selections.append({
-            "route_id": option["route_id"],
-            "destination_id": destination_ids[0],
-            "selection_reasons": ["Provider 路线闭包完整", "按总时长与稳定路线标识排序"],
-            "tradeoff": "动态班次、库存或道路状况仍需出发前确认",
-            "booking_status": "recommended" if transport_class == "long_distance" else "not_required",
-            "weather_sensitivity": {
-                "exposure": "outdoor" if exposed else "mixed",
-                "rain_sensitivity": "high" if exposed else "low",
-                "heat_sensitivity": "high" if exposed else "low",
-                "cold_sensitivity": "low",
-                "wind_sensitivity": "high" if exposed else "low",
-                "requires_clear_visibility": False,
-            },
-        })
+        selections.append(
+            {
+                "route_id": option["route_id"],
+                "destination_id": destination_ids[0],
+                "selection_reasons": [
+                    "Provider 路线闭包完整",
+                    "按总时长与稳定路线标识排序",
+                ],
+                "tradeoff": "动态班次、库存或道路状况仍需出发前确认",
+                "booking_status": "recommended"
+                if transport_class == "long_distance"
+                else "not_required",
+                "weather_sensitivity": {
+                    "exposure": "outdoor" if exposed else "mixed",
+                    "rain_sensitivity": "high" if exposed else "low",
+                    "heat_sensitivity": "high" if exposed else "low",
+                    "cold_sensitivity": "low",
+                    "wind_sensitivity": "high" if exposed else "low",
+                    "requires_clear_visibility": False,
+                },
+            }
+        )
     return {"selections": selections}
 
 
@@ -3611,15 +3781,23 @@ def _provider_route_constraint_evaluation(
 ) -> dict[str, Any]:
     """Evaluate canonical route constraints from server-bound Provider facts."""
 
-    params = constraint.get("params") if isinstance(constraint.get("params"), Mapping) else {}
+    params = (
+        constraint.get("params")
+        if isinstance(constraint.get("params"), Mapping)
+        else {}
+    )
     checks: list[bool | None] = []
     evidence_fields: list[str] = []
     try:
-        departure = datetime.fromisoformat(str(route.get("departure_at") or "").replace("Z", "+00:00"))
+        departure = datetime.fromisoformat(
+            str(route.get("departure_at") or "").replace("Z", "+00:00")
+        )
     except ValueError:
         departure = None
     try:
-        arrival = datetime.fromisoformat(str(route.get("arrival_at") or "").replace("Z", "+00:00"))
+        arrival = datetime.fromisoformat(
+            str(route.get("arrival_at") or "").replace("Z", "+00:00")
+        )
     except ValueError:
         arrival = None
 
@@ -3638,7 +3816,9 @@ def _provider_route_constraint_evaluation(
         evidence_fields.append("departure_at")
     latest = str(params.get("latest_arrival_local") or "")
     if latest:
-        checks.append(arrival.strftime("%H:%M") <= latest if arrival is not None else None)
+        checks.append(
+            arrival.strftime("%H:%M") <= latest if arrival is not None else None
+        )
         evidence_fields.append("arrival_at")
     unsupported_avoid = [
         item
@@ -3699,9 +3879,10 @@ async def _repair_from_provider_route_selection(
         option = eligible_route_options[0]
         transport_class = str(option["transport_class"])
         selected_mode = str(option["selected_mode"])
-        is_exposed_flexible = (
-            transport_class == "flexible" and selected_mode in {"walk", "bike"}
-        )
+        is_exposed_flexible = transport_class == "flexible" and selected_mode in {
+            "walk",
+            "bike",
+        }
         selection_payload = {
             "selections": [
                 {
@@ -3936,11 +4117,9 @@ async def _repair_from_provider_route_selection(
                             source_record_id=source_id,
                             relation="supports",
                             source_locator=(
-                                (
-                                    f"routes[{route_index}].{field_path}"
-                                    if cache_provenance is not None
-                                    else f"sanitized_result.routes[{route_index}].{field_path}"
-                                )
+                                f"routes[{route_index}].{field_path}"
+                                if cache_provenance is not None
+                                else f"sanitized_result.routes[{route_index}].{field_path}"
                             ),
                         )
                     ],
@@ -4128,7 +4307,9 @@ def parse_research_packet_output(
         if not isinstance(payload, dict):
             raise ResearchPacketOutputError("worker output must be one JSON object")
     except (TypeError, json.JSONDecodeError) as exc:
-        raise ResearchPacketOutputError("worker output is not an exact JSON object") from exc
+        raise ResearchPacketOutputError(
+            "worker output is not an exact JSON object"
+        ) from exc
     if not isinstance(payload, dict):
         raise ResearchPacketOutputError("worker output must be one JSON object")
     _bind_authoritative_packet_metadata(payload, authoritative_packet_metadata)
@@ -4170,9 +4351,7 @@ def parse_research_packet_output(
         payload, evidence_messages, expected_worker=expected_worker
     )
     rag_sources = dict(injected_rag_sources or {})
-    _ground_rag_chunk_sources(
-        payload, rag_sources, expected_worker=expected_worker
-    )
+    _ground_rag_chunk_sources(payload, rag_sources, expected_worker=expected_worker)
     authoritative_sources.update(rag_sources)
     # After identity binding, which rewrites a returned place's identity facts
     # onto its own compiled source: judging before that would drop links the
@@ -4255,9 +4434,13 @@ def parse_research_packet_output(
                 f"worker Research Packet failed schema gate: {exc}"
             ) from exc
     if packet.worker_kind != expected_worker:
-        raise ResearchPacketOutputError("worker Research Packet domain does not match the node")
+        raise ResearchPacketOutputError(
+            "worker Research Packet domain does not match the node"
+        )
     if packet.run_id != expected_run_id:
-        raise ResearchPacketOutputError("worker Research Packet run id does not match active run")
+        raise ResearchPacketOutputError(
+            "worker Research Packet run id does not match active run"
+        )
     if required_candidate_kinds:
         allowed_kinds = {
             candidate_kind
@@ -4281,10 +4464,7 @@ def parse_research_packet_output(
         expected_worker,
         excluded_candidate_ids=excluded_candidate_ids,
     )
-    if (
-        not packet.candidates
-        and _has_eligible_place_selection(eligible_place_options)
-    ):
+    if not packet.candidates and _has_eligible_place_selection(eligible_place_options):
         raise ResearchPacketOutputError(
             "worker returned zero candidates despite eligible Provider place records"
         )
@@ -4314,9 +4494,7 @@ def parse_research_packet_output(
         raise ResearchPacketOutputError(
             "transport Research Packet does not match the scoped transport classes"
         )
-    allowed_route_scope_ids = {
-        scope.scope_id for scope in required_route_scopes
-    }
+    allowed_route_scope_ids = {scope.scope_id for scope in required_route_scopes}
     if required_route_scopes and any(
         candidate.candidate_kind == "transport"
         and candidate.transport_class == "long_distance"
@@ -4326,8 +4504,12 @@ def parse_research_packet_output(
         raise ResearchPacketOutputError(
             "long-distance candidate does not match an assigned exact route leg"
         )
-    if require_current_candidate and packet.candidates and not any(
-        candidate.freshness_status == "current" for candidate in packet.candidates
+    if (
+        require_current_candidate
+        and packet.candidates
+        and not any(
+            candidate.freshness_status == "current" for candidate in packet.candidates
+        )
     ):
         raise ResearchPacketOutputError(
             "scoped Research Packet did not produce a current candidate"
@@ -4769,7 +4951,10 @@ def format_research_packet_context(packets: Mapping[str, ResearchPacket]) -> str
     if not packets:
         return "[]"
     return json.dumps(
-        [packet.model_dump(mode="json", exclude_none=True) for packet in packets.values()],
+        [
+            packet.model_dump(mode="json", exclude_none=True)
+            for packet in packets.values()
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     )

@@ -86,8 +86,15 @@ from travel_agent.services.delivery_projection import _reportable_selection_opti
 from travel_agent.agents.destination_researcher import node as destination_node
 from travel_agent.agents.research_packet_output import (
     _bind_candidate_discovery_lineage,
+    _default_provider_place_selections,
 )
 from travel_agent.agents.orchestrator.candidate_gate import _apply_candidate_caps
+from travel_agent.agents.orchestrator.intent_fidelity_gate import (
+    _candidate_retry_available,
+)
+from travel_agent.entities.delivery_bundle import CandidateResearchGap
+from travel_agent.entities.intent_coverage import IntentFidelityGap
+from travel_agent.entities.state import TravelAgentState
 
 
 def _identity() -> ControlledTripIdentity:
@@ -514,10 +521,7 @@ def test_long_distance_alternatives_must_share_the_exact_route_scope():
 
     alternatives = _transport_alternatives(
         leg,
-        {
-            item.candidate_id: item
-            for item in (selected, same_direction, reverse)
-        },
+        {item.candidate_id: item for item in (selected, same_direction, reverse)},
     )
 
     assert {item.candidate_id for item in alternatives} == {
@@ -687,7 +691,9 @@ def test_provider_duration_compacts_existing_slack_before_closing(monkeypatch):
         museum.candidate_id: museum,
         route.candidate_id: route,
     }
-    monkeypatch.setattr(composition_module, "_passed_candidates", lambda _catalog: passed)
+    monkeypatch.setattr(
+        composition_module, "_passed_candidates", lambda _catalog: passed
+    )
     skeleton = ItineraryCompositionDraft(
         itinerary_id="itinerary_provider_alignment",
         title="Provider alignment fixture",
@@ -755,7 +761,12 @@ def test_json_object_composition_schema_keeps_semantics_without_null_branches():
     assert {"placement_kind", "duration_minutes"} <= prompt_required
     assert "candidate_id" not in prompt_required
     assert "authored_place" not in prompt_required
-    assert {"candidate_id", "authored_place", "planned_start", "planned_end"} <= strict_required
+    assert {
+        "candidate_id",
+        "authored_place",
+        "planned_start",
+        "planned_end",
+    } <= strict_required
 
 
 def test_theme_changes_query_plan_and_museum_exclusion_blocks_fallback():
@@ -969,12 +980,8 @@ def test_each_required_place_is_promoted_to_required_primary():
         if entry.role is CandidateSelectionRole.REQUIRED_PRIMARY
     }
     assert set(required) == {"candidate_west_lake", "candidate_guozhuang"}
-    assert required["candidate_west_lake"].covered_intent_ids == [
-        west_lake.intent_id
-    ]
-    assert required["candidate_guozhuang"].covered_intent_ids == [
-        guozhuang.intent_id
-    ]
+    assert required["candidate_west_lake"].covered_intent_ids == [west_lake.intent_id]
+    assert required["candidate_guozhuang"].covered_intent_ids == [guozhuang.intent_id]
     assert selection.uncovered_intent_ids == []
 
 
@@ -1337,6 +1344,75 @@ async def test_semantic_evaluator_cannot_claim_a_match_without_evidence():
 
 
 @pytest.mark.asyncio
+async def test_exact_miss_defers_to_compact_structured_semantic_evaluation():
+    exact_intent = _intent(
+        "intent_local_name",
+        "西湖",
+        kind=IntentKind.MUST_INCLUDE,
+        strength=IntentStrength.HARD,
+        verification=VerificationMode.DETERMINISTIC,
+    )
+    theme_intent = _intent("intent_theme", "waterside landscape")
+    spec = _spec(exact_intent, theme_intent)
+    packet = _packet(
+        "candidate_west_lake",
+        "West Lake Scenic Area",
+        origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+        query_id="query_west_lake",
+        intent_id=exact_intent.intent_id,
+    )
+
+    class FakeModel:
+        kwargs = None
+        payload = None
+
+        async def ainvoke(self, messages, **kwargs):
+            self.kwargs = kwargs
+            self.payload = json.loads(messages[-1]["content"])
+            return json.dumps(
+                {
+                    "matches": [
+                        {
+                            "candidate_id": "candidate_west_lake",
+                            "intent_id": intent.intent_id,
+                            "status": "matched",
+                            "score": 1,
+                            "supporting_fact_assertion_ids": [
+                                "fact_candidate_west_lake"
+                            ],
+                            "supporting_source_record_ids": [
+                                "source_candidate_west_lake"
+                            ],
+                            "reason_code": "semantic_name_equivalence",
+                            "public_reason": "Provider 名称与结构化意图语义一致",
+                        }
+                        for intent in (exact_intent, theme_intent)
+                    ]
+                }
+            )
+
+    model = FakeModel()
+    matches, _cache = await evaluate_candidate_intents(
+        catalog=_catalog(packet),
+        intent_spec=spec,
+        llm=model,
+    )
+
+    assert {
+        match.intent_id
+        for match in matches
+        if match.status is IntentMatchStatus.MATCHED
+    } == {
+        exact_intent.intent_id,
+        theme_intent.intent_id,
+    }
+    assert len(model.payload["candidates"]) == 1
+    assert len(model.payload["intents"]) == 2
+    assert len(model.payload["evaluations"]) == 2
+    assert model.kwargs["max_output_tokens"] == 16384
+
+
+@pytest.mark.asyncio
 async def test_semantic_exclusion_becomes_a_hard_ranking_violation():
     intent = _intent(
         "intent_no_museum",
@@ -1488,6 +1564,146 @@ def test_packet_compiler_owns_and_merges_candidate_discovery_lineage():
             "discovered_at_rounds": [2],
         }
     ]
+
+
+def test_packet_lineage_does_not_attach_hard_intent_to_generic_provider_query():
+    packet = _packet(
+        "candidate_museum",
+        "City Museum",
+        origin=CandidateDiscoveryOrigin.GENERIC_FALLBACK,
+        query_id="model_query",
+        intent_id="model_intent",
+    )
+    payload = packet.model_dump(mode="python")
+    payload["executed_query_ids"] = ["query_required", "query_generic"]
+    payload["query_context"] = {
+        "research_round": 0,
+        "query_lineage": [
+            {
+                "query_id": "query_required",
+                "domain": "visit",
+                "query_kind": "intent_primary",
+                "query_text": "City Required Garden places",
+                "aliases": ["Required Garden"],
+                "intent_ids": ["intent_required"],
+            },
+            {
+                "query_id": "query_generic",
+                "domain": "visit",
+                "query_kind": "generic_fallback",
+                "query_text": "museum in City",
+                "aliases": [],
+                "intent_ids": [],
+            },
+        ],
+    }
+    payload["source_records"][0]["snapshot"]["query"] = "museum in City"
+
+    _bind_candidate_discovery_lineage(payload)
+
+    record = payload["candidate_discovery_records"][0]
+    assert record["query_ids"] == ["query_generic"]
+    assert record["intent_ids"] == []
+    assert record["origins"] == ["generic_fallback"]
+
+
+def test_provider_fallback_prioritizes_llm_structured_intent_aliases():
+    base_payload = {
+        "query_context": {
+            "controlled_trip_identity": {
+                "destinations": [{"place_id": "destination_city"}],
+            },
+            "query_lineage": [
+                {
+                    "query_id": "query_one",
+                    "domain": "visit",
+                    "query_kind": "intent_primary",
+                    "query_text": "City Required Garden places",
+                    "aliases": ["Required Garden"],
+                    "intent_ids": ["intent_one"],
+                },
+                {
+                    "query_id": "query_two",
+                    "domain": "visit",
+                    "query_kind": "intent_primary",
+                    "query_text": "City Historic House places",
+                    "aliases": ["Historic House"],
+                    "intent_ids": ["intent_two"],
+                },
+            ],
+        }
+    }
+    options = {
+        "visit": [
+            {
+                "candidate_kind": "visit",
+                "place_id": "place_generic",
+                "name": "Generic Museum",
+                "provider_query": "museum in City",
+            },
+            {
+                "candidate_kind": "visit",
+                "place_id": "place_garden",
+                "name": "Required Garden Scenic Area",
+                "provider_query": "Required Garden",
+            },
+            {
+                "candidate_kind": "visit",
+                "place_id": "place_house",
+                "name": "Historic House",
+                "provider_query": "Historic House City",
+            },
+        ]
+    }
+
+    selected = _default_provider_place_selections(
+        base_payload=base_payload,
+        scoped_options=options,
+        selection_limit=3,
+    )["selections"]
+
+    assert [row["place_id"] for row in selected] == [
+        "place_garden",
+        "place_house",
+        "place_generic",
+    ]
+    assert selected[0]["selection_reasons"][0].startswith("命中 LLM 结构化意图查询")
+
+
+def test_intent_fidelity_does_not_reopen_exhausted_candidate_domain():
+    intent = _intent(
+        "intent_required",
+        "Required Garden",
+        kind=IntentKind.MUST_INCLUDE,
+        strength=IntentStrength.HARD,
+        verification=VerificationMode.DETERMINISTIC,
+    )
+    gap = IntentFidelityGap(
+        gap_id="intent_gap_required",
+        intent_id=intent.intent_id,
+        reason="required_candidate_missing",
+        blocking=True,
+        retry_target="candidate_gate",
+    )
+    candidate_gap = CandidateResearchGap(
+        gap_id="candidate_gap_required",
+        worker_kind="destination_researcher",
+        generation_id="generation_test",
+        reason="insufficient_intent_evidence",
+        intent_id=intent.intent_id,
+        research_domain=ResearchDomain.VISIT,
+        status="exhausted",
+    )
+    state = TravelAgentState(
+        intent_spec=_spec(intent),
+        candidate_research_gaps=[candidate_gap],
+    )
+
+    assert _candidate_retry_available(state, [gap]) is False
+    state.candidate_research_gaps = [
+        candidate_gap.model_copy(update={"status": "open"})
+    ]
+    assert _candidate_retry_available(state, [gap]) is True
 
 
 def test_domain_cap_keeps_targeted_and_intent_candidates_before_fallback():

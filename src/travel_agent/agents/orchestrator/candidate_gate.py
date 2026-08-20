@@ -1632,7 +1632,12 @@ def worker_research_satisfied_by_a_later_round(
     earlier key is looking at a spent budget that a *result* closed.
     """
     packets = state.research_packets or {}
-    latest = _latest_packets(packets).get(strip_round_suffix(agent_key))
+    if state.planning_generation is None:
+        return False
+    latest = _latest_packets(
+        packets,
+        generation_id=state.planning_generation.generation_id,
+    ).get(strip_round_suffix(agent_key))
     if latest is None:
         return False
     statuses = state.agent_status or {}
@@ -2503,7 +2508,8 @@ async def candidate_gate_node(
             updated_query_plan, connector_query = append_structural_connector_query(
                 updated_query_plan,
                 destination_id=destination_id,
-                destination_name=destination_names.get(destination_id) or destination_id,
+                destination_name=destination_names.get(destination_id)
+                or destination_id,
                 route_pairs=[
                     (gap.from_place_id, gap.to_place_id) for gap in destination_gaps
                 ],
@@ -2604,11 +2610,7 @@ async def candidate_gate_node(
         "excluded_tools": excluded_tools,
         "failure_signatures": accumulated_signatures,
         "require_current_candidate": True,
-        **(
-            {"research_query_ids": repair_query_ids}
-            if repair_query_ids
-            else {}
-        ),
+        **({"research_query_ids": repair_query_ids} if repair_query_ids else {}),
         **(
             {"excluded_candidate_ids": deterministically_rejected_ids}
             if deterministically_rejected_ids

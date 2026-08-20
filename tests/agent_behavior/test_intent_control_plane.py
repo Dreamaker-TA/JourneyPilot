@@ -5,7 +5,9 @@ import pytest
 from openai import OpenAIError
 
 from travel_agent.agents.orchestrator.candidate_gate import _latest_packets
+from travel_agent.agents.orchestrator.artifact_gate import artifact_gate_node
 from travel_agent.entities.delivery_bundle import ResearchPacket
+from travel_agent.entities.planning_generation import PlanningGeneration
 from travel_agent.entities.intent_spec import (
     AlternativeIntentValue,
     CategoryIntentValue,
@@ -123,9 +125,7 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
     clause = _clause(0, "2名成人")
 
     class _Model:
-        capabilities = SimpleNamespace(
-            supports_json_schema=supports_native_schema
-        )
+        capabilities = SimpleNamespace(supports_json_schema=supports_native_schema)
 
         def __init__(self):
             self.response_format = None
@@ -424,9 +424,7 @@ def test_plan_gate_separates_hard_preferences_and_attention():
     )
 
     recognized = payload["recognized_requirements"]
-    assert [item["requirement_id"] for item in recognized["hard"]] == [
-        hard.intent_id
-    ]
+    assert [item["requirement_id"] for item in recognized["hard"]] == [hard.intent_id]
     assert [item["requirement_id"] for item in recognized["preferences"]] == [
         soft.intent_id
     ]
@@ -893,6 +891,39 @@ def test_latest_packets_rejects_an_obsolete_generation():
     assert latest == {"destination_researcher": current_packet}
 
 
+@pytest.mark.asyncio
+async def test_artifact_gate_resolves_generation_qualified_worker_packet():
+    packet = ResearchPacket.model_construct(
+        generation_id="generation_current",
+        worker_kind="destination_researcher",
+        run_id="run_current",
+    )
+    generation = PlanningGeneration(
+        generation_id="generation_current",
+        controlled_trip_identity_revision=1,
+        intent_spec_revision=1,
+        constraint_pack_revision=1,
+        plan_revision=0,
+        identity_hash="0" * 64,
+        intent_hash="1" * 64,
+        constraint_hash="2" * 64,
+    )
+    state = TravelAgentState.model_construct(
+        run_id="run_current",
+        planning_generation=generation,
+        execution_plan=[["destination_researcher"]],
+        agent_status={"destination_researcher": "completed"},
+        research_packets={
+            "destination_researcher@generation_current": packet,
+        },
+    )
+
+    update = await artifact_gate_node(state)
+
+    assert update["artifact_gate_route"] == "accepted"
+    assert update["artifact_status"] == {"destination_researcher": "accepted"}
+
+
 def test_runtime_supplement_routes_through_contract_normalization():
     amendment = IntentAmendment(
         command_id="command_runtime_1",
@@ -930,7 +961,10 @@ def test_identity_amendment_is_rejected_and_resumes_the_interrupted_node():
 
     assert update["pending_intent_amendments"] == []
     assert update["intent_amendment_route"] == "candidate_gate"
-    assert update["rejected_intent_amendments"][0].reason_code == "identity_change_requires_new_run"
+    assert (
+        update["rejected_intent_amendments"][0].reason_code
+        == "identity_change_requires_new_run"
+    )
 
 
 def test_unsupported_transaction_amendment_is_rejected():
@@ -950,7 +984,9 @@ def test_unsupported_transaction_amendment_is_rejected():
 
     assert update["pending_intent_amendments"] == []
     assert update["intent_amendment_route"] == "dispatcher"
-    assert update["rejected_intent_amendments"][0].reason_code == "unsupported_amendment"
+    assert (
+        update["rejected_intent_amendments"][0].reason_code == "unsupported_amendment"
+    )
 
 
 def test_research_amendment_is_rejected_after_the_research_window(monkeypatch):
@@ -979,7 +1015,9 @@ def test_research_amendment_is_rejected_after_the_research_window(monkeypatch):
 
     assert update["pending_intent_amendments"] == []
     assert update["intent_amendment_route"] == "itinerary_planner"
-    assert update["rejected_intent_amendments"][0].reason_code == "research_window_closed"
+    assert (
+        update["rejected_intent_amendments"][0].reason_code == "research_window_closed"
+    )
     assert update["rejected_intent_amendments"][0].requires_new_run is True
 
 
