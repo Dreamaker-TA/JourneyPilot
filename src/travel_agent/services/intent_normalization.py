@@ -241,31 +241,87 @@ async def normalize_clauses(
     # 放进 prompt，此时保留 Pydantic 的可选/default 语义，避免模型把数十个可选字段
     # 全部展开成 null/[] 并撞上输出上限。两条路径最后都由同一 Pydantic 模型校验。
     schema = as_strict_schema(model_schema) if supports_native_schema else model_schema
-    try:
-        raw = await llm.ainvoke(
-            _normalization_prompt(clauses, controlled_identity),
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "request_contract_normalization",
-                    "strict": supports_native_schema,
-                    "schema": schema,
-                },
-            },
-            temperature=0,
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "request_contract_normalization",
+            "strict": supports_native_schema,
+            "schema": schema,
+        },
+    }
+    messages = _normalization_prompt(clauses, controlled_identity)
+    last_error: Exception | None = None
+    for attempt in range(2):
+        raw = ""
+        try:
+            raw = await llm.ainvoke(
+                messages,
+                response_format=response_format,
+                temperature=0,
+            )
+            parsed = safe_parse_json(raw, strip_think_tags=True)
+            result = RequestContractNormalizationResult.model_validate(parsed)
+            _validate_clause_coverage(result, clauses)
+            _validate_model_contract(result, clauses)
+            return result
+        except (
+            OpenAIError,
+            ValidationError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+        ) as exc:
+            last_error = exc
+            if attempt == 0:
+                logger.info(
+                    "request contract model normalization rejected; requesting semantic repair "
+                    "| error_type=%s",
+                    type(exc).__name__,
+                )
+                messages = _normalization_repair_prompt(
+                    clauses=clauses,
+                    controlled_identity=controlled_identity,
+                    previous_output=raw,
+                    error=exc,
+                )
+                continue
+    logger.warning(
+        "request contract model normalization failed after semantic repair; "
+        "using deterministic fallback | error_type=%s",
+        type(last_error).__name__ if last_error is not None else "unknown",
+    )
+    return _fallback_normalization(clauses, controlled_identity)
+
+
+def _normalization_repair_prompt(
+    *,
+    clauses: List[SourceClause],
+    controlled_identity: Dict[str, object],
+    previous_output: str,
+    error: Exception,
+) -> List[Dict[str, str]]:
+    """Ask the semantic authority to repair its own rejected structured draft."""
+
+    messages = _normalization_prompt(clauses, controlled_identity)
+    if previous_output.strip():
+        messages.append(
+            {
+                "role": "assistant",
+                "content": previous_output[-12_000:],
+            }
         )
-        parsed = safe_parse_json(raw, strip_think_tags=True)
-        result = RequestContractNormalizationResult.model_validate(parsed)
-        _validate_clause_coverage(result, clauses)
-        _validate_model_contract(result, clauses)
-        return result
-    except (OpenAIError, ValidationError, TypeError, ValueError, RuntimeError) as exc:
-        logger.warning(
-            "request contract model normalization failed; using deterministic fallback "
-            "| error_type=%s",
-            type(exc).__name__,
-        )
-        return _fallback_normalization(clauses, controlled_identity)
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "上一个结构化结果未通过请求合同校验。请重新理解全部原始 clauses，"
+                "修复语义映射后输出一份完整的新 JSON 对象，不要解释、不要只输出差异。"
+                f"校验错误类型：{type(error).__name__}；"
+                f"校验反馈：{str(error)[:1200]}"
+            ),
+        }
+    )
+    return messages
 
 
 def _validate_clause_coverage(
@@ -532,6 +588,16 @@ def _fallback_clause(
     identity_tokens = _identity_tokens(controlled_identity)
     mentions_identity = any(token and token in text for token in identity_tokens)
 
+    # 一个 clause 同时跨多个业务领域时，规则层没有资格猜它们之间是并列、条件还是
+    # 作用域关系。语义模型两次失败后的安全兜底是明确留下 unresolved，而不是把
+    # “高铁、住宿、每天时间和交通”压成单个 Cadence/Objective，造成下游假满足。
+    if len(_fallback_explicit_domains(text)) > 1:
+        return NormalizedClauseDraft(
+            clause_id=clause.clause_id,
+            disposition=ClauseDisposition.UNRESOLVED,
+            reason_code="semantic_normalization_required",
+        )
+
     intents: List[IntentDraft] = []
     if match := re.search(
         r"(?:每天|每日).{0,10}(?:最多|不超过)\s*(\d+)\s*(?:个|处|家)", text
@@ -760,6 +826,24 @@ def _target_for_text(text: str) -> IntentTarget:
     if any(token in text for token in ("交通", "地铁", "公交", "步行", "打车")):
         return IntentTarget.LOCAL_TRANSPORT
     return IntentTarget.VISIT
+
+
+def _fallback_explicit_domains(text: str) -> set[IntentTarget]:
+    """Identify only explicit domain nouns for conservative fallback safety."""
+
+    domains: set[IntentTarget] = set()
+    if any(token in text for token in ("咖啡", "餐", "美食", "早餐", "午餐", "晚餐")):
+        domains.add(IntentTarget.DINING)
+    if any(token in text for token in ("酒店", "住宿", "房间", "民宿")):
+        domains.add(IntentTarget.LODGING)
+    if any(
+        token in text
+        for token in ("高铁", "火车", "航班", "飞机", "去程", "返程", "往返")
+    ):
+        domains.add(IntentTarget.LONG_DISTANCE_TRANSPORT)
+    if any(token in text for token in ("市内交通", "地铁", "公交", "步行", "打车")):
+        domains.add(IntentTarget.LOCAL_TRANSPORT)
+    return domains
 
 
 def _time_window(text: str) -> Optional[str]:

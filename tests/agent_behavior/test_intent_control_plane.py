@@ -157,6 +157,59 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
         assert "required" not in params_schema
 
 
+@pytest.mark.asyncio
+async def test_contract_rejection_gets_one_llm_semantic_repair_before_fallback():
+    clause = _clause(0, "并给出备选方案")
+
+    class _Model:
+        capabilities = SimpleNamespace(supports_json_schema=False)
+
+        def __init__(self):
+            self.calls = []
+
+        async def ainvoke(self, messages, **_kwargs):
+            self.calls.append(messages)
+            strength = "soft" if len(self.calls) == 1 else "hard"
+            target = "itinerary" if len(self.calls) == 1 else "delivery"
+            return json.dumps(
+                {
+                    "clauses": [
+                        {
+                            "clause_id": clause.clause_id,
+                            "disposition": "mapped_to_intent",
+                            "intents": [
+                                {
+                                    "kind": "alternatives",
+                                    "target": target,
+                                    "strength": strength,
+                                    "priority": 90,
+                                    "value": {
+                                        "value_type": "alternative",
+                                        "count": 2,
+                                    },
+                                    "verification_mode": "semantic",
+                                    "impact_stages": ["composition", "projection"],
+                                    "public_summary": "提供备选方案",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            )
+
+    model = _Model()
+    result = await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=model
+    )
+
+    assert len(model.calls) == 2
+    assert "校验反馈" in model.calls[1][-1]["content"]
+    [intent] = result.clauses[0].intents
+    assert intent.kind is IntentKind.ALTERNATIVES
+    assert intent.strength is IntentStrength.HARD
+    assert intent.target is IntentTarget.DELIVERY
+
+
 def _contract():
     clauses = [
         _clause(0, "帮我规划杭州行程"),
@@ -627,7 +680,7 @@ async def test_provider_failure_maps_an_unnumbered_alternative_request():
 
 
 @pytest.mark.asyncio
-async def test_provider_failure_keeps_a_complete_multi_clause_trip_contract():
+async def test_provider_failure_keeps_safe_parts_and_flags_compound_clause():
     query = (
         "规划两天一夜行程，2名成人，偏好建筑与本地文化，"
         "必须安排甲景点、乙景点，总预算人民币3000元以内。"
@@ -650,7 +703,13 @@ async def test_provider_failure_keeps_a_complete_multi_clause_trip_contract():
         for clause, draft in zip(clauses, result.clauses)
         if is_material_clause(clause.source_text)
     ]
-    assert ClauseDisposition.UNRESOLVED not in material_dispositions
+    assert material_dispositions.count(ClauseDisposition.UNRESOLVED) == 1
+    unresolved = [
+        draft
+        for draft in result.clauses
+        if draft.disposition is ClauseDisposition.UNRESOLVED
+    ]
+    assert unresolved[0].reason_code == "semantic_normalization_required"
     intents = [intent for draft in result.clauses for intent in draft.intents]
     assert [
         intent.value.categories[0]
