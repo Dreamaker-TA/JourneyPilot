@@ -413,11 +413,22 @@ def _validated_model_clause_rows(
 ) -> tuple[Dict[str, NormalizedClauseDraft], List[str]]:
     """Salvage independently valid LLM rows without authoring any semantics."""
 
-    if not isinstance(parsed, dict) or set(parsed) != {"clauses"}:
-        raise ValueError("normalizer root must contain exactly the clauses field")
-    rows = parsed.get("clauses")
+    if isinstance(parsed, dict):
+        rows = parsed.get("clauses")
+    elif isinstance(parsed, list):
+        rows = parsed
+    else:
+        rows = None
     if not isinstance(rows, list):
-        raise ValueError("normalizer clauses field must be a list")
+        root_shape = (
+            f"object keys {sorted(str(key) for key in parsed)}"
+            if isinstance(parsed, dict)
+            else type(parsed).__name__
+        )
+        raise ValueError(
+            "normalizer root must be a clause array or contain a clauses array; "
+            f"received {root_shape}"
+        )
     rows_by_id: Dict[str, List[object]] = {}
     for row in rows:
         clause_id = str(row.get("clause_id") or "") if isinstance(row, dict) else ""

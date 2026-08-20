@@ -396,6 +396,58 @@ async def test_semantic_repair_only_regenerates_invalid_clause_rows():
     assert result.clauses[1].intents[0].kind is IntentKind.ALTERNATIVES
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_root",
+    [
+        lambda rows: {
+            "clauses": rows,
+            "summary": "provider-added metadata is not semantic authority",
+        },
+        lambda rows: rows,
+    ],
+)
+async def test_normalizer_accepts_only_typed_rows_from_provider_root_variants(
+    provider_root,
+):
+    clause = _clause(0, "并给出备选方案")
+
+    class _Model:
+        capabilities = SimpleNamespace(supports_json_schema=False)
+
+        async def ainvoke(self, *_args, **_kwargs):
+            rows = [
+                {
+                    "clause_id": clause.clause_id,
+                    "disposition": "mapped_to_intent",
+                    "intents": [
+                        {
+                            "kind": "alternatives",
+                            "target": "delivery",
+                            "strength": "hard",
+                            "priority": 90,
+                            "value": {
+                                "value_type": "alternative",
+                                "count": 2,
+                            },
+                            "verification_mode": "semantic",
+                            "impact_stages": ["composition", "projection"],
+                            "public_summary": "提供备选方案",
+                        }
+                    ],
+                }
+            ]
+            return json.dumps(provider_root(rows))
+
+    result = await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=_Model()
+    )
+
+    [intent] = result.clauses[0].intents
+    assert intent.kind is IntentKind.ALTERNATIVES
+    assert intent.target is IntentTarget.DELIVERY
+
+
 def _contract():
     clauses = [
         _clause(0, "帮我规划杭州行程"),
