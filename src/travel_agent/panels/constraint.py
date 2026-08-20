@@ -1066,18 +1066,40 @@ def deterministic_budget_constraints(text: str) -> List[Dict[str, Any]]:
     """
 
     out: List[Dict[str, Any]] = []
+    # Total-budget grammar is the most explicit and must win before duration
+    # phrases.  In ``两天一夜，2 名成人，总预算 3000 元`` the old night-first
+    # order paired ``一夜`` with the party size and invented a 2-CNY cap.
     patterns = [
+        (r"(?:总预算|全程|整趟|整程)[^\d]{0,8}(\d+(?:\.\d+)?)", "total"),
+        (r"(\d+(?:\.\d+)?)[^\d]{0,6}(?:总预算|全程|整趟|整程)", "total"),
         (r"(?:每晚|一晚|/晚|每夜|一夜)[^\d]{0,8}(\d+(?:\.\d+)?)", "night"),
         (r"(\d+(?:\.\d+)?)[^\d]{0,6}(?:每晚|一晚|/晚|每夜|一夜)", "night"),
         (r"(?:每天|每日|一天)[^\d]{0,8}(\d+(?:\.\d+)?)", "day"),
         (r"(\d+(?:\.\d+)?)[^\d]{0,6}(?:每天|每日|一天)", "day"),
-        (r"(?:总预算|全程|整趟|整程)[^\d]{0,8}(\d+(?:\.\d+)?)", "total"),
-        (r"(\d+(?:\.\d+)?)[^\d]{0,6}(?:总预算|全程|整趟|整程)", "total"),
     ]
     for pattern, per in patterns:
         m = re.search(pattern, text, re.IGNORECASE)
         if not m:
             continue
+        if per != "total":
+            nearby = text[max(0, m.start() - 8) : m.end() + 8].casefold()
+            money_cues = (
+                "预算",
+                "费用",
+                "花费",
+                "开销",
+                "人民币",
+                "cny",
+                "元",
+                "块",
+                "以内",
+                "不超过",
+                "不高于",
+                "至多",
+                "上限",
+            )
+            if not any(cue in nearby for cue in money_cues):
+                continue
         amount = _budget_amount_param(m.group(1))
         if amount and any(h in text.lower() for h in _HARD_HINTS):
             label = {"night": "每晚预算", "day": "每日预算", "total": "总预算"}[per]

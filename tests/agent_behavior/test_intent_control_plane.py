@@ -21,6 +21,7 @@ from travel_agent.entities.intent_spec import (
 from travel_agent.entities.request_contract import ClauseDisposition
 from travel_agent.entities.request_contract import IntentAmendment
 from travel_agent.entities.state import TravelAgentState
+from travel_agent.panels.constraint import deterministic_budget_constraints
 from travel_agent.services.capability_planning import (
     build_capability_plan,
     build_research_brief,
@@ -339,6 +340,71 @@ async def test_numeric_budget_cap_survives_model_omission():
     assert budget.params.amount == 3000
     assert budget.params.currency == "CNY"
     assert budget.params.per == "total"
+
+
+@pytest.mark.asyncio
+async def test_party_size_cannot_override_an_explicit_total_budget():
+    clauses = [
+        _clause(0, "2名成人"),
+        _clause(1, "总预算人民币3000元以内"),
+    ]
+
+    class _Model:
+        async def ainvoke(self, *_args, **_kwargs):
+            return json.dumps(
+                {
+                    "clauses": [
+                        {
+                            "clause_id": clauses[0].clause_id,
+                            "disposition": "controlled_identity",
+                            "reason_code": None,
+                            "intents": [],
+                            "constraints": [
+                                {
+                                    "category": "budget_cap",
+                                    "value": "每晚预算不超过 2 CNY",
+                                    "params": {
+                                        "amount": 2,
+                                        "currency": "CNY",
+                                        "per": "night",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "clause_id": clauses[1].clause_id,
+                            "disposition": "background_context",
+                            "reason_code": None,
+                            "intents": [],
+                            "constraints": [],
+                        },
+                    ]
+                }
+            )
+
+    result = await normalize_clauses(
+        clauses=clauses, controlled_identity=_identity(), llm=_Model()
+    )
+
+    assert result.clauses[0].constraints == []
+    [budget] = result.clauses[1].constraints
+    assert budget.value == "总预算不超过 3000 CNY"
+    assert budget.params.amount == 3000
+    assert budget.params.per == "total"
+
+
+def test_full_trip_sentence_does_not_treat_party_size_as_nightly_budget():
+    text = (
+        "上海到杭州两天一夜行程，2名成人，偏好建筑与本地文化，"
+        "必须安排两个景点，总预算人民币3000元以内"
+    )
+
+    [budget] = deterministic_budget_constraints(text)
+    assert budget["params"] == {
+        "amount": 3000.0,
+        "currency": "CNY",
+        "per": "total",
+    }
 
 
 @pytest.mark.asyncio

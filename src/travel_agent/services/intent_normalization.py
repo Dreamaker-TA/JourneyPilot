@@ -302,29 +302,63 @@ def _enforce_deterministic_constraints(
     """Restore numeric constraints that cannot safely depend on model output.
 
     The normalization model still owns semantic interpretation.  Explicit
-    numeric budget caps are different: losing one changes whether the produced
-    trip is allowed at all.  Add only a missing cap and preserve any richer
-    model-authored budget constraint.
+    numeric budget caps are different: losing or changing one alters whether
+    the produced trip is allowed at all.  When the source grammar yields a cap,
+    it replaces model-authored budget values for that clause.  Numeric budget
+    values attached to source text with no monetary cue are discarded instead
+    of letting a party size or day count become a price.
     """
 
     normalized: List[NormalizedClauseDraft] = []
     for source, draft in zip(clauses, result.clauses):
         deterministic = deterministic_budget_constraints(source.source_text)
-        has_budget = any(item.category == "budget_cap" for item in draft.constraints)
-        if not deterministic or has_budget:
+        non_budget = [
+            item for item in draft.constraints if item.category != "budget_cap"
+        ]
+        if deterministic:
+            constraints = [
+                *non_budget,
+                *[
+                    NormalizedConstraintDraft.model_validate(item)
+                    for item in deterministic
+                ],
+            ]
+        else:
+            source_text = source.source_text.casefold()
+            monetary_cues = (
+                "预算",
+                "费用",
+                "花费",
+                "开销",
+                "人民币",
+                "cny",
+                "元",
+                "块",
+                "以内",
+                "不超过",
+                "不高于",
+                "至多",
+                "上限",
+                "budget",
+            )
+            constraints = [
+                *non_budget,
+                *[
+                    item
+                    for item in draft.constraints
+                    if item.category == "budget_cap"
+                    and (
+                        item.params.amount is None
+                        or any(cue in source_text for cue in monetary_cues)
+                    )
+                ],
+            ]
+        if constraints == draft.constraints:
             normalized.append(draft)
             continue
         normalized.append(
             draft.model_copy(
-                update={
-                    "constraints": [
-                        *draft.constraints,
-                        *[
-                            NormalizedConstraintDraft.model_validate(item)
-                            for item in deterministic
-                        ],
-                    ]
-                }
+                update={"constraints": constraints}
             )
         )
     return RequestContractNormalizationResult(clauses=normalized)
