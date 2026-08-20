@@ -2196,6 +2196,27 @@ async def candidate_gate_node(
                     "destination_researcher", set()
                 ),
             )
+            # Provider 路线会用真实交通时长重排后续 placement。重排后的骨架必须和
+            # 初始骨架走同一个可恢复校验边界：若真实路程把景点推到开放时间之外，
+            # 应回到 itinerary_planner 重排，而不是让 ItineraryCompositionError
+            # 逃出 Candidate Gate、把整条 Run 标成失败。
+            aligned_skeleton = align_skeleton_to_provider_routes(
+                state.placement_skeleton,
+                catalog,
+                connector_gaps,
+            )
+            if aligned_skeleton != state.placement_skeleton:
+                base_update["placement_skeleton"] = aligned_skeleton
+                connector_gaps = extract_local_connector_gaps(
+                    aligned_skeleton,
+                    catalog,
+                    weather_data_revision=catalog.weather_data_revision,
+                    flexible_mode_requests=flexible_requests,
+                    required_flexible_mode_pairs=required_flexible_pairs,
+                    required_candidate_kinds=required_candidate_kinds.get(
+                        "destination_researcher", set()
+                    ),
+                )
         except ItineraryCompositionError as exc:
             return _composition_repair_update(
                 state,
@@ -2239,23 +2260,6 @@ async def candidate_gate_node(
             for candidate_id, candidate in candidate_index.items()
             if candidate_id in passed_ids and isinstance(candidate, TransportCandidate)
         ]
-        aligned_skeleton = align_skeleton_to_provider_routes(
-            state.placement_skeleton,
-            catalog,
-            connector_gaps,
-        )
-        if aligned_skeleton != state.placement_skeleton:
-            base_update["placement_skeleton"] = aligned_skeleton
-            connector_gaps = extract_local_connector_gaps(
-                aligned_skeleton,
-                catalog,
-                weather_data_revision=catalog.weather_data_revision,
-                flexible_mode_requests=flexible_requests,
-                required_flexible_mode_pairs=required_flexible_pairs,
-                required_candidate_kinds=required_candidate_kinds.get(
-                    "destination_researcher", set()
-                ),
-            )
         unresolved_connector_gaps = [
             gap
             for gap in connector_gaps
