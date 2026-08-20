@@ -1,31 +1,17 @@
-# JourneyPilot example config
-#
-#   cp config.example.yaml config.yaml
-#   journeypilot configure --provider deepseek      # 写好模型段（不写 API Key）
-#   export JOURNEYPILOT_PRIMARY_MODEL__API_KEY=...  # Key 走环境变量或 .env
-#   journeypilot config show                        # 每个值 + 它的来源
-#   journeypilot config validate                    # 只校验不启动
-#
-# 未知字段会被**拒绝**（每一段都是 extra="forbid"）：一个拼错的字段名静默什么都不做，
-# 是「我改了 YAML 为什么没生效」的唯一来源。完整字段表见 docs/configuration.md
-# （由 `journeypilot config docs` 生成）。
-#
-# 每个字段都能用 JOURNEYPILOT_<段>__<字段> 覆盖，例如
-# JOURNEYPILOT_DATABASE__PORT=55433。全部合法变量名：journeypilot config env。
+# JourneyPilot 配置模板。
+# 复制为 config.yaml；模型 API Key 请通过环境变量或 .env 注入。
+# 可用 journeypilot configure --provider <id> 生成模型配置。
+# 未知字段会被拒绝；环境变量格式为 JOURNEYPILOT_<段>__<字段>。
+# 详细字段说明可用 journeypilot config docs 查看。
 
-# 这份 YAML 的结构版本。不匹配当前版本就拒绝启动（没有迁移引擎），缺失同样拒绝。
+# 配置结构版本，不能缺失或与当前版本不匹配。
 config_version: 2
 
 env: development
 debug: false
 
-# API Key **不要写在这里**。这份文件会被复制、被提交、被贴进 issue。
-# 用 JOURNEYPILOT_PRIMARY_MODEL__API_KEY / JOURNEYPILOT_FAST_MODEL__API_KEY，
-# 或者放进 .env（Compose 的 api 服务会读）。
-#
-# 模型段建议用 `journeypilot configure --provider <id>` 生成：
-# 连接模板与各家的 capability 声明在 configs/providers/*.yaml，
-# 那里也记着每份 preset 上次被真实调用验证的日期。
+# 模型 API Key 不要写入配置文件；请使用 JOURNEYPILOT_*__API_KEY 或 .env。
+# 连接模板见 configs/providers/*.yaml。
 primary_model:
   api_key: ""
   model_name: "deepseek-v4-pro"
@@ -42,29 +28,16 @@ fast_model:
   temperature: 0.5
   timeout: 30
 
-# RAG vectorisation. Three providers, and which keys matter depends on which one:
-# - "qwen3" (default): local Qwen3-Embedding-0.6B ONNX. Downloads ~1.2GB from HuggingFace
-#   on first start; api_key / base_url are unused.
-# - "openai": any OpenAI-compatible embedding endpoint. Then api_key and base_url are
-#   the two you must fill in — README's config table points here for exactly this swap.
-# - "hash": built-in deterministic hash vectors. Zero dependencies, poor semantics;
-#   only for getting the RAG path to run end to end.
-# dimensions must match the model you point at, and must match the pgvector column
-# your database was created with — changing it later means re-indexing.
-# Env overrides: JOURNEYPILOT_EMBEDDING__PROVIDER / __MODEL_NAME / __BASE_URL /
-# __API_KEY / __DIMENSIONS（完整清单：journeypilot config env）。
+# 向量模型：qwen3 使用本地模型；openai 需要 api_key 和 base_url；hash 仅用于本地 smoke。
+# dimensions 必须与数据库 pgvector 列一致，调整后需要重新索引。
 embedding:
   provider: "qwen3"
-  api_key: ""                                          # openai provider only
-  model_name: "n24q02m/Qwen3-Embedding-0.6B-ONNX"      # e.g. "text-embedding-3-small" for openai
-  base_url: "https://api.openai.com/v1"                # openai provider only
-  dimensions: 1024                                     # 1536 for text-embedding-3-small
+  api_key: ""                                          # provider=openai 时填写
+  model_name: "n24q02m/Qwen3-Embedding-0.6B-ONNX"      # provider=openai 时填写模型名
+  base_url: "https://api.openai.com/v1"                # provider=openai 时填写
+  dimensions: 1024                                     # 必须与数据库列维度一致
 
-# Dual-track host ports (see README Quick Start):
-# - This example defaults to 5433/6379 for a local non-compose instance / walkthrough.
-# - This repo's docker-compose.yml maps Postgres 55433:5432 and Redis 16379:6379.
-#   When using that stack from the host (./run.sh backend, psql, integration tests),
-#   set database.port: 55433 and redis.port: 16379 here (or in your config.yaml).
+# 本模板默认使用本机 PostgreSQL 5433、Redis 6379；使用仓库 Compose 时改为 55433、16379。
 database:
   host: "localhost"
   port: 5433
@@ -74,25 +47,15 @@ database:
   pool_size: 10
   max_overflow: 20
 
-# Backup / migration / restore. Only the `journeypilot` CLI reads this section —
-# the API process never modifies the schema or the physical database.
+# 仅 journeypilot CLI 使用；API 不执行 DDL。
 maintenance:
-  # Backup root. A relative path resolves against the repository root, not the
-  # current working directory: which directory you type the command from must not
-  # change where backups land.
+  # 相对路径按仓库根目录解析。
   backup_dir: "backups"
-  # How many *automatic* (pre-upgrade) backups to keep. Manual backups made with
-  # `journeypilot backup` are never deleted automatically.
+  # 自动升级前备份的保留份数；手动备份不受此限制。
   keep_automatic_backups: 5
-  # Container that runs pg_dump / pg_restore. Empty = auto-detect by "who publishes
-  # the database port". Set it explicitly when several PostgreSQL containers share
-  # a port mapping on one machine.
-  # Why this exists: pg_dump refuses to dump a server newer than itself, and the
-  # host client is often older than the server in Compose. Backups run with a
-  # version-matched client or not at all.
+  # 留空时自动选择负责该数据库端口的 PostgreSQL 容器。
   postgres_container: ""
-  # Seconds to wait for the migration advisory lock. On timeout the command fails —
-  # it never proceeds without the lock.
+  # 迁移锁等待超时（秒）。
   migration_lock_timeout_seconds: 30
 
 redis:
@@ -101,8 +64,7 @@ redis:
   password: ""
   db: 0
 
-# Cross-process cache for strictly scoped, evidence-eligible Provider facts.
-# Redis loss only causes a live miss; it never replays old Candidates or Bundles.
+# Provider 事实的跨进程缓存；Redis 不可用时只视为未命中，不复用旧候选或 Bundle。
 provider_snapshot_cache:
   enabled: true
   redis_key_prefix: "journeypilot:provider-snapshot:v1"
@@ -125,44 +87,39 @@ rag:
   chunk_overlap: 50
   top_k: 5
   score_threshold: 0.3
-  chunker_type: "contextual"        # "text" | "semantic" | "contextual"
+  chunker_type: "contextual"        # text、semantic 或 contextual
   semantic_split_threshold: 0.5
-  # Bounds on model-calling chunking. semantic/contextual spend one
-  # embedding per sentence and one fast-model call per chunk, so the call count
-  # scales with the uploaded document. Retry/backoff is NOT here: that is the
-  # transport's job (openai SDK, exponential, max_retries=2). Concurrency is not
-  # here either — it belongs to provider_channels.ingest_contextual_llm below.
-  model_chunking_max_chars: 60000   # above this: zero model calls, fixed-window chunking
-  contextual_failure_threshold: 8   # failures in one document before the rest skip the LLM
+# semantic/contextual 分块会调用 embedding 和 fast 模型，调用量随文档长度增长。
+  model_chunking_max_chars: 60000   # 超过后使用固定窗口，不调用模型
+  contextual_failure_threshold: 8   # 单文档连续失败达到此值后跳过剩余模型调用
 
-# Tool Search: deferred workers get a compact tool catalog + search_tools;
-# full injects every tool schema (debug fallback). Defaults match Settings.tool_exposure.
+# deferred 按需提供工具目录；full 注入全部工具，主要用于调试。
 tool_exposure:
-  mode: "deferred"          # "deferred" | "full"
+  mode: "deferred"          # deferred 或 full
   worker_only: true
   min_tools_threshold: 8
 
-# Plan gate pause before Deep Research workers. Default true.
+# 深度调研开始前是否暂停并等待用户确认计划。
 run_control:
   plan_gate_enabled: true
-  # 执行租约（过期即由恢复扫描接管该 run）。心跳必须小于租约的一半。
+  # 执行租约过期后由恢复扫描接管；心跳应小于租约的一半。
   lease_seconds: 45
   lease_heartbeat_seconds: 10
   lease_heartbeat_failure_threshold: 3
   recovery_sweep_seconds: 60
-  # 取消 / 追加要求先落 trip_run_commands，执行器按这个间隔轮询（同进程会被立即唤醒）。
+  # 取消和追加要求先落库，执行器按此间隔轮询。
   command_poll_seconds: 2.0
 
-# SSE 缓冲的内存预算（Settings.streaming）。
+# SSE 缓冲与背压参数。
 streaming:
   critical_queue_size: 128
   max_coalesced_chunk_chars: 2048
   max_pending_text_chars: 65536
   heartbeat_seconds: 15.0
-  # 生产者等消费者腾位置的上限；超过即结束传输，状态以 durable 记录为准。
+  # 消费者迟迟不读取时的最大等待时间；超时结束流，状态以持久化记录为准。
   stalled_consumer_seconds: 30.0
 
-# 后台任务 worker（记忆抽取等，落 background_jobs）。
+# 后台任务（如记忆抽取）。
 background_jobs:
   poll_seconds: 5.0
   lease_seconds: 60
@@ -170,40 +127,34 @@ background_jobs:
   # 已完成任务的保留天数；dead 任务不清理，留到用户确认。
   completed_retention_days: 30
 
-# 同步工作被赶出 Event Loop 之后的并发上限（services/blocking_work.py）。
-# 排满时调用方等 queue_wait_seconds，然后收到「现在太忙」而不是无限排队。
+# 阻塞型同步工作的并发上限；排满后最多等待 queue_wait_seconds。
 blocking_work:
   pdf_export: 1
   document_parse: 2
   local_embedding: 2
   queue_wait_seconds: 30.0
 
-# 上传与文档解析的硬输入边界（rag/sources/document_parse.py）。
-# DOCX 是 ZIP：只限制上传字节挡不住一份展开后有几个 GB 的文件，所以要判展开量与压缩比。
+# 上传与文档解析边界，包含文件大小、页数、展开量、压缩比和字符数。
 ingest:
   max_upload_bytes: 10485760        # 10 MB
   max_pdf_pages: 500
   max_docx_entries: 5000
-  max_uncompressed_bytes: 104857600 # 100 MB，ZIP 全部条目解压后的总量
-  max_compression_ratio: 100.0      # zip bomb 的判据是比值
-  max_extracted_chars: 2000000      # 超过即截断并在回执里说明
-  # 解析走受限子进程：线程里的解析器杀不掉，超时只停止等待。
+  max_uncompressed_bytes: 104857600 # ZIP 条目解压后的总量上限
+  max_compression_ratio: 100.0      # ZIP 压缩比上限
+  max_extracted_chars: 2000000      # 超过后截断并在回执中说明
+  # 解析在受限子进程中运行，超时只停止等待。
   parse_timeout_seconds: 60.0
-  parse_cpu_seconds: 60             # 0 = 不设（非 POSIX 平台自动跳过）
+  parse_cpu_seconds: 60             # 0 表示不限制
   parse_address_space_bytes: 2147483648
 
-# 一次 Deep Run 的四段时间窗（秒），必须递增。**全仓唯一定义处** ——
-# 启动脚本与 Compose 都不再自己定义一份。默认值来自实测：直连 DeepSeek 一次完整 Run
-# 143–373 秒，同样的模型经代理每 token 慢 2–4 倍。已开始的 Run 用它自己封存的快照，
-# 改这里不影响在跑的 Run。
+# Deep Run 的四段墙钟窗口（秒），必须递增；已开始的 Run 使用自己的快照。
 run_deadline:
-  target_seconds: 375       # 期望完成点
-  closeout_seconds: 450     # 过它之后不再发起任何研究调用
-  composition_seconds: 570  # 过它之后行程编排也停，只剩投影
-  delivery_seconds: 600     # 投影与原子 Bundle 写入的外界
+  target_seconds: 375       # 目标完成点
+  closeout_seconds: 450     # 之后不再发起研究调用
+  composition_seconds: 570  # 之后只做行程投影
+  delivery_seconds: 600     # 完成投影与 Bundle 写入
 
-# 一次 Run 允许花掉多少（Run 被授权时封存快照，之后改这里不影响在跑的 Run）。
-# 墙钟不在这里：它由上面的 run_deadline 一处拥有。
+# 每个 Run 的调用、token 和费用上限；授权时封存。
 run_budget:
   max_llm_calls: 100
   max_tool_calls: 150
@@ -212,51 +163,39 @@ run_budget:
   max_cost_usd: 5.0
   max_tool_retries_per_target: 2
 
-# 按上游通道分配的同时在飞条数。连接池容量不是产品预算：
-# ingest_contextual_llm 与 online_fast_llm 走同一个 fast 上游，配额必须分开，
-# 否则一次资料上传就能把在线请求排到队尾。
+# 各上游同时在飞的请求上限，不等同于 Run 预算。
+# ingest_contextual_llm 与 online_fast_llm 共用 fast 上游，因此分别限流。
 provider_channels:
   primary_research_llm: 6
   online_fast_llm: 8
   ingest_contextual_llm: 4
   embedding: 4
 
-# Hybrid RAG second-stage rerank (Settings.rerank). llm needs no extra install.
+# RAG 二阶段重排。
 rerank:
   enabled: true
-  provider: "llm"           # "llm" | "cross_encoder"
+  provider: "llm"           # llm 或 cross_encoder
   model_name: "BAAI/bge-reranker-v2-m3"
   initial_top_k: 20
   final_top_k: 5
 
-# OSM place providers: Nominatim + Overpass (Settings.geocoding).
+# 地理编码与地点身份查询。
 geocoding:
   nominatim_base_url: "https://nominatim.openstreetmap.org"
   user_agent: "JourneyPilot/1.0 (travel itinerary geocoder; https://github.com/journeypilot)"
-  # Baseline timeout for /lookup (batch osm_id, bilingual) and Overpass; both run
-  # only in the identity fallback, off the first-hop synchronous path.
+  # /lookup 和 Overpass 的超时；仅用于地点身份的后备查询。
   timeout_seconds: 10.0
-  # Shorter per-attempt timeout for /search, the blocking hop when a user submits a
-  # destination. Measured healthy round trips here: 0.77 / median 1.34 / worst 2.51s.
-  # Upper bound is the ladder: min_interval_seconds + 2 attempts must stay under 8s
-  # worst case, so 1.1 + 2 x 3.4 = 7.9s makes 3.4 the largest per-attempt timeout.
+  # 用户提交目的地时 /search 的单次超时。
   search_timeout_seconds: 3.4
-  # Public Nominatim allows <=1 req/s; 1.1s leaves headroom (global serial rate gate).
+  # 公共 Nominatim 需要限速，避免超过每秒请求限制。
   min_interval_seconds: 1.1
-  # Reuse window for raw /search responses in the Redis-backed cache. OSM city/station
-  # relations do not move, so 7 days matches provider_snapshot_cache.place_identity_ttl_seconds.
+  # /search 原始结果的 Redis 缓存时长。
   search_cache_ttl_seconds: 604800
   search_cache_key_prefix: "journeypilot:nominatim-search:v1"
-  # Cache lookups must not become a new stall: a slow Redis is treated as a miss.
+  # Redis 查询超时后按缓存未命中处理。
   search_cache_redis_timeout_seconds: 0.25
 
-# Street / public-transit routing providers (Settings.routing).
-# One tool (`global_route_search`), two upstreams split by geography: amap answers
-# inside the China coordinate box, MOTIS/Transitous answers the rest of the world.
-# The split is a coverage fact, not a preference — MOTIS carries no mainland-China
-# transit feed (measured: zero routes visited for a 7.9 km Shenzhen hop),
-# and amap covers nowhere else. amap reuses the AMAP_MAPS_API_KEY configured on the
-# `amap-maps` MCP server below; there is no second place to put that key.
+# 交通路由：国内坐标使用高德，其他地区使用 Transitous；高德 Key 从 amap-maps 的 MCP 配置读取。
 routing:
   transitous_base_url: "https://api.transitous.org"
   amap_base_url: "https://restapi.amap.com"
@@ -264,16 +203,11 @@ routing:
   timeout_seconds: 20.0
   min_interval_seconds: 1.0
 
-# Committed upstream data snapshots (Settings.data_snapshots).
-# 12306 publishes station_name.js with no version token, so age is the only proxy
-# available: this is how long the repo will answer station questions from a table
-# nobody re-checked. Reported by /api/health/ready as a non-blocking component and
-# by preflight item 4 — never blocks readiness.
+# 上游数据快照有效期；站点表无版本号时按年龄判断，只影响非阻塞提示。
 data_snapshots:
   station_max_age_days: 90
 
-# LangGraph checkpoint retention days (Settings.checkpoint_retention).
-# require_on_startup=true → AppBuilder fails hard if Postgres checkpointer init fails.
+# LangGraph Checkpoint 清理和启动要求。
 checkpoint_retention:
   completed_days: 30
   cancelled_days: 30
@@ -312,7 +246,6 @@ mcp:
     baidu-maps:
       env:
         BAIDU_MAP_API_KEY: ""
-      # sse_url: "https://mcp.map.baidu.com/sse?ak=YOUR_AK"
 
     duckduckgo-search:
       disabled: false
@@ -332,10 +265,7 @@ mcp:
     amap-maps:
       env:
         AMAP_MAPS_API_KEY: ""
-      # 两次调用之间的最小间隔（秒），默认 0 = 不限速。高德按「每秒并发」拒绝
-      # （CUQPS_HAS_EXCEEDED_THE_LIMIT），而一次这样的拒绝会让整个住宿域少掉候选。
-      # 数值请到高德控制台读当前 key 的 QPS 上限后填这里，不要写进代码：
-      # 3 QPS → 0.34，5 QPS → 0.2。留 0 表示不限速。
+      # 按当前 Key 的 QPS 设置；3 QPS 约填 0.34，5 QPS 约填 0.2，0 表示不限速。
       min_interval_seconds: 0
 
     duffel-flights:
