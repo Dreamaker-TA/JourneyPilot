@@ -1659,9 +1659,273 @@ def align_skeleton_to_provider_routes(
             shifted = True
         if shifted:
             aligned = skeleton.model_copy(update={"days": updated_days})
-            validate_placement_skeleton(aligned, catalog)
+            try:
+                validate_placement_skeleton(aligned, catalog)
+            except ItineraryCompositionError:
+                # A measured route may consume slack that the model left between
+                # earlier stops and push a later visit past closing time.  Before
+                # spending another full model round, redistribute that *existing*
+                # slack across the whole Day while preserving order, durations,
+                # candidates and every published opening window.  This is a
+                # generic interval-scheduling operation; it authors no place or
+                # duration and refuses scheduled (timetable) local routes whose
+                # fixed departure cannot be shifted safely.
+                compacted = _compact_day_for_provider_routes(
+                    aligned,
+                    catalog,
+                    gaps,
+                    day_id=gap.day_id,
+                )
+                if compacted is None:
+                    raise
+                validate_placement_skeleton(compacted, catalog)
+                return compacted
             return aligned
     return skeleton
+
+
+def _duration_only_route_minutes(
+    gap: LocalConnectorGap,
+    candidates: Mapping[str, ResearchCandidate],
+) -> int:
+    """Smallest measured duration for an adjacency, or the contract minimum.
+
+    Fixed-timetable local routes are deliberately excluded: moving a stop around
+    one would also need to honor that route's departure clock, which is not a
+    duration-only compaction.  The caller treats their presence as non-compactable
+    instead of silently rewriting a timetable.
+    """
+
+    matching = [
+        candidate
+        for candidate in candidates.values()
+        if isinstance(candidate, TransportCandidate)
+        and candidate.transport_class != "long_distance"
+        and candidate.from_endpoint.place_id == gap.from_place_id
+        and candidate.to_endpoint.place_id == gap.to_place_id
+        and candidate.departure_at is None
+        and candidate.arrival_at is None
+        and connector_candidate_quality_error(candidate, gap)
+        in {None, "route_arrives_after_following_stop"}
+    ]
+    if not matching:
+        return MIN_LOCAL_TRANSFER_MINUTES
+    return min(candidate.duration_minutes for candidate in matching)
+
+
+def _latest_visit_window(
+    *,
+    day: DayComposition,
+    candidate: VisitCandidate,
+    latest_end: datetime,
+    duration: timedelta,
+) -> Optional[tuple[datetime, datetime]]:
+    """Latest whole opening interval placement ending no later than a boundary."""
+
+    opening_window = candidate.opening_window
+    if opening_window and day.date.weekday() in _closed_weekdays(opening_window):
+        return None
+    intervals = _opening_intervals_minutes(opening_window)
+    if not intervals:
+        start = latest_end - duration
+        return (start, latest_end) if start.date() == day.date else None
+    for opens, closes in reversed(intervals):
+        opened_at = latest_end.replace(
+            hour=opens // 60,
+            minute=opens % 60,
+            second=0,
+            microsecond=0,
+        )
+        if closes == 24 * 60:
+            closed_at = opened_at.replace(hour=0, minute=0) + timedelta(days=1)
+        else:
+            closed_at = latest_end.replace(
+                hour=closes // 60,
+                minute=closes % 60,
+                second=0,
+                microsecond=0,
+            )
+        end = min(latest_end, closed_at)
+        start = end - duration
+        if start >= opened_at and start.date() == day.date:
+            return start, end
+    return None
+
+
+def _compact_day_for_provider_routes(
+    skeleton: ItineraryCompositionDraft,
+    catalog: RecommendationCatalog,
+    gaps: list[LocalConnectorGap],
+    *,
+    day_id: str,
+) -> Optional[ItineraryCompositionDraft]:
+    """Fit one ordered Day around measured route durations and opening windows.
+
+    The model owns *what* is visited and for how long.  This function only moves
+    those existing windows: first pack backward from closing/departure limits,
+    then forward from an arrival anchor.  Returning ``None`` means the same set
+    of decisions is genuinely infeasible and must go back to semantic repair.
+    """
+
+    candidates = _passed_candidates(catalog)
+    day = next((item for item in skeleton.days if item.day_id == day_id), None)
+    if day is None:
+        return None
+    placements = list(day.placements)
+    physical_indices = [
+        index
+        for index, placement in enumerate(placements)
+        if placement.placement_kind in {"visit", "dining"}
+    ]
+    if not physical_indices:
+        return None
+    if any(
+        getattr(placements[index], "planned_start", None) is None
+        or getattr(placements[index], "planned_end", None) is None
+        for index in physical_indices
+    ):
+        return None
+
+    gap_by_pair = {
+        (gap.from_entry_key, gap.to_entry_key): gap
+        for gap in gaps
+        if gap.day_id == day_id
+    }
+
+    def entry_key(index: int) -> str:
+        placement = placements[index]
+        if placement.placement_kind == "transport":
+            return f"candidate:{placement.candidate_id}"
+        return placement_identity(placement)
+
+    def edge_minutes(left_index: int, right_index: int) -> int:
+        edge_gap = gap_by_pair.get((entry_key(left_index), entry_key(right_index)))
+        if edge_gap is None:
+            return MIN_LOCAL_TRANSFER_MINUTES
+        # A fixed local timetable cannot be compacted as a duration-only edge.
+        scheduled = [
+            candidate
+            for candidate in candidates.values()
+            if isinstance(candidate, TransportCandidate)
+            and candidate.transport_class != "long_distance"
+            and candidate.from_endpoint.place_id == edge_gap.from_place_id
+            and candidate.to_endpoint.place_id == edge_gap.to_place_id
+            and candidate.departure_at is not None
+            and candidate.arrival_at is not None
+        ]
+        if scheduled:
+            raise ItineraryCompositionError(
+                "fixed-timetable local connector requires semantic rescheduling"
+            )
+        return _duration_only_route_minutes(edge_gap, candidates)
+
+    try:
+        # Preserve the model's last end unless a closing/departure boundary is
+        # earlier.  Each preceding stop is then moved only as far back as the
+        # measured route to its successor requires.
+        successor_start: Optional[datetime] = None
+        successor_index: Optional[int] = None
+        after_last = range(physical_indices[-1] + 1, len(placements))
+        outgoing_index = next(
+            (
+                index
+                for index in after_last
+                if placements[index].placement_kind == "transport"
+                and isinstance(candidates.get(placements[index].candidate_id), TransportCandidate)
+                and candidates[placements[index].candidate_id].transport_class == "long_distance"
+            ),
+            None,
+        )
+        if outgoing_index is not None:
+            outgoing = candidates[placements[outgoing_index].candidate_id]
+            successor_start = outgoing.departure_at
+            successor_index = outgoing_index
+
+        for index in reversed(physical_indices):
+            placement = placements[index]
+            start = placement.planned_start
+            end = placement.planned_end
+            assert start is not None and end is not None
+            duration = end - start
+            latest_end = end
+            if successor_start is not None and successor_index is not None:
+                latest_end = min(
+                    latest_end,
+                    successor_start
+                    - timedelta(minutes=edge_minutes(index, successor_index)),
+                )
+            candidate = candidates.get(placement.candidate_id)
+            if isinstance(candidate, VisitCandidate):
+                window = _latest_visit_window(
+                    day=day,
+                    candidate=candidate,
+                    latest_end=latest_end,
+                    duration=duration,
+                )
+                if window is None:
+                    return None
+                shifted_start, shifted_end = window
+            else:
+                shifted_end = latest_end
+                shifted_start = shifted_end - duration
+                if shifted_start.date() != day.date:
+                    return None
+            placements[index] = placement.model_copy(
+                update={
+                    "planned_start": shifted_start,
+                    "planned_end": shifted_end,
+                    "duration_minutes": max(
+                        1, round(duration.total_seconds() / 60)
+                    ),
+                }
+            )
+            successor_start = shifted_start
+            successor_index = index
+
+        # The backward pass can borrow too much time before an arriving anchor.
+        # Push forward from that fixed arrival just enough to restore every
+        # measured edge; subsequent opening-window validation remains authoritative.
+        before_first = range(physical_indices[0] - 1, -1, -1)
+        incoming_index = next(
+            (
+                index
+                for index in before_first
+                if placements[index].placement_kind == "transport"
+                and isinstance(candidates.get(placements[index].candidate_id), TransportCandidate)
+                and candidates[placements[index].candidate_id].transport_class == "long_distance"
+            ),
+            None,
+        )
+        predecessor_end: Optional[datetime] = None
+        predecessor_index: Optional[int] = None
+        if incoming_index is not None:
+            incoming = candidates[placements[incoming_index].candidate_id]
+            predecessor_end = incoming.arrival_at
+            predecessor_index = incoming_index
+        for index in physical_indices:
+            placement = placements[index]
+            start = placement.planned_start
+            end = placement.planned_end
+            assert start is not None and end is not None
+            if predecessor_end is not None and predecessor_index is not None:
+                earliest_start = predecessor_end + timedelta(
+                    minutes=edge_minutes(predecessor_index, index)
+                )
+                if start < earliest_start:
+                    delay = earliest_start - start
+                    start += delay
+                    end += delay
+                    placements[index] = placement.model_copy(
+                        update={"planned_start": start, "planned_end": end}
+                    )
+            predecessor_end = end
+            predecessor_index = index
+    except ItineraryCompositionError:
+        return None
+
+    updated_day = day.model_copy(update={"placements": placements})
+    updated_days = [updated_day if item.day_id == day_id else item for item in skeleton.days]
+    return skeleton.model_copy(update={"days": updated_days})
 
 
 def connector_gap_rejection_reasons(

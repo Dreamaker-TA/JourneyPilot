@@ -229,6 +229,7 @@ def _composition_response_schema(
     catalog: RecommendationCatalog | None = None,
     *,
     skeleton_only: bool = False,
+    strict_wire: bool = True,
 ) -> Dict[str, Any]:
     """Bind each placement branch to the selected candidates of the same kind.
 
@@ -268,7 +269,8 @@ def _composition_response_schema(
         properties = authored_schema.get("properties", {})
         for field_name in _SERVER_OWNED_PLACE_FIELDS:
             properties.pop(field_name, None)
-        authored_schema["required"] = list(properties)
+        if strict_wire:
+            authored_schema["required"] = list(properties)
 
     ids_by_kind = (
         selected_ids_by_kind(catalog, skeleton_only=skeleton_only)
@@ -304,7 +306,18 @@ def _composition_response_schema(
                     schema, f"#/$defs/{model_name}", candidate_kind
                 )
                 continue
-        placement_schema["required"] = list(properties)
+        if strict_wire:
+            placement_schema["required"] = list(properties)
+        else:
+            # The discriminator remains semantic payload even though Pydantic
+            # supplies a class default.  Optional origin branches stay optional:
+            # forcing both candidate_id and authored_* to appear is what makes a
+            # json_object model emit one useful value plus one redundant null.
+            required = set(placement_schema.get("required") or [])
+            required.add("placement_kind")
+            placement_schema["required"] = [
+                field_name for field_name in properties if field_name in required
+            ]
 
     if ids_by_kind is not None:
         lodging_ids = ids_by_kind["lodging"]
@@ -319,7 +332,7 @@ def _composition_response_schema(
     # stay selectable either way — every branch pins ``placement_kind`` to its
     # own ``const`` — and the authoritative check is still the Pydantic union in
     # ``_parse_exact_llm_composition``.
-    return as_strict_schema(schema)
+    return as_strict_schema(schema) if strict_wire else schema
 
 
 def _placement_capabilities(
@@ -537,13 +550,14 @@ def _required_leg_scope_ids(
 
 
 def _composition_schema_json(
-    state: TravelAgentState, *, skeleton_only: bool
+    state: TravelAgentState, *, skeleton_only: bool, strict_wire: bool = True
 ) -> str:
     """The response schema exactly as the prompt carries it."""
     return json.dumps(
         _composition_response_schema(
             state.recommendation_catalog,
             skeleton_only=skeleton_only,
+            strict_wire=strict_wire,
         ),
         ensure_ascii=False,
         separators=(",", ":"),
@@ -672,6 +686,7 @@ def _composition_prompt(
     skeleton_only: bool = False,
     required_candidate_kinds: Optional[set[str]] = None,
     required_long_distance_legs: Optional[list] = None,
+    strict_wire_schema: bool = True,
 ) -> str:
     """Assemble the composition prompt.
 
@@ -688,7 +703,11 @@ def _composition_prompt(
     """
     if state.recommendation_catalog is None:
         raise ValueError("itinerary composition requires an admitted Recommendation Catalog")
-    schema = _composition_schema_json(state, skeleton_only=skeleton_only)
+    schema = _composition_schema_json(
+        state,
+        skeleton_only=skeleton_only,
+        strict_wire=strict_wire_schema,
+    )
     catalog = _composition_catalog_json(state)
     capabilities = _composition_capabilities_json(state, skeleton_only=skeleton_only)
     alternatives = _alternative_capabilities_json(state)
@@ -804,6 +823,7 @@ def composition_prompt_segments(
     skeleton_only: bool = False,
     required_candidate_kinds: Optional[set[str]] = None,
     required_long_distance_legs: Optional[list] = None,
+    strict_wire_schema: bool = True,
 ) -> Dict[str, int]:
     """What a composition prompt is made of, in characters, piece by piece.
 
@@ -829,6 +849,7 @@ def composition_prompt_segments(
         skeleton_only=skeleton_only,
         required_candidate_kinds=required_candidate_kinds,
         required_long_distance_legs=required_long_distance_legs,
+        strict_wire_schema=strict_wire_schema,
     )
     prompt = inject_agent_context(body, state, agent_label=_NODE_NAME)
 
@@ -840,7 +861,14 @@ def composition_prompt_segments(
         ("intent_contract", _intent_contract_json(state)),
         ("minimum_delivery", _minimum_delivery_json(state)),
         ("previous_mutations", _previous_mutations_json(state)),
-        ("schema", _composition_schema_json(state, skeleton_only=skeleton_only)),
+        (
+            "schema",
+            _composition_schema_json(
+                state,
+                skeleton_only=skeleton_only,
+                strict_wire=strict_wire_schema,
+            ),
+        ),
         (
             "brief",
             build_assignment_context(
@@ -2983,12 +3011,17 @@ async def itinerary_planner_node(
                 raise ValueError(
                     "placement skeleton requires an admitted Recommendation Catalog"
                 )
+            llm = get_model_router().get_primary()
+            supports_native_schema = bool(
+                getattr(getattr(llm, "capabilities", None), "supports_json_schema", False)
+            )
             system_content = inject_agent_context(
                 _composition_prompt(
                     state,
                     task_desc,
                     skeleton_only=True,
                     required_candidate_kinds=required_candidate_kinds,
+                    strict_wire_schema=supports_native_schema,
                 ),
                 state,
                 agent_label=_NODE_NAME,
@@ -3005,16 +3038,16 @@ async def itinerary_planner_node(
                     ),
                 }
             )
-            llm = get_model_router().get_primary()
             response_kwargs = {
                 "response_format": {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "itinerary_placement_skeleton",
-                        "strict": True,
+                        "strict": supports_native_schema,
                         "schema": _composition_response_schema(
                             state.recommendation_catalog,
                             skeleton_only=True,
+                            strict_wire=supports_native_schema,
                         ),
                     },
                 },
@@ -3296,11 +3329,16 @@ async def itinerary_planner_node(
 
         if state.candidate_gate_status != "passed" or state.recommendation_catalog is None:
             raise ValueError("candidate gate must pass before itinerary composition")
+        llm = get_model_router().get_primary()
+        supports_native_schema = bool(
+            getattr(getattr(llm, "capabilities", None), "supports_json_schema", False)
+        )
         system_content = inject_agent_context(
             _composition_prompt(
                 state,
                 task_desc,
                 required_candidate_kinds=required_candidate_kinds,
+                strict_wire_schema=supports_native_schema,
             ),
             state,
             agent_label=_NODE_NAME,
@@ -3313,14 +3351,16 @@ async def itinerary_planner_node(
                 "content": "只返回符合 ItineraryCompositionDraft 的 JSON 对象。",
             }
         )
-        llm = get_model_router().get_primary()
-        response_schema = _composition_response_schema(state.recommendation_catalog)
+        response_schema = _composition_response_schema(
+            state.recommendation_catalog,
+            strict_wire=supports_native_schema,
+        )
         response_kwargs = {
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "itinerary_composition_draft",
-                    "strict": True,
+                    "strict": supports_native_schema,
                     "schema": response_schema,
                 },
             },

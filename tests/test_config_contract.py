@@ -280,6 +280,31 @@ def test_reasoning_dialects_follow_the_declaration():
     assert set(conservative) == {"thinking", "reasoning", "max_tokens"}
 
 
+def test_json_object_downgrade_does_not_duplicate_an_embedded_schema():
+    from travel_agent.models.router import _satisfy_json_object_prompt_requirement
+
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    compact = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+    messages = [
+        {
+            "role": "system",
+            "content": f"只返回 JSON。<json_schema>{compact}</json_schema>",
+        }
+    ]
+
+    prepared = _satisfy_json_object_prompt_requirement(
+        messages,
+        {"response_format": {"type": "json_object"}},
+        dropped_schema=schema,
+    )
+
+    assert prepared == messages
+
+
 # --- 生成物一致性 --------------------------------------------------------- #
 
 

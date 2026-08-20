@@ -59,8 +59,10 @@ from travel_agent.entities.itinerary_composition_v2 import (
     DayComposition,
     ItineraryCompositionDraft,
     ItineraryCompositionError,
+    LocalConnectorGap,
     VisitPlacement,
     _transport_alternatives,
+    align_skeleton_to_provider_routes,
     validate_placement_skeleton,
 )
 from travel_agent.services.candidate_intent_evaluation import (
@@ -618,6 +620,142 @@ def test_visit_rejects_published_weekday_closure():
             ),
             catalog,
         )
+
+
+def test_provider_duration_compacts_existing_slack_before_closing(monkeypatch):
+    """Measured route time may move stops, but must not drop or shorten them."""
+
+    import travel_agent.entities.itinerary_composition_v2 as composition_module
+
+    local_tz = ZoneInfo("Asia/Shanghai")
+    garden = _packet(
+        "candidate_garden",
+        "郭庄",
+        origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+        query_id="query_garden",
+        intent_id="intent_garden",
+        opening_window="08:00-17:00",
+    ).candidates[0]
+    museum = _packet(
+        "candidate_museum",
+        "城市规划馆",
+        origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+        query_id="query_museum",
+        intent_id="intent_museum",
+        opening_window="09:00-16:30",
+    ).candidates[0]
+    garden = garden.model_copy(update={"place_id": "place_garden"})
+    museum = museum.model_copy(update={"place_id": "place_museum"})
+    from_endpoint = TransportEndpoint(name="郭庄", place_id="place_garden")
+    to_endpoint = TransportEndpoint(name="城市规划馆", place_id="place_museum")
+    segment = TransportSegment(
+        segment_id="segment_local_bus",
+        mode=TransportMode.BUS,
+        from_endpoint=from_endpoint,
+        to_endpoint=to_endpoint,
+        duration_minutes=66,
+    )
+    route = TransportCandidate(
+        candidate_id="candidate_local_bus",
+        research_packet_id="packet_local_bus",
+        destination_id="destination_tokyo",
+        fact_assertion_ids=["fact_local_bus"],
+        source_record_ids=["source_local_bus"],
+        field_paths=["segments"],
+        weather_sensitivity=WeatherSensitivity(
+            exposure="mixed",
+            rain_sensitivity="low",
+            heat_sensitivity="low",
+            cold_sensitivity="low",
+            wind_sensitivity="low",
+            requires_clear_visibility=False,
+        ),
+        selection_reasons=["provider duration", "exact endpoints"],
+        tradeoff="fixture",
+        freshness_status="current",
+        route_id="route_local_bus",
+        transport_class="public_transit",
+        selected_mode=TransportMode.BUS,
+        from_endpoint=from_endpoint,
+        to_endpoint=to_endpoint,
+        duration_minutes=66,
+        segments=[segment],
+        booking_status="not_required",
+    )
+    passed = {
+        garden.candidate_id: garden,
+        museum.candidate_id: museum,
+        route.candidate_id: route,
+    }
+    monkeypatch.setattr(composition_module, "_passed_candidates", lambda _catalog: passed)
+    skeleton = ItineraryCompositionDraft(
+        itinerary_id="itinerary_provider_alignment",
+        title="Provider alignment fixture",
+        duration_days=1,
+        days=[
+            DayComposition(
+                day_id="day_1",
+                day=1,
+                date=datetime(2026, 8, 28).date(),
+                destination_id="destination_tokyo",
+                placements=[
+                    VisitPlacement(
+                        candidate_id=garden.candidate_id,
+                        planned_start=datetime(2026, 8, 28, 13, 30, tzinfo=local_tz),
+                        planned_end=datetime(2026, 8, 28, 15, 0, tzinfo=local_tz),
+                        duration_minutes=90,
+                    ),
+                    VisitPlacement(
+                        candidate_id=museum.candidate_id,
+                        planned_start=datetime(2026, 8, 28, 15, 30, tzinfo=local_tz),
+                        planned_end=datetime(2026, 8, 28, 16, 30, tzinfo=local_tz),
+                        duration_minutes=60,
+                    ),
+                ],
+            )
+        ],
+    )
+    gap = LocalConnectorGap(
+        gap_id="gap_garden_museum",
+        day_id="day_1",
+        day_date=datetime(2026, 8, 28).date(),
+        destination_id="destination_tokyo",
+        from_entry_key=f"candidate:{garden.candidate_id}",
+        from_place_id="place_garden",
+        to_entry_key=f"candidate:{museum.candidate_id}",
+        to_place_id="place_museum",
+        departure_time=datetime(2026, 8, 28, 15, 0, tzinfo=local_tz),
+        latest_arrival_time=datetime(2026, 8, 28, 15, 30, tzinfo=local_tz),
+        allowed_transport_classes=["public_transit"],
+        preferred_transport_class="public_transit",
+        weather_data_revision=0,
+    )
+
+    aligned = align_skeleton_to_provider_routes(skeleton, object(), [gap])
+    placements = aligned.days[0].placements
+
+    assert [item.candidate_id for item in placements] == [
+        garden.candidate_id,
+        museum.candidate_id,
+    ]
+    assert [item.duration_minutes for item in placements] == [90, 60]
+    assert placements[0].planned_end == datetime(2026, 8, 28, 14, 24, tzinfo=local_tz)
+    assert placements[1].planned_end == datetime(2026, 8, 28, 16, 30, tzinfo=local_tz)
+    validate_placement_skeleton(aligned, object())
+
+
+def test_json_object_composition_schema_keeps_semantics_without_null_branches():
+    from travel_agent.agents.itinerary_planner.node import _composition_response_schema
+
+    prompt_schema = _composition_response_schema(strict_wire=False)
+    strict_schema = _composition_response_schema(strict_wire=True)
+    prompt_required = set(prompt_schema["$defs"]["VisitPlacement"]["required"])
+    strict_required = set(strict_schema["$defs"]["VisitPlacement"]["required"])
+
+    assert {"placement_kind", "duration_minutes"} <= prompt_required
+    assert "candidate_id" not in prompt_required
+    assert "authored_place" not in prompt_required
+    assert {"candidate_id", "authored_place", "planned_start", "planned_end"} <= strict_required
 
 
 def test_theme_changes_query_plan_and_museum_exclusion_blocks_fallback():

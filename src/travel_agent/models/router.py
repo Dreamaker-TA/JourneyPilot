@@ -338,7 +338,11 @@ def _satisfy_json_object_prompt_requirement(
     instructions: List[str] = []
     if not any("json" in str(message.get("content") or "").lower() for message in messages):
         instructions.append(_JSON_OBJECT_PROMPT_TOKEN)
-    if isinstance(dropped_schema, dict) and dropped_schema:
+    if (
+        isinstance(dropped_schema, dict)
+        and dropped_schema
+        and not _messages_already_contain_schema(messages, dropped_schema)
+    ):
         instructions.append(
             "返回对象必须严格满足此 JSON Schema（键名、必填项、层级一律照此输出）："
             f"{json.dumps(dropped_schema, ensure_ascii=False)}"
@@ -346,6 +350,24 @@ def _satisfy_json_object_prompt_requirement(
     if not instructions:
         return messages
     return [*messages, {"role": "user", "content": "".join(instructions)}]
+
+
+def _messages_already_contain_schema(
+    messages: List[Dict[str, Any]], schema: Dict[str, Any]
+) -> bool:
+    """Do not paste the same structured-output schema into a prompt twice.
+
+    Some high-context agents already render their response schema beside the
+    domain contract.  A provider downgrade from ``json_schema`` to
+    ``json_object`` used to append that schema a second time, adding thousands
+    of identical prompt tokens on every repair round.  Compare the canonical
+    compact JSON representation so whitespace differences do not defeat the
+    check; callers that do not carry the schema still receive the router-owned
+    instruction.
+    """
+
+    compact = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+    return any(compact in str(message.get("content") or "") for message in messages)
 
 
 def _downgraded_json_schema(
