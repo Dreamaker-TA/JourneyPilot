@@ -59,7 +59,17 @@ _CONDITIONAL_HARD_CATEGORIES = {
     "accommodation_preference",
     "pace_preference",
 }
-_BUDGET_HARD_HINTS = ("上限", "不超过", "别超", "最多", "封顶", "no more than", "cap", "max")
+_BUDGET_HARD_HINTS = (
+    "上限",
+    "不超过",
+    "以内",
+    "别超",
+    "最多",
+    "封顶",
+    "no more than",
+    "cap",
+    "max",
+)
 _HARD_HINTS = _BUDGET_HARD_HINTS + (
     "必须",
     "务必",
@@ -1047,7 +1057,14 @@ async def _llm_extract(
     return {}, "llm_parse_failed"
 
 
-def _fallback_budget(text: str) -> List[Dict[str, Any]]:
+def deterministic_budget_constraints(text: str) -> List[Dict[str, Any]]:
+    """Extract an explicit numeric budget cap without relying on a model.
+
+    This is public because Request Contract normalization and the lower-level
+    Constraint Panel must apply the exact same fallback rule.  A model timeout
+    must not make a traveller's numeric cap disappear between those layers.
+    """
+
     out: List[Dict[str, Any]] = []
     patterns = [
         (r"(?:每晚|一晚|/晚|每夜|一夜)[^\d]{0,8}(\d+(?:\.\d+)?)", "night"),
@@ -1063,10 +1080,10 @@ def _fallback_budget(text: str) -> List[Dict[str, Any]]:
             continue
         amount = _budget_amount_param(m.group(1))
         if amount and any(h in text.lower() for h in _HARD_HINTS):
-            label = {"night": "每晚", "day": "每天", "total": "总预算"}[per]
+            label = {"night": "每晚预算", "day": "每日预算", "total": "总预算"}[per]
             out.append({
                 "category": "budget_cap",
-                "value": f"{label}预算不超过 {amount:.0f} CNY",
+                "value": f"{label}不超过 {amount:.0f} CNY",
                 "params": {"amount": amount, "currency": "CNY", "per": per},
             })
             break
@@ -1097,7 +1114,7 @@ def _rule_fallback_extract(free_items: List[Dict[str, Any]]) -> ConstraintExtrac
     for it in free_items:
         text = str(it.get("text") or "")
         found: List[Dict[str, Any]] = []
-        found.extend(_fallback_budget(text))
+        found.extend(deterministic_budget_constraints(text))
         found.extend(_fallback_allergy(text))
         if any(k in text for k in (
             "老人", "父母", "腿脚", "少走路", "少步行", "少爬楼梯", "少楼梯",

@@ -308,6 +308,38 @@ async def test_material_clause_cannot_be_silently_classified_as_background():
     assert result.clauses[0].reason_code == "material_clause_not_mapped"
 
 
+@pytest.mark.asyncio
+async def test_numeric_budget_cap_survives_model_omission():
+    clause = _clause(0, "总预算人民币3000元以内")
+
+    class _Model:
+        async def ainvoke(self, *_args, **_kwargs):
+            return json.dumps(
+                {
+                    "clauses": [
+                        {
+                            "clause_id": clause.clause_id,
+                            "disposition": "background_context",
+                            "reason_code": None,
+                            "intents": [],
+                            "constraints": [],
+                        }
+                    ]
+                }
+            )
+
+    result = await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=_Model()
+    )
+
+    budget = result.clauses[0].constraints[0]
+    assert budget.category == "budget_cap"
+    assert budget.value == "总预算不超过 3000 CNY"
+    assert budget.params.amount == 3000
+    assert budget.params.currency == "CNY"
+    assert budget.params.per == "total"
+
+
 def test_include_exclude_conflict_blocks_the_contract():
     common = {
         "target": IntentTarget.VISIT,

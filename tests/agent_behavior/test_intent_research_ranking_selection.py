@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -43,6 +44,13 @@ from travel_agent.entities.research_brief import (
 from travel_agent.entities.research_domain import ResearchDomain
 from travel_agent.entities.research_query_plan import ResearchQueryKind
 from travel_agent.entities.trip_input import ControlledTripIdentity
+from travel_agent.entities.itinerary_composition_v2 import (
+    DayComposition,
+    ItineraryCompositionDraft,
+    ItineraryCompositionError,
+    VisitPlacement,
+    validate_placement_skeleton,
+)
 from travel_agent.services.candidate_intent_evaluation import (
     evaluate_candidate_intents,
 )
@@ -202,6 +210,7 @@ def _packet(
     origin: CandidateDiscoveryOrigin,
     query_id: str,
     intent_id: str,
+    opening_window: str | None = None,
 ) -> ResearchPacket:
     source_id = f"source_{candidate_id}"
     fact_id = f"fact_{candidate_id}"
@@ -259,6 +268,7 @@ def _packet(
         address="Tokyo",
         visit_type="culture",
         recommended_duration_minutes=90,
+        opening_window=opening_window,
     )
     record = CandidateDiscoveryRecord(
         candidate_id=candidate_id,
@@ -321,6 +331,92 @@ def _catalog(*packets: ResearchPacket) -> RecommendationCatalog:
             for record in packet.candidate_discovery_records
         ],
     )
+
+
+def _single_visit_skeleton(
+    candidate_id: str,
+    *,
+    planned_start: datetime,
+    planned_end: datetime,
+) -> ItineraryCompositionDraft:
+    return ItineraryCompositionDraft(
+        itinerary_id="itinerary_opening_window",
+        title="Opening window fixture",
+        duration_days=1,
+        days=[
+            DayComposition(
+                day_id="day_1",
+                day=1,
+                date=planned_start.date(),
+                destination_id="destination_tokyo",
+                placements=[
+                    VisitPlacement(
+                        candidate_id=candidate_id,
+                        planned_start=planned_start,
+                        planned_end=planned_end,
+                        duration_minutes=int(
+                            (planned_end - planned_start).total_seconds() // 60
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def test_visit_must_fit_inside_published_opening_window():
+    packet = _packet(
+        "candidate_garden",
+        "郭庄",
+        origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+        query_id="query_garden",
+        intent_id="intent_garden",
+        opening_window="08:00-17:00",
+    )
+    catalog = _catalog(packet)
+    local_tz = ZoneInfo("Asia/Tokyo")
+
+    with pytest.raises(ItineraryCompositionError, match="outside the published"):
+        validate_placement_skeleton(
+            _single_visit_skeleton(
+                "candidate_garden",
+                planned_start=datetime(2026, 8, 29, 7, 30, tzinfo=local_tz),
+                planned_end=datetime(2026, 8, 29, 9, 0, tzinfo=local_tz),
+            ),
+            catalog,
+        )
+
+    validate_placement_skeleton(
+        _single_visit_skeleton(
+            "candidate_garden",
+            planned_start=datetime(2026, 8, 29, 8, 0, tzinfo=local_tz),
+            planned_end=datetime(2026, 8, 29, 9, 30, tzinfo=local_tz),
+        ),
+        catalog,
+    )
+
+
+def test_visit_rejects_published_weekday_closure():
+    packet = _packet(
+        "candidate_museum",
+        "博物馆",
+        origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+        query_id="query_museum",
+        intent_id="intent_museum",
+        opening_window="09:00-17:00（周一闭馆）",
+    )
+    catalog = _catalog(packet)
+    local_tz = ZoneInfo("Asia/Tokyo")
+
+    with pytest.raises(ItineraryCompositionError, match="published closed day"):
+        validate_placement_skeleton(
+            _single_visit_skeleton(
+                "candidate_museum",
+                planned_start=datetime(2026, 8, 24, 9, 0, tzinfo=local_tz),
+                planned_end=datetime(2026, 8, 24, 10, 30, tzinfo=local_tz),
+            ),
+            catalog,
+        )
 
 
 def test_theme_changes_query_plan_and_museum_exclusion_blocks_fallback():

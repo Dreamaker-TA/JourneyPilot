@@ -26,6 +26,7 @@ from ..entities.intent_spec import (
 )
 from ..entities.request_contract import ClauseDisposition
 from ..models.strict_json_schema import as_strict_schema
+from ..panels.constraint import deterministic_budget_constraints
 from ..utils.json_helpers import safe_parse_json
 
 
@@ -234,10 +235,15 @@ async def normalize_clauses(
         parsed = safe_parse_json(raw, strip_think_tags=True)
         result = RequestContractNormalizationResult.model_validate(parsed)
         _validate_clause_coverage(result, clauses)
-        return _enforce_material_dispositions(result, clauses)
+        return _enforce_deterministic_constraints(
+            _enforce_material_dispositions(result, clauses), clauses
+        )
     except (ValidationError, TypeError, ValueError, RuntimeError):
-        return RequestContractNormalizationResult(
-            clauses=[_fallback_clause(item, controlled_identity) for item in clauses]
+        return _enforce_deterministic_constraints(
+            RequestContractNormalizationResult(
+                clauses=[_fallback_clause(item, controlled_identity) for item in clauses]
+            ),
+            clauses,
         )
 
 
@@ -269,6 +275,41 @@ def _enforce_material_dispositions(
             )
         else:
             normalized.append(draft)
+    return RequestContractNormalizationResult(clauses=normalized)
+
+
+def _enforce_deterministic_constraints(
+    result: RequestContractNormalizationResult,
+    clauses: List[SourceClause],
+) -> RequestContractNormalizationResult:
+    """Restore numeric constraints that cannot safely depend on model output.
+
+    The normalization model still owns semantic interpretation.  Explicit
+    numeric budget caps are different: losing one changes whether the produced
+    trip is allowed at all.  Add only a missing cap and preserve any richer
+    model-authored budget constraint.
+    """
+
+    normalized: List[NormalizedClauseDraft] = []
+    for source, draft in zip(clauses, result.clauses):
+        deterministic = deterministic_budget_constraints(source.source_text)
+        has_budget = any(item.category == "budget_cap" for item in draft.constraints)
+        if not deterministic or has_budget:
+            normalized.append(draft)
+            continue
+        normalized.append(
+            draft.model_copy(
+                update={
+                    "constraints": [
+                        *draft.constraints,
+                        *[
+                            NormalizedConstraintDraft.model_validate(item)
+                            for item in deterministic
+                        ],
+                    ]
+                }
+            )
+        )
     return RequestContractNormalizationResult(clauses=normalized)
 
 

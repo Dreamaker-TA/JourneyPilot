@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import (
@@ -72,6 +73,77 @@ from .trip_highlights import derive_trip_highlights
 from .intent_coverage import IntentContractSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+_OPENING_INTERVAL_RE = re.compile(
+    r"(?<!\d)(\d{1,2}):(\d{2})\s*(?:-|–|—|至|~|～)\s*"
+    r"(\d{1,2}):(\d{2})(?!\d)"
+)
+_WEEKDAY_INDEX = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "五": 4,
+    "六": 5,
+    "日": 6,
+    "天": 6,
+}
+
+
+def _opening_intervals_minutes(value: Optional[str]) -> list[tuple[int, int]]:
+    intervals: list[tuple[int, int]] = []
+    for match in _OPENING_INTERVAL_RE.finditer(value or ""):
+        start_hour, start_minute, end_hour, end_minute = map(int, match.groups())
+        if (
+            start_hour > 23
+            or start_minute > 59
+            or end_hour > 24
+            or end_minute > 59
+            or (end_hour == 24 and end_minute != 0)
+        ):
+            continue
+        start = start_hour * 60 + start_minute
+        end = end_hour * 60 + end_minute
+        if end > start:
+            intervals.append((start, end))
+    return intervals
+
+
+def _closed_weekdays(value: Optional[str]) -> set[int]:
+    return {
+        _WEEKDAY_INDEX[weekday]
+        for weekday in re.findall(
+            r"(?:周|星期)([一二三四五六日天])\s*(?:闭馆|闭园|休息|不开放)",
+            value or "",
+        )
+    }
+
+
+def _validate_visit_opening_window(
+    *, day: "DayComposition", placement: "VisitPlacement", candidate: VisitCandidate
+) -> None:
+    opening_window = candidate.opening_window
+    if not opening_window or placement.planned_start is None or placement.planned_end is None:
+        return
+    if day.date.weekday() in _closed_weekdays(opening_window):
+        raise ItineraryCompositionError(
+            f"day {day.day_id} places {candidate.name} on a published closed day "
+            f"({opening_window}); move it to an open day or choose another candidate"
+        )
+    intervals = _opening_intervals_minutes(opening_window)
+    if not intervals:
+        return
+    start = placement.planned_start.hour * 60 + placement.planned_start.minute
+    end = placement.planned_end.hour * 60 + placement.planned_end.minute
+    if any(start >= opens and end <= closes for opens, closes in intervals):
+        return
+    raise ItineraryCompositionError(
+        f"day {day.day_id} places {candidate.name} at "
+        f"{placement.planned_start:%H:%M}-{placement.planned_end:%H:%M}, outside "
+        f"the published opening window {opening_window}; move the whole visit inside "
+        "one published interval or choose another candidate"
+    )
 
 
 def _total_budget_cap_cny(anchors: Optional[list[UserInputAnchor]]) -> Optional[float]:
@@ -934,6 +1006,11 @@ def validate_placement_skeleton(
                     raise ItineraryCompositionError(
                         "placement skeleton visit references another candidate kind"
                     )
+                _validate_visit_opening_window(
+                    day=day,
+                    placement=placement,
+                    candidate=candidate,
+                )
                 physical_count += 1
                 physical_placements.append((position, placement))
                 placed_physical_kinds.add("visit")

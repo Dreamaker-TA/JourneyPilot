@@ -213,11 +213,13 @@ Tests:
 - `agent_behavior/test_intent_control_plane.py::test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents`
 
 ### INV-INTENT-005：Intent 与 Constraint 只归一化一次
-Owner: `agents/scope/request_contract_normalizer.py`
+Owner: `agents/scope/request_contract_normalizer.py`、`services/intent_normalization.py`
 Enforced by: 同一批 clause 的一次结构化调用同时产生 Intent 与 Constraint draft；
-Brief、Planner 与 Worker 只消费结构化合同，不再解释原始要求
+显式数值预算由确定性规则补齐，不能因模型超时、漏抽取而消失；Brief、Planner 与 Worker
+只消费结构化合同，不再解释原始要求
 Tests:
 - `agent_behavior/test_intent_control_plane.py::test_contract_and_capability_plan_are_deterministic_and_cover_hard_intents`
+- `agent_behavior/test_intent_control_plane.py::test_numeric_budget_cap_survives_model_omission`
 
 ### INV-RESEARCH-001：Intent Query 先于 Generic Fallback
 Owner: `services/research_query_planner.py`、`services/fallback_query_policy.py`、各 Research Worker
@@ -277,6 +279,14 @@ ADR: [ADR-0012](adr/ADR-0012-intent-fidelity-and-controlled-exploration.md)
 Tests:
 - `agent_behavior/test_intent_research_ranking_selection.py::test_selected_capabilities_exclude_alternatives_from_composition_pool`
 - `agent_behavior/test_intent_composition_fidelity.py::test_slot_backfill_prefers_pending_intent_and_respects_daily_maximum`
+
+### INV-COMPOSITION-002：可解析的开放时间是 Placement 硬边界
+Owner: `entities/itinerary_composition_v2.py`
+Enforced by: 有正式起止时间的景点必须完整落在一个 Provider 开放时段内；命中明确闭馆日
+时拒绝 Skeleton 并把可操作错误交给组合修复。无法可靠解析的自由文本不伪装成确定事实
+Tests:
+- `agent_behavior/test_intent_research_ranking_selection.py::test_visit_must_fit_inside_published_opening_window`
+- `agent_behavior/test_intent_research_ranking_selection.py::test_visit_rejects_published_weekday_closure`
 
 ### INV-FIDELITY-001：硬禁止不得以预算耗尽为由降级
 Owner: `agents/orchestrator/intent_fidelity_gate.py`、`services/intent_verification.py`
