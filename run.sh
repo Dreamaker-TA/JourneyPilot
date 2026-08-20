@@ -192,9 +192,20 @@ _collect_descendants() {
 # comm 字段可能含空格和括号, 所以从最后一个 ") " 之后开始数: 那里是第 3 字段。
 _pid_start_time() {
   local pid="$1" rest
-  rest="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
-  rest="${rest##*) }"
-  awk '{print $20}' <<< "$rest"
+  if [[ -r "/proc/$pid/stat" ]]; then
+    rest="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    rest="${rest##*) }"
+    awk '{print $20}' <<< "$rest"
+    return
+  fi
+
+  # macOS has no /proc.  lstart is the kernel-reported process birth time and
+  # stays stable for the life of the PID, so it provides the same identity check
+  # for the local development platform this script explicitly supports.
+  rest="$(ps -o lstart= -p "$pid" 2>/dev/null)" || return 1
+  rest="$(awk '{$1=$1; print}' <<< "$rest")"
+  [[ -n "$rest" ]] || return 1
+  printf '%s\n' "$rest"
 }
 
 # 这个 PID 是不是当初被登记的那一个 (存活 + 启动时刻一致)。
@@ -226,28 +237,51 @@ stop_tree() {
     return 1
   fi
 
-  local -A started=()
-  local -A signalled=()
-  local pid start waited alive
+  # macOS still ships Bash 3.2, which has indexed but not associative arrays.
+  # Keep PID and start-time arrays aligned and use a tiny linear membership
+  # check; these trees contain only a handful of wrapper processes.
+  # Index zero is an inert sentinel.  Bash 3.2 with ``set -u`` treats expansion
+  # of a declared-but-empty array as an unbound-variable error.
+  local -a started_pids=("")
+  local -a started_times=("")
+  local -a signalled_pids=("")
+  local pid start waited alive index known_pid found
 
   waited=0
   while :; do
     for pid in $(_collect_descendants "$root"); do
-      if [[ -z "${started[$pid]:-}" ]]; then
+      found=0
+      for known_pid in "${started_pids[@]}"; do
+        if [[ "$known_pid" == "$pid" ]]; then
+          found=1
+          break
+        fi
+      done
+      if (( found == 0 )); then
         start="$(_pid_start_time "$pid")" || continue
-        started["$pid"]="$start"
+        started_pids+=("$pid")
+        started_times+=("$start")
       fi
     done
-    for pid in "${!started[@]}"; do
-      if [[ -z "${signalled[$pid]:-}" ]] \
-        && _pid_is_same_process "$pid" "${started[$pid]}"; then
-        signalled["$pid"]=1
+    for index in "${!started_pids[@]}"; do
+      pid="${started_pids[$index]}"
+      found=0
+      for known_pid in "${signalled_pids[@]}"; do
+        if [[ "$known_pid" == "$pid" ]]; then
+          found=1
+          break
+        fi
+      done
+      if (( found == 0 )) \
+        && _pid_is_same_process "$pid" "${started_times[$index]}"; then
+        signalled_pids+=("$pid")
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
     alive=0
-    for pid in "${!started[@]}"; do
-      if _pid_is_same_process "$pid" "${started[$pid]}"; then
+    for index in "${!started_pids[@]}"; do
+      if _pid_is_same_process \
+        "${started_pids[$index]}" "${started_times[$index]}"; then
         alive=1
         break
       fi
@@ -262,8 +296,9 @@ stop_tree() {
     waited=$(( waited + 1 ))
   done
 
-  for pid in "${!started[@]}"; do
-    if _pid_is_same_process "$pid" "${started[$pid]}"; then
+  for index in "${!started_pids[@]}"; do
+    pid="${started_pids[$index]}"
+    if _pid_is_same_process "$pid" "${started_times[$index]}"; then
       kill -KILL "$pid" 2>/dev/null || true
     fi
   done
@@ -274,15 +309,24 @@ stop_tree() {
   waited=0
   while (( waited < 20 )); do
     for pid in $(_collect_descendants "$root"); do
-      if [[ -z "${started[$pid]:-}" ]]; then
+      found=0
+      for known_pid in "${started_pids[@]}"; do
+        if [[ "$known_pid" == "$pid" ]]; then
+          found=1
+          break
+        fi
+      done
+      if (( found == 0 )); then
         start="$(_pid_start_time "$pid")" || continue
-        started["$pid"]="$start"
+        started_pids+=("$pid")
+        started_times+=("$start")
         kill -KILL "$pid" 2>/dev/null || true
       fi
     done
     alive=0
-    for pid in "${!started[@]}"; do
-      if _pid_is_same_process "$pid" "${started[$pid]}"; then
+    for index in "${!started_pids[@]}"; do
+      if _pid_is_same_process \
+        "${started_pids[$index]}" "${started_times[$index]}"; then
         alive=1
         break
       fi

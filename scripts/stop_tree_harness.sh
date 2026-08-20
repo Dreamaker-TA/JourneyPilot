@@ -33,7 +33,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/run.sh"
 set +e
 
-HARNESS_SHELL=$$
 PASSED=0
 FAILED=0
 SPAWNED=()
@@ -72,7 +71,9 @@ cleanup() {
   # Only the top-level shell cleans up: an EXIT trap also fires in every
   # subshell, and a subshell reaping the harness's own fixtures mid-run would
   # make the results meaningless.
-  [[ "$BASHPID" == "$HARNESS_SHELL" ]] || return 0
+  # BASHPID is unavailable in macOS Bash 3.2.  BASH_SUBSHELL is portable to
+  # that version and is zero only in this harness's top-level shell.
+  (( BASH_SUBSHELL == 0 )) || return 0
   local pid
   for pid in "${SPAWNED[@]:-}"; do
     if [[ -n "$pid" ]]; then
