@@ -236,12 +236,20 @@ async def normalize_clauses(
         result = RequestContractNormalizationResult.model_validate(parsed)
         _validate_clause_coverage(result, clauses)
         return _enforce_deterministic_constraints(
-            _enforce_material_dispositions(result, clauses), clauses
+            _enforce_deterministic_intents(
+                _enforce_material_dispositions(result, clauses), clauses
+            ),
+            clauses,
         )
     except (ValidationError, TypeError, ValueError, RuntimeError):
         return _enforce_deterministic_constraints(
-            RequestContractNormalizationResult(
-                clauses=[_fallback_clause(item, controlled_identity) for item in clauses]
+            _enforce_deterministic_intents(
+                RequestContractNormalizationResult(
+                    clauses=[
+                        _fallback_clause(item, controlled_identity) for item in clauses
+                    ]
+                ),
+                clauses,
             ),
             clauses,
         )
@@ -307,6 +315,83 @@ def _enforce_deterministic_constraints(
                             for item in deterministic
                         ],
                     ]
+                }
+            )
+        )
+    return RequestContractNormalizationResult(clauses=normalized)
+
+
+_EXPLICIT_MUST_INCLUDE = re.compile(
+    r"^(?:请)?(?:务必|必须|一定要)(?:在行程中)?"
+    r"(?:安排|游览|参观|去|打卡)\s*(?P<values>.+)$",
+    re.IGNORECASE,
+)
+_EXPLICIT_ITEM_SEPARATOR = re.compile(r"[、,，]+")
+
+
+def _explicit_must_include_terms(text: str) -> list[str]:
+    """Return independently enforceable items from an explicit include clause.
+
+    ``、`` and commas are unambiguous list separators in this contract.  Plain
+    Chinese ``和`` is deliberately not split because it is also part of proper
+    names such as ``颐和园``.
+    """
+
+    match = _EXPLICIT_MUST_INCLUDE.match(text.strip())
+    if match is None:
+        return []
+    terms = [
+        item.strip(" \t。；;！!？?")
+        for item in _EXPLICIT_ITEM_SEPARATOR.split(match.group("values"))
+    ]
+    terms = [item for item in terms if item and len(item) <= 80]
+    return list(dict.fromkeys(terms))
+
+
+def _enforce_deterministic_intents(
+    result: RequestContractNormalizationResult,
+    clauses: List[SourceClause],
+) -> RequestContractNormalizationResult:
+    """Split explicit named must-dos into one hard contract item each.
+
+    A model may classify an explicit list of required items as a generic trip
+    objective.  An objective is satisfied by the existence of a trip, so that
+    mistake turns every listed requirement into an optional alternative.  The
+    source grammar is explicit enough to decide without semantic guessing: each
+    listed item becomes its own ``MUST_INCLUDE`` intent and therefore receives
+    its own stable ID, candidate match, selection role, composition rule, and
+    fidelity verdict.
+    """
+
+    normalized: List[NormalizedClauseDraft] = []
+    for source, draft in zip(clauses, result.clauses):
+        terms = _explicit_must_include_terms(source.source_text)
+        if not terms:
+            normalized.append(draft)
+            continue
+        preserved = [
+            intent
+            for intent in draft.intents
+            if intent.kind not in {IntentKind.OBJECTIVE, IntentKind.MUST_INCLUDE}
+        ]
+        explicit = [
+            _intent(
+                IntentKind.MUST_INCLUDE,
+                _target_for_text(term),
+                IntentStrength.HARD,
+                CategoryIntentValue(categories=[term]),
+                f"必须安排{term}",
+                ["research", "admission", "ranking", "composition"],
+                VerificationMode.MIXED,
+            )
+            for term in terms
+        ]
+        normalized.append(
+            draft.model_copy(
+                update={
+                    "disposition": ClauseDisposition.MAPPED_TO_INTENT,
+                    "reason_code": None,
+                    "intents": _dedupe_drafts([*preserved, *explicit]),
                 }
             )
         )
@@ -523,6 +608,11 @@ def _target_for_text(text: str) -> IntentTarget:
         return IntentTarget.DINING
     if any(token in text for token in ("酒店", "住宿", "房间", "民宿")):
         return IntentTarget.LODGING
+    if any(
+        token in text
+        for token in ("高铁", "火车", "航班", "飞机", "去程", "返程", "往返")
+    ):
+        return IntentTarget.LONG_DISTANCE_TRANSPORT
     if any(token in text for token in ("交通", "地铁", "公交", "步行", "打车")):
         return IntentTarget.LOCAL_TRANSPORT
     return IntentTarget.VISIT

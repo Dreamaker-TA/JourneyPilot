@@ -340,6 +340,94 @@ async def test_numeric_budget_cap_survives_model_omission():
     assert budget.params.per == "total"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_text", "expected_terms"),
+    [
+        ("必须安排西湖、郭庄", ["西湖", "郭庄"]),
+        ("请务必参观故宫博物院、天坛公园", ["故宫博物院", "天坛公园"]),
+        ("一定要打卡良渚博物院，京杭大运河博物馆", ["良渚博物院", "京杭大运河博物馆"]),
+    ],
+)
+async def test_explicit_required_items_replace_a_generic_model_objective(
+    source_text, expected_terms
+):
+    clause = _clause(0, source_text)
+
+    class _Model:
+        async def ainvoke(self, *_args, **_kwargs):
+            return json.dumps(
+                {
+                    "clauses": [
+                        {
+                            "clause_id": clause.clause_id,
+                            "disposition": "mapped_to_intent",
+                            "reason_code": None,
+                            "intents": [
+                                {
+                                    "kind": "objective",
+                                    "target": "trip",
+                                    "strength": "hard",
+                                    "priority": 90,
+                                    "value": {
+                                        "value_type": "scalar",
+                                        "value": source_text,
+                                    },
+                                    "verification_mode": "mixed",
+                                    "impact_stages": [
+                                        "research",
+                                        "composition",
+                                        "projection",
+                                    ],
+                                    "public_summary": source_text,
+                                }
+                            ],
+                            "constraints": [],
+                        }
+                    ]
+                }
+            )
+
+    result = await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=_Model()
+    )
+
+    intents = result.clauses[0].intents
+    assert [intent.kind for intent in intents] == [
+        IntentKind.MUST_INCLUDE,
+        IntentKind.MUST_INCLUDE,
+    ]
+    assert [intent.target for intent in intents] == [
+        IntentTarget.VISIT,
+        IntentTarget.VISIT,
+    ]
+    assert [intent.value.categories for intent in intents] == [
+        [term] for term in expected_terms
+    ]
+    assert [intent.public_summary for intent in intents] == [
+        f"必须安排{term}" for term in expected_terms
+    ]
+    assert all("ranking" in intent.impact_stages for intent in intents)
+
+
+@pytest.mark.asyncio
+async def test_required_transport_service_gets_the_transport_domain():
+    clause = _clause(0, "必须安排去返程高铁")
+
+    class _BrokenModel:
+        async def ainvoke(self, *_args, **_kwargs):
+            raise RuntimeError("normalizer unavailable")
+
+    result = await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=_BrokenModel()
+    )
+
+    [intent] = result.clauses[0].intents
+    assert intent.kind is IntentKind.MUST_INCLUDE
+    assert intent.target is IntentTarget.LONG_DISTANCE_TRANSPORT
+    assert intent.value.categories == ["去返程高铁"]
+
+
 def test_include_exclude_conflict_blocks_the_contract():
     common = {
         "target": IntentTarget.VISIT,

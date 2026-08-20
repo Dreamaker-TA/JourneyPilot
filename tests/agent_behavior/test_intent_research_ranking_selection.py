@@ -12,7 +12,10 @@ from travel_agent.entities.candidate_intent import (
     CandidateIntentMatch,
     IntentMatchStatus,
 )
-from travel_agent.entities.candidate_selection import SelectionPolicy
+from travel_agent.entities.candidate_selection import (
+    CandidateSelectionRole,
+    SelectionPolicy,
+)
 from travel_agent.entities.delivery_bundle import (
     CandidateAdmissionResult,
     EntityRef,
@@ -756,6 +759,85 @@ def test_admission_is_stable_while_ranking_and_selection_change_with_theme():
     assert [
         result.candidate_id for result in composition_catalog.admission_results
     ] == ["candidate_arch"]
+
+
+def test_each_required_place_is_promoted_to_required_primary():
+    west_lake = _intent(
+        "intent_west_lake",
+        "西湖",
+        kind=IntentKind.MUST_INCLUDE,
+        strength=IntentStrength.HARD,
+        verification=VerificationMode.MIXED,
+    )
+    guozhuang = _intent(
+        "intent_guozhuang",
+        "郭庄",
+        kind=IntentKind.MUST_INCLUDE,
+        strength=IntentStrength.HARD,
+        verification=VerificationMode.MIXED,
+    )
+    spec = _spec(west_lake, guozhuang)
+    catalog = _catalog(
+        _packet(
+            "candidate_west_lake",
+            "西湖风景名胜区",
+            origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+            query_id="query_west_lake",
+            intent_id=west_lake.intent_id,
+        ),
+        _packet(
+            "candidate_guozhuang",
+            "郭庄",
+            origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+            query_id="query_guozhuang",
+            intent_id=guozhuang.intent_id,
+        ),
+    )
+    matches = [
+        CandidateIntentMatch(
+            candidate_id="candidate_west_lake",
+            intent_id=west_lake.intent_id,
+            status=IntentMatchStatus.MATCHED,
+            score=1,
+            method="deterministic",
+            supporting_fact_assertion_ids=["fact_candidate_west_lake"],
+            supporting_source_record_ids=["source_candidate_west_lake"],
+            reason_code="category_term_match",
+        ),
+        CandidateIntentMatch(
+            candidate_id="candidate_guozhuang",
+            intent_id=guozhuang.intent_id,
+            status=IntentMatchStatus.MATCHED,
+            score=1,
+            method="deterministic",
+            supporting_fact_assertion_ids=["fact_candidate_guozhuang"],
+            supporting_source_record_ids=["source_candidate_guozhuang"],
+            reason_code="category_term_match",
+        ),
+    ]
+
+    ranking = rank_candidates(catalog=catalog, intent_spec=spec, matches=matches)
+    selection = build_candidate_selection_plan(
+        catalog=catalog,
+        intent_spec=spec,
+        ranking_scores=ranking,
+        duration_days=1,
+        destination_count=1,
+    )
+
+    required = {
+        entry.candidate_id: entry
+        for entry in selection.entries
+        if entry.role is CandidateSelectionRole.REQUIRED_PRIMARY
+    }
+    assert set(required) == {"candidate_west_lake", "candidate_guozhuang"}
+    assert required["candidate_west_lake"].covered_intent_ids == [
+        west_lake.intent_id
+    ]
+    assert required["candidate_guozhuang"].covered_intent_ids == [
+        guozhuang.intent_id
+    ]
+    assert selection.uncovered_intent_ids == []
 
 
 def test_selection_never_promotes_a_gate_rejected_candidate():
