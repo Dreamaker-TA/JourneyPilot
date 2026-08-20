@@ -308,8 +308,10 @@ async def test_material_clause_cannot_be_silently_classified_as_background():
     result = await normalize_clauses(
         clauses=[clause], controlled_identity=_identity(), llm=_Model()
     )
-    assert result.clauses[0].disposition is ClauseDisposition.UNRESOLVED
-    assert result.clauses[0].reason_code == "material_clause_not_mapped"
+    assert result.clauses[0].disposition is ClauseDisposition.MAPPED_TO_INTENT
+    [intent] = result.clauses[0].intents
+    assert intent.kind is IntentKind.OUTPUT_REQUIREMENT
+    assert intent.value.required_field == "每个景点都要说明选择理由"
 
 
 @pytest.mark.asyncio
@@ -418,7 +420,7 @@ def test_full_trip_sentence_does_not_treat_party_size_as_nightly_budget():
         ("一定要打卡良渚博物院，京杭大运河博物馆", ["良渚博物院", "京杭大运河博物馆"]),
     ],
 )
-async def test_explicit_required_items_replace_a_generic_model_objective(
+async def test_invalid_generic_model_objective_uses_required_items_fallback(
     source_text, expected_terms
 ):
     clause = _clause(0, source_text)
@@ -477,6 +479,68 @@ async def test_explicit_required_items_replace_a_generic_model_objective(
         f"必须安排{term}" for term in expected_terms
     ]
     assert all("ranking" in intent.impact_stages for intent in intents)
+
+
+@pytest.mark.asyncio
+async def test_valid_model_intents_are_returned_without_rule_rewriting():
+    clause = _clause(0, "必须安排甲景点、乙景点")
+
+    class _Model:
+        async def ainvoke(self, *_args, **_kwargs):
+            return json.dumps(
+                {
+                    "clauses": [
+                        {
+                            "clause_id": clause.clause_id,
+                            "disposition": "mapped_to_intent",
+                            "reason_code": None,
+                            "intents": [
+                                {
+                                    "kind": "must_include",
+                                    "target": "visit",
+                                    "strength": "hard",
+                                    "priority": 73,
+                                    "value": {
+                                        "value_type": "category",
+                                        "categories": ["甲景点"],
+                                    },
+                                    "verification_mode": "mixed",
+                                    "impact_stages": ["research", "ranking"],
+                                    "public_summary": "甲景点必须保留",
+                                },
+                                {
+                                    "kind": "must_include",
+                                    "target": "visit",
+                                    "strength": "hard",
+                                    "priority": 74,
+                                    "value": {
+                                        "value_type": "category",
+                                        "categories": ["乙景点"],
+                                    },
+                                    "verification_mode": "mixed",
+                                    "impact_stages": ["research", "ranking"],
+                                    "public_summary": "乙景点必须保留",
+                                },
+                            ],
+                            "constraints": [],
+                        }
+                    ]
+                }
+            )
+
+    result = await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=_Model()
+    )
+
+    assert [intent.priority for intent in result.clauses[0].intents] == [73, 74]
+    assert [intent.public_summary for intent in result.clauses[0].intents] == [
+        "甲景点必须保留",
+        "乙景点必须保留",
+    ]
+    assert [intent.impact_stages for intent in result.clauses[0].intents] == [
+        ["research", "ranking"],
+        ["research", "ranking"],
+    ]
 
 
 @pytest.mark.asyncio

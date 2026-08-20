@@ -203,6 +203,9 @@ def _normalization_prompt(
         "仅把本次任务要求写成 Intent；目的地、日期、出发地等已经存在于 controlled identity 的事实标记为 controlled_identity。"
         "旅行安全、预算、交通、住宿和行动能力要求同时写入 constraints；数量、频率、主题、排除、"
         "顺序、输出字段和多方案要求属于 Intent。冲突和无法可靠理解的指令标记 unresolved，不得猜测。"
+        "明确要求必须包含多个命名事项时，每个事项分别输出一个 hard MUST_INCLUDE Intent，不得合并成 objective。"
+        "预算金额只能来自含预算、费用、货币或上限语义的原文，并原样保留 amount、currency、per。"
+        "未写数量的备选方案表示主方案之外至少一个备选，输出 ALTERNATIVES 且 count 不小于 2。"
         "source_kind 只用于确定优先级，不得改写。只输出符合 JSON Schema 的对象。"
     )
     user = json.dumps(
@@ -239,29 +242,15 @@ async def normalize_clauses(
         parsed = safe_parse_json(raw, strip_think_tags=True)
         result = RequestContractNormalizationResult.model_validate(parsed)
         _validate_clause_coverage(result, clauses)
-        return _enforce_deterministic_constraints(
-            _enforce_deterministic_intents(
-                _enforce_material_dispositions(result, clauses), clauses
-            ),
-            clauses,
-        )
+        _validate_model_contract(result, clauses)
+        return result
     except (OpenAIError, ValidationError, TypeError, ValueError, RuntimeError) as exc:
         logger.warning(
             "request contract model normalization failed; using deterministic fallback "
             "| error_type=%s",
             type(exc).__name__,
         )
-        return _enforce_deterministic_constraints(
-            _enforce_deterministic_intents(
-                RequestContractNormalizationResult(
-                    clauses=[
-                        _fallback_clause(item, controlled_identity) for item in clauses
-                    ]
-                ),
-                clauses,
-            ),
-            clauses,
-        )
+        return _fallback_normalization(clauses, controlled_identity)
 
 
 def _validate_clause_coverage(
@@ -273,40 +262,28 @@ def _validate_clause_coverage(
         raise ValueError("normalizer must return every clause once and in source order")
 
 
-def _enforce_material_dispositions(
-    result: RequestContractNormalizationResult,
-    clauses: List[SourceClause],
+def _fallback_normalization(
+    clauses: List[SourceClause], controlled_identity: Dict[str, object]
 ) -> RequestContractNormalizationResult:
-    normalized: List[NormalizedClauseDraft] = []
-    for source, draft in zip(clauses, result.clauses):
-        if is_material_clause(source.source_text) and draft.disposition in {
-            ClauseDisposition.BACKGROUND_CONTEXT,
-            ClauseDisposition.NON_ACTIONABLE,
-        }:
-            normalized.append(
-                NormalizedClauseDraft(
-                    clause_id=draft.clause_id,
-                    disposition=ClauseDisposition.UNRESOLVED,
-                    reason_code="material_clause_not_mapped",
-                )
-            )
-        else:
-            normalized.append(draft)
-    return RequestContractNormalizationResult(clauses=normalized)
+    """Build the minimum deterministic contract after model failure only."""
+
+    fallback = RequestContractNormalizationResult(
+        clauses=[_fallback_clause(item, controlled_identity) for item in clauses]
+    )
+    return _enforce_deterministic_constraints(
+        _enforce_deterministic_intents(fallback, clauses), clauses
+    )
 
 
 def _enforce_deterministic_constraints(
     result: RequestContractNormalizationResult,
     clauses: List[SourceClause],
 ) -> RequestContractNormalizationResult:
-    """Restore numeric constraints that cannot safely depend on model output.
+    """Restore numeric constraints in the deterministic fallback path.
 
-    The normalization model still owns semantic interpretation.  Explicit
-    numeric budget caps are different: losing or changing one alters whether
-    the produced trip is allowed at all.  When the source grammar yields a cap,
-    it replaces model-authored budget values for that clause.  Numeric budget
-    values attached to source text with no monetary cue are discarded instead
-    of letting a party size or day count become a price.
+    This function is never applied to a valid model result.  It only hardens the
+    fallback drafts built by :func:`_fallback_normalization` after the model call,
+    schema validation, or contract validation has failed.
     """
 
     normalized: List[NormalizedClauseDraft] = []
@@ -325,22 +302,6 @@ def _enforce_deterministic_constraints(
             ]
         else:
             source_text = source.source_text.casefold()
-            monetary_cues = (
-                "预算",
-                "费用",
-                "花费",
-                "开销",
-                "人民币",
-                "cny",
-                "元",
-                "块",
-                "以内",
-                "不超过",
-                "不高于",
-                "至多",
-                "上限",
-                "budget",
-            )
             constraints = [
                 *non_budget,
                 *[
@@ -349,7 +310,7 @@ def _enforce_deterministic_constraints(
                     if item.category == "budget_cap"
                     and (
                         item.params.amount is None
-                        or any(cue in source_text for cue in monetary_cues)
+                        or any(cue in source_text for cue in _MONETARY_CUES)
                     )
                 ],
             ]
@@ -370,6 +331,29 @@ _EXPLICIT_MUST_INCLUDE = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_ITEM_SEPARATOR = re.compile(r"[、,，]+")
+_MONETARY_CUES = (
+    "预算",
+    "费用",
+    "花费",
+    "开销",
+    "人民币",
+    "cny",
+    "元",
+    "块",
+    "以内",
+    "不超过",
+    "不高于",
+    "至多",
+    "上限",
+    "budget",
+)
+_ALTERNATIVE_REQUEST_CUES = (
+    "备选方案",
+    "备用方案",
+    "替代方案",
+    "alternative option",
+    "backup option",
+)
 
 
 def _explicit_must_include_terms(text: str) -> list[str]:
@@ -391,19 +375,90 @@ def _explicit_must_include_terms(text: str) -> list[str]:
     return list(dict.fromkeys(terms))
 
 
+def _validate_model_contract(
+    result: RequestContractNormalizationResult,
+    clauses: List[SourceClause],
+) -> None:
+    """Reject a structurally valid model answer that violates source invariants.
+
+    This validator never authors or rewrites an intent.  Semantic normalization
+    belongs to the model; these checks only decide whether its structured answer
+    is safe to accept.  A rejected result enters the isolated deterministic
+    fallback path as a whole, so model and rule drafts are never mixed.
+    """
+
+    for source, draft in zip(clauses, result.clauses):
+        if is_material_clause(source.source_text) and draft.disposition in {
+            ClauseDisposition.BACKGROUND_CONTEXT,
+            ClauseDisposition.NON_ACTIONABLE,
+        }:
+            raise ValueError("model dropped a material request clause")
+
+        terms = _explicit_must_include_terms(source.source_text)
+        if terms:
+            available = {
+                index: intent
+                for index, intent in enumerate(draft.intents)
+                if intent.kind is IntentKind.MUST_INCLUDE
+                and intent.strength is IntentStrength.HARD
+                and isinstance(intent.value, CategoryIntentValue)
+            }
+            for term in terms:
+                normalized_term = term.casefold()
+                match_index = next(
+                    (
+                        index
+                        for index, intent in available.items()
+                        if any(
+                            normalized_term in category.casefold()
+                            or category.casefold() in normalized_term
+                            for category in intent.value.categories
+                        )
+                    ),
+                    None,
+                )
+                if match_index is None:
+                    raise ValueError(
+                        "model did not emit one hard must-include intent per required item"
+                    )
+                available.pop(match_index)
+
+        deterministic_budget = deterministic_budget_constraints(source.source_text)
+        if deterministic_budget:
+            expected = deterministic_budget[0]["params"]
+            if not any(
+                constraint.category == "budget_cap"
+                and constraint.params.amount == expected["amount"]
+                and str(constraint.params.currency or "").upper()
+                == str(expected["currency"]).upper()
+                and constraint.params.per == expected["per"]
+                for constraint in draft.constraints
+            ):
+                raise ValueError("model changed or omitted an explicit numeric budget cap")
+
+        source_text = source.source_text.casefold()
+        if not any(cue in source_text for cue in _MONETARY_CUES) and any(
+            constraint.category == "budget_cap"
+            and constraint.params.amount is not None
+            for constraint in draft.constraints
+        ):
+            raise ValueError("model inferred a numeric budget from non-monetary text")
+
+        if any(cue in source_text for cue in _ALTERNATIVE_REQUEST_CUES) and not any(
+            intent.kind is IntentKind.ALTERNATIVES for intent in draft.intents
+        ):
+            raise ValueError("model omitted an explicit alternative request")
+
+
 def _enforce_deterministic_intents(
     result: RequestContractNormalizationResult,
     clauses: List[SourceClause],
 ) -> RequestContractNormalizationResult:
-    """Split explicit named must-dos into one hard contract item each.
+    """Split explicit named must-dos in the deterministic fallback path.
 
-    A model may classify an explicit list of required items as a generic trip
-    objective.  An objective is satisfied by the existence of a trip, so that
-    mistake turns every listed requirement into an optional alternative.  The
-    source grammar is explicit enough to decide without semantic guessing: each
-    listed item becomes its own ``MUST_INCLUDE`` intent and therefore receives
-    its own stable ID, candidate match, selection role, composition rule, and
-    fidelity verdict.
+    A valid model result is returned unchanged.  This grammar is used only after
+    model/schema/contract failure so the degraded run still gives each listed
+    item its own stable ID, candidate match, selection role, and fidelity verdict.
     """
 
     normalized: List[NormalizedClauseDraft] = []
@@ -577,13 +632,7 @@ def _fallback_clause(
             )
     elif any(
         token in lowered
-        for token in (
-            "备选方案",
-            "备用方案",
-            "替代方案",
-            "alternative option",
-            "backup option",
-        )
+        for token in _ALTERNATIVE_REQUEST_CUES
     ):
         # A singular request for an alternative means one primary plus one
         # fallback option.  Unlike the numbered grammar above there is no count
