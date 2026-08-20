@@ -281,7 +281,10 @@ def _provider_extra_body(
     if control in ("deepseek", "all_dialects"):
         body["thinking"] = {"type": "disabled"}
     if control in ("openrouter", "all_dialects"):
-        body["reasoning"] = {"enabled": False}
+        # OpenRouter 当前统一方言用 effort="none" 关闭 reasoning。旧的
+        # enabled=false 会被部分模型忽略，结构化提取可能把整个 completion 上限都耗在
+        # reasoning_tokens，最后没有正文可解析。
+        body["reasoning"] = {"effort": "none"}
     if capabilities.token_limit_field in ("max_tokens", "both"):
         body["max_tokens"] = max_tokens
     return body

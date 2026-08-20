@@ -115,6 +115,48 @@ def _intent(
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supports_native_schema", [False, True])
+async def test_normalizer_projects_one_schema_by_provider_capability(
+    supports_native_schema,
+):
+    clause = _clause(0, "2名成人")
+
+    class _Model:
+        capabilities = SimpleNamespace(
+            supports_json_schema=supports_native_schema
+        )
+
+        def __init__(self):
+            self.response_format = None
+
+        async def ainvoke(self, *_args, **kwargs):
+            self.response_format = kwargs["response_format"]
+            return json.dumps(
+                {
+                    "clauses": [
+                        {
+                            "clause_id": clause.clause_id,
+                            "disposition": "controlled_identity",
+                        }
+                    ]
+                }
+            )
+
+    model = _Model()
+    await normalize_clauses(
+        clauses=[clause], controlled_identity=_identity(), llm=model
+    )
+
+    wrapper = model.response_format["json_schema"]
+    assert wrapper["strict"] is supports_native_schema
+    params_schema = wrapper["schema"]["$defs"]["ConstraintParamsDraft"]
+    if supports_native_schema:
+        assert "amount" in params_schema["required"]
+    else:
+        assert "required" not in params_schema
+
+
 def _contract():
     clauses = [
         _clause(0, "帮我规划杭州行程"),
@@ -339,6 +381,7 @@ async def test_numeric_budget_cap_survives_model_omission():
     )
 
     budget = result.clauses[0].constraints[0]
+    assert result.clauses[0].disposition is ClauseDisposition.MAPPED_TO_CONSTRAINT
     assert budget.category == "budget_cap"
     assert budget.value == "总预算不超过 3000 CNY"
     assert budget.params.amount == 3000
@@ -391,6 +434,7 @@ async def test_party_size_cannot_override_an_explicit_total_budget():
     )
 
     assert result.clauses[0].constraints == []
+    assert result.clauses[1].disposition is ClauseDisposition.MAPPED_TO_CONSTRAINT
     [budget] = result.clauses[1].constraints
     assert budget.value == "总预算不超过 3000 CNY"
     assert budget.params.amount == 3000

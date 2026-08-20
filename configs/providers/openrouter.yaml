@@ -1,8 +1,9 @@
 # OpenRouter 聚合网关。
 #
 # 经 OpenRouter 访问的 DeepSeek 与直连**不是同一份 capability**：
-#   json_schema  —— 网关接受完整 json_schema，不必降级。
-#   reasoning    —— 只读 reasoning 开关；thinking 经代理完全无效
+#   json_schema  —— 是否可用由具体模型与下游共同决定，不能按网关 hostname 保证；
+#                   保守走 json_object，并把调用方的 Pydantic Schema 注入 prompt。
+#   reasoning    —— 只读 reasoning.effort 方言；thinking 经代理完全无效
 #                   （实测 reasoning_tokens 照样 664）。
 #   价格         —— 模型 id 带 `deepseek/` 前缀，价格表里是独立几行
 #                   （config/pricing.py），缓存读价也确实不同。
@@ -16,7 +17,7 @@ models:
   primary: deepseek/deepseek-v4-pro
   fast: deepseek/deepseek-v4-flash
 capabilities:
-  supports_json_schema: true
+  supports_json_schema: false
   supports_json_object: true
   supports_stream_usage: true
   reasoning_control: openrouter

@@ -228,14 +228,15 @@ def test_every_shipped_preset_loads():
 def test_direct_and_proxied_deepseek_get_different_capabilities():
     """同一个模型经不同上游的 capability 不同，而原来的判据是猜 base_url。
 
-    直连拒绝 json_schema 且只读 max_tokens；经 OpenRouter 接受完整 json_schema，
-    并且只有 reasoning 开关有效。判据换成声明之后，模型搬到代理后面不会让开关静默失效。
+    JSON Schema 是模型与具体下游共同决定的能力，不能因为 OpenRouter 网关接受这个
+    参数就承诺端到端执行；两边都走 json_object + schema prompt。它们的 reasoning
+    和 token 字段方言仍不同。
     """
 
     direct = capabilities_for("https://api.deepseek.com")
     proxied = capabilities_for("https://openrouter.ai/api/v1")
     assert direct.supports_json_schema is False
-    assert proxied.supports_json_schema is True
+    assert proxied.supports_json_schema is False
     assert direct.reasoning_control == "deepseek"
     assert proxied.reasoning_control == "openrouter"
 
@@ -274,6 +275,7 @@ def test_reasoning_dialects_follow_the_declaration():
     )
     assert set(direct) == {"thinking", "max_tokens"}
     assert set(proxied) == {"reasoning", "max_tokens"}
+    assert proxied["reasoning"] == {"effort": "none"}
     # 保守档全都发：认不出的那种会被对方忽略，少发一种的代价是开关静默失效。
     assert set(conservative) == {"thinking", "reasoning", "max_tokens"}
 

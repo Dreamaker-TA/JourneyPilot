@@ -98,6 +98,11 @@ class NormalizedClauseDraft(StrictModel):
     def validate_mapping(self) -> "NormalizedClauseDraft":
         if self.disposition is ClauseDisposition.MAPPED_TO_INTENT and not self.intents:
             raise ValueError("mapped clause requires an intent draft")
+        if (
+            self.disposition is ClauseDisposition.MAPPED_TO_CONSTRAINT
+            and not self.constraints
+        ):
+            raise ValueError("constraint-mapped clause requires a constraint draft")
         if self.disposition is not ClauseDisposition.MAPPED_TO_INTENT and self.intents:
             raise ValueError("only mapped clauses may contain intent drafts")
         if (
@@ -204,8 +209,10 @@ def _normalization_prompt(
         "旅行安全、预算、交通、住宿和行动能力要求同时写入 constraints；数量、频率、主题、排除、"
         "顺序、输出字段和多方案要求属于 Intent。冲突和无法可靠理解的指令标记 unresolved，不得猜测。"
         "明确要求必须包含多个命名事项时，每个事项分别输出一个 hard MUST_INCLUDE Intent，不得合并成 objective。"
+        "例如“必须安排甲地、乙地”要输出两个 Intent，两个 category value 分别只含甲地、乙地。"
         "预算金额只能来自含预算、费用、货币或上限语义的原文，并原样保留 amount、currency、per。"
-        "未写数量的备选方案表示主方案之外至少一个备选，输出 ALTERNATIVES 且 count 不小于 2。"
+        "只有约束、没有 Intent 的 clause 使用 mapped_to_constraint；同时含 Intent 和约束时使用 mapped_to_intent。"
+        "明确要求备选方案时输出 hard ALTERNATIVES，target=delivery；未写数量表示主方案之外至少一个备选，count=2。"
         "source_kind 只用于确定优先级，不得改写。只输出符合 JSON Schema 的对象。"
     )
     user = json.dumps(
@@ -225,7 +232,15 @@ async def normalize_clauses(
 ) -> RequestContractNormalizationResult:
     if not clauses:
         raise ValueError("request normalization requires at least one clause")
-    schema = as_strict_schema(RequestContractNormalizationResult.model_json_schema())
+    model_schema = RequestContractNormalizationResult.model_json_schema()
+    capabilities = getattr(llm, "capabilities", None)
+    supports_native_schema = bool(
+        getattr(capabilities, "supports_json_schema", False)
+    )
+    # 原生 Structured Output 要求所有字段 required；json_object 降级则把 Schema
+    # 放进 prompt，此时保留 Pydantic 的可选/default 语义，避免模型把数十个可选字段
+    # 全部展开成 null/[] 并撞上输出上限。两条路径最后都由同一 Pydantic 模型校验。
+    schema = as_strict_schema(model_schema) if supports_native_schema else model_schema
     try:
         raw = await llm.ainvoke(
             _normalization_prompt(clauses, controlled_identity),
@@ -233,7 +248,7 @@ async def normalize_clauses(
                 "type": "json_schema",
                 "json_schema": {
                     "name": "request_contract_normalization",
-                    "strict": True,
+                    "strict": supports_native_schema,
                     "schema": schema,
                 },
             },
@@ -317,9 +332,18 @@ def _enforce_deterministic_constraints(
         if constraints == draft.constraints:
             normalized.append(draft)
             continue
+        disposition = draft.disposition
+        reason_code = draft.reason_code
+        if constraints and not draft.intents:
+            disposition = ClauseDisposition.MAPPED_TO_CONSTRAINT
+            reason_code = None
         normalized.append(
             draft.model_copy(
-                update={"constraints": constraints}
+                update={
+                    "constraints": constraints,
+                    "disposition": disposition,
+                    "reason_code": reason_code,
+                }
             )
         )
     return RequestContractNormalizationResult(clauses=normalized)
@@ -445,7 +469,11 @@ def _validate_model_contract(
             raise ValueError("model inferred a numeric budget from non-monetary text")
 
         if any(cue in source_text for cue in _ALTERNATIVE_REQUEST_CUES) and not any(
-            intent.kind is IntentKind.ALTERNATIVES for intent in draft.intents
+            intent.kind is IntentKind.ALTERNATIVES
+            and intent.strength is IntentStrength.HARD
+            and intent.target is IntentTarget.DELIVERY
+            and isinstance(intent.value, AlternativeIntentValue)
+            for intent in draft.intents
         ):
             raise ValueError("model omitted an explicit alternative request")
 

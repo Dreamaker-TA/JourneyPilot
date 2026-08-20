@@ -16,6 +16,7 @@ REQUEST_CONTRACT_VERSION = "journeypilot.request_contract.v1"
 
 class ClauseDisposition(str, Enum):
     MAPPED_TO_INTENT = "mapped_to_intent"
+    MAPPED_TO_CONSTRAINT = "mapped_to_constraint"
     CONTROLLED_IDENTITY = "controlled_identity"
     BACKGROUND_CONTEXT = "background_context"
     NON_ACTIONABLE = "non_actionable"
