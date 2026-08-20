@@ -50,6 +50,7 @@ from travel_agent.services.candidate_ranking import rank_candidates
 from travel_agent.services.candidate_selection import (
     build_candidate_selection_plan,
     catalog_for_candidate_selection,
+    catalog_for_workspace_materialization,
     selected_candidate_capabilities,
 )
 from travel_agent.services.composition_rule_compiler import compile_composition_rules
@@ -463,6 +464,68 @@ def test_admission_is_stable_while_ranking_and_selection_change_with_theme():
     ] == ["candidate_arch"]
 
 
+def test_selection_never_promotes_a_gate_rejected_candidate():
+    intent = _intent("intent_arch", "contemporary architecture")
+    spec = _spec(intent)
+    catalog = _catalog(
+        _packet(
+            "candidate_rejected",
+            "Unverified architecture candidate",
+            origin=CandidateDiscoveryOrigin.INTENT_QUERY,
+            query_id="query_arch",
+            intent_id=intent.intent_id,
+        )
+    )
+    matches = [
+        CandidateIntentMatch(
+            candidate_id="candidate_rejected",
+            intent_id=intent.intent_id,
+            status=IntentMatchStatus.MATCHED,
+            score=1,
+            method="semantic_batch_evaluation",
+            supporting_fact_assertion_ids=["fact_candidate_rejected"],
+            supporting_source_record_ids=["source_candidate_rejected"],
+            reason_code="semantic_match",
+        )
+    ]
+    ranking = rank_candidates(catalog=catalog, intent_spec=spec, matches=matches)
+    assert ranking[0].hard_eligible is True
+
+    plan_from_passed_catalog = build_candidate_selection_plan(
+        catalog=catalog,
+        intent_spec=spec,
+        ranking_scores=ranking,
+        duration_days=1,
+        destination_count=1,
+    )
+    rejected_catalog = catalog.model_copy(
+        update={
+            "admission_results": [
+                CandidateAdmissionResult(
+                    candidate_id="candidate_rejected",
+                    status="insufficient_for_admission",
+                    missing_field_paths=["provider_evidence.name"],
+                    evaluated_fact_revision=1,
+                    evaluated_weather_revision=0,
+                )
+            ]
+        }
+    )
+
+    rejected_plan = build_candidate_selection_plan(
+        catalog=rejected_catalog,
+        intent_spec=spec,
+        ranking_scores=ranking,
+        duration_days=1,
+        destination_count=1,
+    )
+
+    assert rejected_plan.entries == []
+    assert rejected_plan.uncovered_intent_ids == [intent.intent_id]
+    with pytest.raises(ValueError, match="non-admitted candidate"):
+        catalog_for_candidate_selection(rejected_catalog, plan_from_passed_catalog)
+
+
 def test_composition_rules_preserve_prohibition_and_daily_capacity_semantics():
     exclusion = _intent(
         "intent_no_museum",
@@ -603,6 +666,22 @@ def test_explore_selection_is_seeded_reproducible_and_diverse():
     assert first == replay
     assert len(variants) > 1
     assert all(len(candidate_ids) == 2 for candidate_ids in variants)
+    alternative_ids = {
+        entry.candidate_id
+        for entry in first.entries
+        if not entry.eligible_for_composition
+    }
+    assert alternative_ids
+    composition_catalog = catalog_for_candidate_selection(catalog, first)
+    workspace_catalog = catalog_for_workspace_materialization(catalog, first)
+    assert alternative_ids.isdisjoint(
+        {item.candidate_id for item in composition_catalog.admission_results}
+    )
+    assert alternative_ids <= {
+        item.candidate_id
+        for item in workspace_catalog.admission_results
+        if item.status == "passed"
+    }
 
 
 def test_fallback_candidate_is_penalized_and_targeted_repair_is_stable():

@@ -15,12 +15,19 @@ from ...workflows.composition_repair import (
 
 
 async def intent_fidelity_gate_node(state: TravelAgentState) -> Dict[str, Any]:
-    if state.intent_spec is None or state.trip_workspace_v2 is None:
+    if state.intent_spec is None:
         raise DeliveryContractViolation(
-            "intent fidelity gate requires intent and workspace state",
-            reason_code="intent_fidelity_inputs_missing",
+            "intent fidelity gate requires intent state",
+            reason_code="intent_fidelity_intent_missing",
             gate_class=GateClass.COMPOSITION,
         )
+    if state.trip_workspace_v2 is None:
+        # Artifact Gate deliberately carries a missing Workspace forward after
+        # the research/composition closeout.  Delivery Quality Gate owns that
+        # state: it can spend the remaining composition repair or emit the
+        # precise window/budget terminal reason.  Raising a second generic
+        # input error here only masks the failure that prevented materialization.
+        return {"intent_fidelity_route": "passed"}
     rules = compile_composition_rules(state.intent_spec)
     workspace = bind_intent_context(state.trip_workspace_v2, state.intent_spec)
     report, gaps = evaluate_intent_fidelity(

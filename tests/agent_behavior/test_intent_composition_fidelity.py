@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -46,6 +47,9 @@ from travel_agent.agents.utils import (
     resolve_agent_assignment,
 )
 from travel_agent.api.schemas import PublicBundleWorkspaceResponse
+from travel_agent.agents.orchestrator.intent_fidelity_gate import (
+    intent_fidelity_gate_node,
+)
 
 
 def _capability(
@@ -91,6 +95,16 @@ def _rule(
         policy_on_failure=policy,
         parameters=parameters,
     )
+
+
+def test_fidelity_defers_a_missing_workspace_to_delivery_quality_gate():
+    update = asyncio.run(
+        intent_fidelity_gate_node(
+            SimpleNamespace(intent_spec=object(), trip_workspace_v2=None)
+        )
+    )
+
+    assert update == {"intent_fidelity_route": "passed"}
 
 
 def test_slot_backfill_prefers_pending_intent_and_respects_daily_maximum():

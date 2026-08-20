@@ -61,6 +61,7 @@ from ...services.authored_place_resolution import (
 from ...services.geo_dispersion import itinerary_dispersion
 from ...services.candidate_selection import (
     catalog_for_candidate_selection,
+    catalog_for_workspace_materialization,
     selected_candidate_capabilities,
 )
 from ...services.composition_rule_compiler import compile_composition_rules
@@ -3265,7 +3266,10 @@ async def itinerary_planner_node(
                 run_id=state.run_id,
                 workspace_revision=0,
                 composition=composition,
-                catalog=state.recommendation_catalog,
+                catalog=catalog_for_workspace_materialization(
+                    full_catalog,
+                    state.candidate_selection_plan,
+                ),
                 intent_contract_snapshot=IntentContractSnapshot.from_intent_spec(
                     state.intent_spec
                 ),
@@ -3629,7 +3633,10 @@ async def itinerary_planner_node(
             run_id=state.run_id,
             workspace_revision=0,
             composition=composition,
-            catalog=state.recommendation_catalog,
+            catalog=catalog_for_workspace_materialization(
+                full_catalog,
+                state.candidate_selection_plan,
+            ),
             intent_contract_snapshot=IntentContractSnapshot.from_intent_spec(
                 state.intent_spec
             ),

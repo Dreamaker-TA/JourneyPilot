@@ -258,6 +258,7 @@ Enforced by: Selection 只从 passed admissions 产生有限候选集合；Plann
 ADR: [ADR-0011](adr/ADR-0011-intent-aware-candidate-pipeline.md)
 Tests:
 - `agent_behavior/test_intent_research_ranking_selection.py::test_admission_is_stable_while_ranking_and_selection_change_with_theme`
+- `agent_behavior/test_intent_research_ranking_selection.py::test_selection_never_promotes_a_gate_rejected_candidate`
 
 ### INV-CANDIDATE-004：同一 Identity Candidate 在多个 Query 中只出现一次
 Owner: `agents/research_packet_output.py` 的 Provider Identity 选项去重与 Packet 边界
@@ -285,6 +286,14 @@ ADR: [ADR-0012](adr/ADR-0012-intent-fidelity-and-controlled-exploration.md)
 Tests:
 - `agent_behavior/test_intent_composition_fidelity.py::test_fidelity_detects_hard_excluded_candidate`
 - `agent_behavior/test_intent_composition_fidelity.py::test_fidelity_degrades_exhausted_hard_gap_and_soft_preference_to_deviations`
+
+### INV-FIDELITY-002：Workspace 缺失只由 Delivery Quality Gate 收口
+Owner: `agents/orchestrator/intent_fidelity_gate.py`、
+`agents/orchestrator/delivery_quality_gate.py`
+Enforced by: Fidelity Gate 没有 Workspace 时不制造第二个输入异常；Delivery Quality Gate
+根据组合窗口与修复预算决定再物化一次还是输出准确的终止原因
+Tests:
+- `agent_behavior/test_intent_composition_fidelity.py::test_fidelity_defers_a_missing_workspace_to_delivery_quality_gate`
 
 ### INV-MUTATION-001：自动后处理和用户编辑都必须留下可重验的 Mutation
 Owner: `services/composition_mutations.py`、`services/workspace_v2_service.py`
@@ -375,6 +384,16 @@ Tests:
 ---
 
 ## 资源边界
+
+### INV-TOOL-001：日期能力先于运行预算、重试和 Provider 网络调用
+Owner: `tools/temporal.py`、`tools/gateway.py`、`agents/utils.execute_tool`、
+`infrastructure/weather_provider.py`
+Enforced by: 12306 只把上海时区 today 至 today+14 当作目标日实时余票；更远日期只查询
+窗口末日并标记 reference-only、不可作为证据。正式天气只在目的地本地 16 日窗口内请求
+精确预报；更远日期跳过预报端点，改用十个完整年份的同月历史季节基线，且不得生成
+逐日天气、概率或小时级事实
+Tests:
+- `test_temporal_tool_policy.py::*`
 
 ### INV-BLOCK-001：同步工作不阻塞 Event Loop，且并发有上限
 Owner: `services/blocking_work.py`

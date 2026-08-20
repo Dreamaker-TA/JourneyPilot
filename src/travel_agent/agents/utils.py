@@ -612,10 +612,38 @@ async def execute_tool(
 
     registry = get_tool_registry()
     main_meta = registry.get_tool_metadata(tool_name)
-    # The 6-minute boundary applies before every new ToolGateway / Provider
-    # path, including a retry or fallback.  Return a normal failed envelope so
-    # the Worker can hand the scoped content gap to Candidate Gate rather than
-    # accidentally turn a deadline policy into user cancellation.
+    gateway = tool_gateway or get_tool_gateway()
+    before = await gateway.before_call(
+        tool_name=tool_name,
+        arguments=arguments,
+        registry=registry,
+        allowed_tool_names=allowed_tool_names,
+        run_id=run_id,
+        node_name=node_name,
+        audit_store=tool_audit_store,
+    )
+    if before.envelope is not None:
+        if before.decision in {
+            ToolGatewayDecision.NOT_APPLICABLE,
+            ToolGatewayDecision.REFERENCE_ONLY,
+        }:
+            logger.info(
+                "工具 [%s] 日期能力判定为 %s: %s",
+                tool_name,
+                before.decision.value,
+                before.reason,
+            )
+        elif before.decision != ToolGatewayDecision.ALLOW:
+            logger.warning("工具 [%s] 被 ToolGateway 阻断: %s", tool_name, before.reason)
+        return before.envelope
+    main_manifest = before.manifest
+
+    # Capability/manifest policy runs first because an unsupported date must be
+    # classified without spending run budget.  The 6-minute boundary applies
+    # before every Provider path that survives that preflight, including a retry
+    # or fallback.  Return a normal failed envelope so the Worker can hand the
+    # scoped content gap to Candidate Gate rather than accidentally turn a
+    # deadline policy into user cancellation.
     try:
         remaining_model_seconds(f"tool.{tool_name}")
     except ModelWindowClosed as exc:
@@ -663,32 +691,6 @@ async def execute_tool(
         )
         envelope["metadata"]["tool_retries_exhausted"] = tool_name
         return envelope
-    gateway = tool_gateway or get_tool_gateway()
-    before = await gateway.before_call(
-        tool_name=tool_name,
-        arguments=arguments,
-        registry=registry,
-        allowed_tool_names=allowed_tool_names,
-        run_id=run_id,
-        node_name=node_name,
-        audit_store=tool_audit_store,
-    )
-    if before.envelope is not None:
-        if before.decision in {
-            ToolGatewayDecision.NOT_APPLICABLE,
-            ToolGatewayDecision.REFERENCE_ONLY,
-        }:
-            logger.info(
-                "工具 [%s] 日期能力判定为 %s: %s",
-                tool_name,
-                before.decision.value,
-                before.reason,
-            )
-        elif before.decision != ToolGatewayDecision.ALLOW:
-            logger.warning("工具 [%s] 被 ToolGateway 阻断: %s", tool_name, before.reason)
-        return before.envelope
-    main_manifest = before.manifest
-
     # Provider snapshots deliberately live outside ``state.tool_cache``.  A
     # cache hit still travels through this Gateway and receives a new audit id
     # for the current Run; it is never an old ToolExecutionEnvelope replay.

@@ -196,6 +196,14 @@ def _positive_intent_ids(intent_spec: IntentSpec) -> set[str]:
     }
 
 
+def _admitted_candidate_ids(catalog: RecommendationCatalog) -> set[str]:
+    return {
+        result.candidate_id
+        for result in catalog.admission_results
+        if result.status == "passed"
+    }
+
+
 def _capacity(
     domain: ResearchDomain, duration_days: int, destination_count: int
 ) -> int:
@@ -224,10 +232,13 @@ def build_candidate_selection_plan(
     discovery = {
         record.candidate_id: record for record in catalog.candidate_discovery_records
     }
+    admitted_candidate_ids = _admitted_candidate_ids(catalog)
     eligible = [
         candidate_id
         for candidate_id, score in rankings.items()
-        if score.hard_eligible and candidate_id in candidates
+        if score.hard_eligible
+        and candidate_id in candidates
+        and candidate_id in admitted_candidate_ids
     ]
     eligible.sort(
         key=lambda candidate_id: (
@@ -400,15 +411,8 @@ def catalog_for_candidate_selection(
     catalog: RecommendationCatalog,
     selection_plan: CandidateSelectionPlan,
 ) -> RecommendationCatalog:
-    if selection_plan.generation_id != catalog.generation_id:
-        raise ValueError("candidate selection plan belongs to another generation")
-    if selection_plan.intent_spec_revision != catalog.intent_spec_revision:
-        raise ValueError("candidate selection plan uses another intent revision")
-    if selection_plan.catalog_revision != catalog.fact_data_revision:
-        raise ValueError("candidate selection plan uses another catalog revision")
+    _validate_selection_plan_catalog(catalog, selection_plan)
     selected_ids = selection_plan.composition_candidate_ids()
-    if not selected_ids <= set(catalog.candidate_index()):
-        raise ValueError("candidate selection plan references a missing candidate")
     return catalog.model_copy(
         update={
             "admission_results": [
@@ -418,6 +422,41 @@ def catalog_for_candidate_selection(
             ]
         }
     )
+
+
+def catalog_for_workspace_materialization(
+    catalog: RecommendationCatalog,
+    selection_plan: CandidateSelectionPlan,
+) -> RecommendationCatalog:
+    """Keep full admitted lineage when the final Workspace crosses its contract.
+
+    Composition uses a narrowed Catalog so an alternative cannot be placed by
+    accident.  The Workspace still carries the complete Selection Plan,
+    including alternatives, so materializing it against that narrowed Catalog
+    falsely turns every omitted alternative into a rejected candidate.  Rebind
+    to the full validated Catalog only at the Workspace boundary, after the
+    composition has already been constrained and checked.
+    """
+
+    _validate_selection_plan_catalog(catalog, selection_plan)
+    return catalog
+
+
+def _validate_selection_plan_catalog(
+    catalog: RecommendationCatalog,
+    selection_plan: CandidateSelectionPlan,
+) -> None:
+    if selection_plan.generation_id != catalog.generation_id:
+        raise ValueError("candidate selection plan belongs to another generation")
+    if selection_plan.intent_spec_revision != catalog.intent_spec_revision:
+        raise ValueError("candidate selection plan uses another intent revision")
+    if selection_plan.catalog_revision != catalog.fact_data_revision:
+        raise ValueError("candidate selection plan uses another catalog revision")
+    plan_candidate_ids = {entry.candidate_id for entry in selection_plan.entries}
+    if not plan_candidate_ids <= set(catalog.candidate_index()):
+        raise ValueError("candidate selection plan references a missing candidate")
+    if not plan_candidate_ids <= _admitted_candidate_ids(catalog):
+        raise ValueError("candidate selection plan references a non-admitted candidate")
 
 
 def _schedule_capabilities(candidate: ResearchCandidate) -> dict[str, object]:
