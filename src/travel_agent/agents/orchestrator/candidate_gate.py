@@ -1322,6 +1322,19 @@ def _observe_deadline(
     return observe_run_deadline(deadline)
 
 
+def _research_closeout_can_skip_connector_pass(
+    state: TravelAgentState,
+    observation: Any | None,
+) -> bool:
+    """Whether closeout has no deterministic skeleton work left to perform."""
+
+    return bool(
+        observation is not None
+        and observation.research_closed
+        and state.placement_skeleton is None
+    )
+
+
 _LONG_DISTANCE_EVIDENCE_REQUIREMENT = (
     "必须使用真实外部 Provider 结果，"
     "具体到可核验的出发/到达端点与时间。实时班次不可得时明确保留缺口，"
@@ -2054,9 +2067,13 @@ async def candidate_gate_node(
         | {gap.worker_kind for gap in intent_gaps}
     )
 
-    # The research boundary is global.  Check it before any placement skeleton
-    # or connector path can schedule more research, and close *all* known
-    # remaining research targets in one atomic transition.
+    # The research boundary is global, but it only forbids opening new research.
+    # An existing skeleton may already have Provider routes waiting in the
+    # catalog; extracting its gaps and aligning its tentative times are pure,
+    # deterministic closeout work.  Returning before that reconciliation drops
+    # usable routes merely because their final packet landed at the boundary.
+    # With no skeleton there is nothing deterministic to reconcile, so close all
+    # known targets immediately as before.
     try:
         observed_deadline, observation = _observe_deadline(state)
     except ValueError as exc:
@@ -2066,7 +2083,7 @@ async def candidate_gate_node(
             message=str(exc),
             base_update=base_update,
         )
-    if observation is not None and observation.research_closed:
+    if _research_closeout_can_skip_connector_pass(state, observation):
         return _passed_update(
             state,
             base_update=base_update,

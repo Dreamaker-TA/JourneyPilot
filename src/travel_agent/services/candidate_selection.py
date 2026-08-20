@@ -289,6 +289,7 @@ def build_candidate_selection_plan(
 
     lodging_periods: set[tuple[str, object, object]] = set()
     transport_scopes: set[str] = set()
+    local_connector_scopes: set[tuple[str, str, str, str, str]] = set()
     for candidate_id in eligible:
         candidate = candidates[candidate_id]
         matched = set(rankings[candidate_id].matched_intent_ids)
@@ -311,6 +312,33 @@ def build_candidate_selection_plan(
             if scope in transport_scopes:
                 continue
             transport_scopes.add(scope)
+            add(candidate_id, CandidateSelectionRole.REQUIRED_PRIMARY)
+        elif candidate.candidate_kind == "transport" and candidate.transport_class in {
+            "public_transit",
+            "flexible",
+        }:
+            # Local-route capacity is a presentation bound, not a topology
+            # contract.  A placement skeleton can owe more distinct connectors
+            # than that capacity (four exact adjacencies on a two-day trip is
+            # ordinary).  Keep one admitted route per exact directed scope in
+            # the composition pool; otherwise the first N routes survive and a
+            # later, unrelated endpoint pair is demoted to an unusable
+            # alternative even though its Provider result is already present.
+            # Same-scope routes remain ranked alternatives.
+            scope = (
+                candidate.destination_id,
+                candidate.from_endpoint.place_id,
+                candidate.to_endpoint.place_id,
+                candidate.transport_class,
+                (
+                    candidate.selected_mode.value
+                    if candidate.transport_class == "flexible"
+                    else ""
+                ),
+            )
+            if scope in local_connector_scopes:
+                continue
+            local_connector_scopes.add(scope)
             add(candidate_id, CandidateSelectionRole.REQUIRED_PRIMARY)
 
     while True:

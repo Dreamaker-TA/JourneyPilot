@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -92,7 +93,10 @@ from travel_agent.agents.research_packet_output import (
     _provider_route_selections_or_default,
     _provider_selection_response_schema,
 )
-from travel_agent.agents.orchestrator.candidate_gate import _apply_candidate_caps
+from travel_agent.agents.orchestrator.candidate_gate import (
+    _apply_candidate_caps,
+    _research_closeout_can_skip_connector_pass,
+)
 from travel_agent.agents.orchestrator.intent_fidelity_gate import (
     _candidate_retry_available,
 )
@@ -434,6 +438,72 @@ def _transport_candidate(
         duration_minutes=60,
         segments=[segment],
         booking_status="recommended",
+    )
+
+
+def _local_transport_packet(
+    candidate_id: str,
+    *,
+    origin_place_id: str,
+    destination_place_id: str,
+) -> ResearchPacket:
+    packet = _packet(
+        candidate_id,
+        f"{origin_place_id} to {destination_place_id}",
+        origin=CandidateDiscoveryOrigin.STRUCTURAL_QUERY,
+        query_id=f"query_{candidate_id}",
+        intent_id="intent_transport",
+    )
+    from_endpoint = TransportEndpoint(
+        name=origin_place_id,
+        place_id=origin_place_id,
+    )
+    to_endpoint = TransportEndpoint(
+        name=destination_place_id,
+        place_id=destination_place_id,
+    )
+    segment = TransportSegment(
+        segment_id=f"segment_{candidate_id}",
+        mode=TransportMode.BUS,
+        from_endpoint=from_endpoint,
+        to_endpoint=to_endpoint,
+        duration_minutes=20,
+    )
+    candidate = TransportCandidate(
+        candidate_id=candidate_id,
+        research_packet_id=packet.research_packet_id,
+        destination_id="destination_tokyo",
+        fact_assertion_ids=[f"fact_{candidate_id}"],
+        source_record_ids=[f"source_{candidate_id}"],
+        field_paths=["segments"],
+        weather_sensitivity=WeatherSensitivity(
+            exposure="mixed",
+            rain_sensitivity="low",
+            heat_sensitivity="low",
+            cold_sensitivity="low",
+            wind_sensitivity="low",
+            requires_clear_visibility=False,
+        ),
+        selection_reasons=["exact endpoints", "provider route"],
+        tradeoff="fixture",
+        freshness_status="current",
+        route_id=f"route_{candidate_id}",
+        transport_class="public_transit",
+        # Local connector identity is its directed endpoint pair; unlike a
+        # long-distance responsibility it deliberately carries no broad scope id.
+        provider_evidence_scope_id=None,
+        selected_mode=TransportMode.BUS,
+        from_endpoint=from_endpoint,
+        to_endpoint=to_endpoint,
+        duration_minutes=20,
+        segments=[segment],
+        booking_status="not_required",
+    )
+    return packet.model_copy(
+        update={
+            "worker_kind": "transport_researcher",
+            "candidates": [candidate],
+        }
     )
 
 
@@ -987,6 +1057,51 @@ def test_each_required_place_is_promoted_to_required_primary():
     assert required["candidate_west_lake"].covered_intent_ids == [west_lake.intent_id]
     assert required["candidate_guozhuang"].covered_intent_ids == [guozhuang.intent_id]
     assert selection.uncovered_intent_ids == []
+
+
+def test_selection_preserves_each_exact_local_connector_beyond_domain_capacity():
+    packets = [
+        _local_transport_packet(
+            f"candidate_connector_{index}",
+            origin_place_id=f"place_{index}",
+            destination_place_id=f"place_{index + 1}",
+        )
+        for index in range(4)
+    ]
+    catalog = _catalog(*packets)
+    spec = _spec()
+    ranking = rank_candidates(catalog=catalog, intent_spec=spec, matches=[])
+
+    selection = build_candidate_selection_plan(
+        catalog=catalog,
+        intent_spec=spec,
+        ranking_scores=ranking,
+        duration_days=2,
+        destination_count=1,
+    )
+
+    connector_entries = [
+        entry
+        for entry in selection.entries
+        if entry.domain is ResearchDomain.LOCAL_TRANSPORT
+    ]
+    assert len(connector_entries) == 4
+    assert all(
+        entry.role is CandidateSelectionRole.REQUIRED_PRIMARY
+        and entry.eligible_for_composition
+        for entry in connector_entries
+    )
+
+
+def test_research_closeout_keeps_deterministic_connector_reconciliation():
+    closed = SimpleNamespace(research_closed=True)
+
+    assert _research_closeout_can_skip_connector_pass(
+        TravelAgentState.model_construct(placement_skeleton=None), closed
+    )
+    assert not _research_closeout_can_skip_connector_pass(
+        TravelAgentState.model_construct(placement_skeleton=object()), closed
+    )
 
 
 def test_selection_never_promotes_a_gate_rejected_candidate():
