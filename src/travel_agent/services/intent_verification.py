@@ -180,6 +180,30 @@ def _retry_target(
     return "none"
 
 
+def _delivered_alternative_count(workspace: TripWorkspaceV2) -> int:
+    """Count choice options the delivery can actually show beyond selections.
+
+    Candidate Selection roles control composition eligibility; they are not the
+    public alternatives contract.  A candidate can be required for composition
+    and still be an unselected option in another typed Selection Slot.  Fidelity
+    therefore audits the materialized choice surface first, while the selection
+    plan remains a fallback for pre-slot/direct-node callers.
+    """
+
+    count = 0
+    for slot in getattr(workspace, "selection_slots", []) or []:
+        options = list(getattr(slot, "options", []) or [])
+        selected_option_id = getattr(slot, "selected_option_id", None)
+        if selected_option_id is None:
+            count += max(len(options) - 1, 0)
+            continue
+        count += sum(
+            getattr(option, "option_id", None) != selected_option_id
+            for option in options
+        )
+    return count
+
+
 def _evaluate_rule(
     rule: CompositionRule,
     *,
@@ -509,10 +533,11 @@ def evaluate_intent_fidelity(
             evaluations = [(None, status, [], [], [])]
         elif intent.kind is IntentKind.ALTERNATIVES:
             selection_policy = workspace.candidate_selection_plan.selection_policy
-            alternative_count = sum(
+            planned_alternative_count = sum(
                 entry.role is CandidateSelectionRole.ALTERNATIVE
                 for entry in workspace.candidate_selection_plan.entries
             )
+            delivered_alternative_count = _delivered_alternative_count(workspace)
             requested_count = (
                 intent.value.count
                 if isinstance(intent.value, AlternativeIntentValue)
@@ -520,8 +545,11 @@ def evaluate_intent_fidelity(
             )
             status = (
                 IntentCoverageStatus.SATISFIED
-                if selection_policy.mode == "explore"
-                and alternative_count >= requested_count - 1
+                if delivered_alternative_count >= requested_count - 1
+                or (
+                    selection_policy.mode == "explore"
+                    and planned_alternative_count >= requested_count - 1
+                )
                 else IntentCoverageStatus.UNSATISFIED
             )
             evaluations = [(None, status, [], [], [])]

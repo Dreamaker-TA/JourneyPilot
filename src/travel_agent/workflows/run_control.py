@@ -647,6 +647,11 @@ _RESEARCH_WORKER_NODES = {
 # minute the research workers have already lost.
 _COMPOSITION_WORKER_NODES = {"itinerary_planner"}
 _DEADLINE_BLOCKED_WORKER_NODES = _RESEARCH_WORKER_NODES | _COMPOSITION_WORKER_NODES
+# Budget estimation consumes the completed composition and improves the final
+# delivery.  It is not a research worker, but its one model call belongs to the
+# later composition window; charging it to the research window makes it fail
+# immediately whenever a valid itinerary finishes during closeout.
+_COMPOSITION_MODEL_WINDOW_NODES = _COMPOSITION_WORKER_NODES | {"budget_estimate"}
 _REQUEST_CONTRACT_NORMALIZER = "request_contract_normalizer"
 _INTENT_AMENDMENT_ROUTER = "intent_amendment_router"
 
@@ -714,7 +719,9 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
         # it is bound here with the other run attribution rather than inside each
         # node body — helper functions the node calls inherit it for free.
         token_window = current_model_window.set(
-            "composition" if node_name in _COMPOSITION_WORKER_NODES else "research"
+            "composition"
+            if node_name in _COMPOSITION_MODEL_WINDOW_NODES
+            else "research"
         )
         started = time.perf_counter()
         ts_ms = run_ts_ms()

@@ -11,6 +11,7 @@ from travel_agent.entities.candidate_selection import (
     SelectedCandidateCapability,
 )
 from travel_agent.entities.intent_spec import (
+    AlternativeIntentValue,
     CadenceIntentValue,
     CountIntentValue,
     IntentItem,
@@ -402,6 +403,7 @@ def _workspace(
             selection_policy=SimpleNamespace(mode="deterministic"),
             entries=[],
         ),
+        selection_slots=[],
     )
 
 
@@ -467,6 +469,37 @@ def test_fidelity_routes_an_unselected_matching_candidate_to_reselection():
     )
 
     assert gaps[0].retry_target == "candidate_selection"
+
+
+def test_fidelity_accepts_alternatives_present_in_materialized_selection_slots():
+    intent = _intent(
+        "intent_alternatives",
+        kind=IntentKind.ALTERNATIVES,
+        strength=IntentStrength.HARD,
+        value=AlternativeIntentValue(count=2),
+    ).model_copy(update={"target": IntentTarget.DELIVERY})
+    spec = _intent_spec(intent)
+    workspace = _workspace(placements=[])
+    workspace.candidate_selection_plan.selection_policy.mode = "explore"
+    workspace.selection_slots = [
+        SimpleNamespace(
+            selected_option_id="option_primary",
+            options=[
+                SimpleNamespace(option_id="option_primary"),
+                SimpleNamespace(option_id="option_alternative"),
+            ],
+        )
+    ]
+
+    report, gaps = evaluate_intent_fidelity(
+        intent_spec=spec,
+        rules=compile_composition_rules(spec),
+        workspace=workspace,
+        repair_budget_exhausted=False,
+    )
+
+    assert report.items[0].status.value == "satisfied"
+    assert gaps == []
 
 
 def test_fidelity_checks_daily_quantity_and_cadence_window():

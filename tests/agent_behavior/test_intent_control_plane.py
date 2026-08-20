@@ -1067,6 +1067,52 @@ def test_current_exclusion_supersedes_a_saved_include_preference():
     assert contract.intent_spec.conflicts == []
 
 
+def test_current_request_supersedes_structurally_identical_saved_intents():
+    clauses = [
+        _clause(0, "必须安排西湖"),
+        _clause(1, "历史偏好要求安排西湖", "saved_preference"),
+    ]
+    normalized = RequestContractNormalizationResult(
+        clauses=[
+            NormalizedClauseDraft(
+                clause_id=clause.clause_id,
+                disposition=ClauseDisposition.MAPPED_TO_INTENT,
+                intents=[
+                    _intent(
+                        IntentKind.MUST_INCLUDE,
+                        IntentTarget.VISIT,
+                        CategoryIntentValue(categories=["西湖"]),
+                        "必须安排西湖",
+                        ["research", "admission", "ranking", "composition"],
+                    )
+                ],
+            )
+            for clause in clauses
+        ]
+    )
+
+    contract, _generation = build_request_contract_revision(
+        run_id="run_semantic_dedupe",
+        identity=_identity(),
+        identity_revision=1,
+        constraint_pack={
+            "constraints": [],
+            "hard_constraints": [],
+            "soft_preferences": [],
+            "pack_meta": {},
+        },
+        constraint_pack_revision=1,
+        clauses=clauses,
+        normalized=normalized,
+    )
+
+    [active] = contract.intent_spec.active_items
+    [superseded] = contract.intent_spec.superseded_items
+    assert active.source_kind == "current_request"
+    assert superseded.source_kind == "saved_preference"
+    assert active.value == superseded.value
+
+
 def test_latest_packets_rejects_an_obsolete_generation():
     old_packet = ResearchPacket.model_construct(
         generation_id="generation_old",

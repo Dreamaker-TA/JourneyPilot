@@ -248,8 +248,18 @@ def _merge_items(
             current
             for current in active.values()
             if (item_slot is not None and _intent_slot(current) == item_slot)
+            or _semantically_equivalent(current, item)
             or _directly_contradicts(current, item)
         ]
+        if any(
+            _semantically_equivalent(current, item)
+            and SOURCE_PRECEDENCE[current.source_kind] >= precedence
+            for current in competing
+        ):
+            superseded[item.intent_id] = item.model_copy(
+                update={"status": "superseded"}
+            )
+            continue
         if any(
             SOURCE_PRECEDENCE[current.source_kind] > precedence
             for current in competing
@@ -301,6 +311,23 @@ def _intent_slot(item: IntentItem) -> tuple[object, ...] | None:
     if isinstance(value, OutputRequirementValue):
         return item.kind, item.target, value.applies_to, value.required_field.casefold()
     return None
+
+
+def _semantically_equivalent(left: IntentItem, right: IntentItem) -> bool:
+    """Collapse the same structured intent across request-context sources.
+
+    Semantic interpretation has already happened before this boundary: the LLM
+    authored the typed ``kind``, ``target`` and discriminated ``value``.  Source
+    text, summaries and ids deliberately do not participate, because a current
+    request and a saved preference can express the same meaning with different
+    prose.  The normal precedence rules then keep the authoritative source.
+    """
+
+    return (
+        left.kind is right.kind
+        and left.target is right.target
+        and left.value.model_dump(mode="json") == right.value.model_dump(mode="json")
+    )
 
 
 def _directly_contradicts(left: IntentItem, right: IntentItem) -> bool:
