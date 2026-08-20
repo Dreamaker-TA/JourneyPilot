@@ -70,7 +70,10 @@ from ...services.constraint_applicability import (
 )
 from ...services.destination_scope import destination_points
 from ...services.product_requirements import required_physical_candidate_kinds
-from ...services.research_query_planner import append_targeted_repair_query
+from ...services.research_query_planner import (
+    append_structural_connector_query,
+    append_targeted_repair_query,
+)
 from ...services.weather_impact_engine import (
     WeatherImpactEngine,
     risk_profile_from_constraint_pack,
@@ -2477,12 +2480,37 @@ async def candidate_gate_node(
     deterministically_rejected_ids = _deterministically_rejected_candidate_ids(
         catalog, packet_workers, worker
     )
-    targeted_query_ids: list[str] | None = None
-    if (
+    repair_query_ids: list[str] = []
+    updated_query_plan = state.research_query_plan
+    if connector_round_gaps and updated_query_plan is not None:
+        destination_names = {
+            str(destination.get("place_id") or ""): str(
+                destination.get("name") or destination.get("display_name") or ""
+            )
+            for destination in (state.controlled_trip_identity or {}).get(
+                "destinations", []
+            )
+            if isinstance(destination, Mapping)
+        }
+        gaps_by_destination: dict[str, list[LocalConnectorGap]] = {}
+        for gap in connector_round_gaps:
+            gaps_by_destination.setdefault(gap.destination_id, []).append(gap)
+        for destination_id, destination_gaps in sorted(gaps_by_destination.items()):
+            updated_query_plan, connector_query = append_structural_connector_query(
+                updated_query_plan,
+                destination_id=destination_id,
+                destination_name=destination_names.get(destination_id) or destination_id,
+                route_pairs=[
+                    (gap.from_place_id, gap.to_place_id) for gap in destination_gaps
+                ],
+            )
+            repair_query_ids.append(connector_query.query_id)
+        base_update["research_query_plan"] = updated_query_plan
+    elif (
         primary_gap.intent_id is not None
         and primary_gap.destination_id is not None
         and state.intent_spec is not None
-        and state.research_query_plan is not None
+        and updated_query_plan is not None
     ):
         intent = next(
             (
@@ -2505,7 +2533,7 @@ async def candidate_gate_node(
                 primary_gap.destination_id,
             )
             updated_query_plan, targeted_query = append_targeted_repair_query(
-                state.research_query_plan,
+                updated_query_plan,
                 intent=intent,
                 destination_id=primary_gap.destination_id,
                 destination_name=destination_name,
@@ -2528,7 +2556,7 @@ async def candidate_gate_node(
                 primary_gap if gap.gap_id == primary_gap.gap_id else gap
                 for gap in scoped_gaps
             ]
-            targeted_query_ids = [targeted_query.query_id]
+            repair_query_ids = [targeted_query.query_id]
             base_update["research_query_plan"] = updated_query_plan
     gap_summary = [gap.model_dump(mode="json") for gap in scoped_gaps]
     long_distance_instruction = _long_distance_instruction(long_distance_legs)
@@ -2573,8 +2601,8 @@ async def candidate_gate_node(
         "failure_signatures": accumulated_signatures,
         "require_current_candidate": True,
         **(
-            {"research_query_ids": targeted_query_ids}
-            if targeted_query_ids is not None
+            {"research_query_ids": repair_query_ids}
+            if repair_query_ids
             else {}
         ),
         **(

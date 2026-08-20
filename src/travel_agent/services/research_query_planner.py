@@ -332,3 +332,69 @@ def append_targeted_repair_query(
         ),
         query,
     )
+
+
+def append_structural_connector_query(
+    plan: ResearchQueryPlan,
+    *,
+    destination_id: str,
+    destination_name: str,
+    route_pairs: Sequence[tuple[str, str]],
+) -> tuple[ResearchQueryPlan, ResearchQuery]:
+    """Append the server-owned query that authorizes an exact connector sweep.
+
+    Local connector responsibilities do not exist until the itinerary skeleton has
+    placed adjacent stops, so the initial Research Query Plan cannot name them.  A
+    Candidate Gate repair round must extend that plan before the route Provider is
+    called; otherwise real route results have no executed-query lineage and the
+    Research Packet correctly rejects them.
+
+    The ordered endpoint pairs are part of the query identity.  Replaying the same
+    skeleton therefore reuses the same query, while a changed adjacency receives a
+    new lineage record instead of borrowing the old one.
+    """
+
+    ordered_pairs = sorted(set(route_pairs))
+    if not ordered_pairs:
+        raise ValueError("structural connector query requires an endpoint pair")
+    pair_text = "; ".join(f"{origin} -> {destination}" for origin, destination in ordered_pairs)
+    query_text = f"{destination_name} exact local routes: {pair_text}"[:500]
+    material = {
+        "generation_id": plan.generation_id,
+        "destination_id": destination_id,
+        "domain": ResearchDomain.LOCAL_TRANSPORT.value,
+        "kind": ResearchQueryKind.STRUCTURAL.value,
+        "route_pairs": ordered_pairs,
+        "query_text": query_text,
+    }
+    query = ResearchQuery(
+        query_id=_query_id(material),
+        generation_id=plan.generation_id,
+        domain=ResearchDomain.LOCAL_TRANSPORT,
+        destination_id=destination_id,
+        query_kind=ResearchQueryKind.STRUCTURAL,
+        query_text=query_text,
+        desired_candidate_count=min(len(ordered_pairs), 20),
+        provider_route="route_provider",
+        priority=90,
+    )
+    existing = plan.query_index().get(query.query_id)
+    if existing is not None:
+        return plan, existing
+    queries = [*plan.queries, query]
+    plan_material = {
+        "generation_id": plan.generation_id,
+        "intent_spec_revision": plan.intent_spec_revision,
+        "queries": [item.model_dump(mode="json") for item in queries],
+        "per_domain_candidate_caps": plan.per_domain_candidate_caps,
+        "policy_version": plan.policy_version,
+    }
+    return (
+        plan.model_copy(
+            update={
+                "queries": queries,
+                "content_hash": canonical_json_hash(plan_material),
+            }
+        ),
+        query,
+    )

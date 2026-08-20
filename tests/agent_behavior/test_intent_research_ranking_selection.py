@@ -16,13 +16,21 @@ from travel_agent.entities.candidate_selection import SelectionPolicy
 from travel_agent.entities.delivery_bundle import (
     CandidateAdmissionResult,
     EntityRef,
+    EntityLineage,
     EntityType,
     FactAssertion,
     FactSourceLink,
     FieldProvenance,
     RecommendationCatalog,
     ResearchPacket,
+    SelectionOption,
+    SelectionSlot,
     SourceRecord,
+    TransportCandidate,
+    TransportEndpoint,
+    TransportLeg,
+    TransportMode,
+    TransportSegment,
     VisitCandidate,
     WeatherSensitivity,
 )
@@ -49,6 +57,7 @@ from travel_agent.entities.itinerary_composition_v2 import (
     ItineraryCompositionDraft,
     ItineraryCompositionError,
     VisitPlacement,
+    _transport_alternatives,
     validate_placement_skeleton,
 )
 from travel_agent.services.candidate_intent_evaluation import (
@@ -63,10 +72,12 @@ from travel_agent.services.candidate_selection import (
 )
 from travel_agent.services.composition_rule_compiler import compile_composition_rules
 from travel_agent.services.research_query_planner import (
+    append_structural_connector_query,
     append_targeted_repair_query,
     build_research_query_plan,
 )
 from travel_agent.services.fallback_query_policy import FallbackQueryPolicy
+from travel_agent.services.delivery_projection import _reportable_selection_options
 from travel_agent.agents.destination_researcher import node as destination_node
 from travel_agent.agents.research_packet_output import (
     _bind_candidate_discovery_lineage,
@@ -362,6 +373,193 @@ def _single_visit_skeleton(
             )
         ],
     )
+
+
+def _transport_candidate(
+    candidate_id: str,
+    *,
+    scope_id: str,
+    origin: str,
+    destination: str,
+) -> TransportCandidate:
+    from_endpoint = TransportEndpoint(name=origin, station_code=origin)
+    to_endpoint = TransportEndpoint(name=destination, station_code=destination)
+    segment = TransportSegment(
+        segment_id=f"segment_{candidate_id}",
+        mode=TransportMode.HIGH_SPEED_RAIL,
+        from_endpoint=from_endpoint,
+        to_endpoint=to_endpoint,
+        duration_minutes=60,
+    )
+    return TransportCandidate(
+        candidate_id=candidate_id,
+        research_packet_id=f"packet_{candidate_id}",
+        destination_id="destination_hangzhou",
+        fact_assertion_ids=[f"fact_{candidate_id}"],
+        source_record_ids=[f"source_{candidate_id}"],
+        field_paths=["segments"],
+        weather_sensitivity=WeatherSensitivity(
+            exposure="indoor",
+            rain_sensitivity="low",
+            heat_sensitivity="low",
+            cold_sensitivity="low",
+            wind_sensitivity="low",
+            requires_clear_visibility=False,
+        ),
+        selection_reasons=["exact route", "current provider result"],
+        tradeoff="fixture",
+        freshness_status="current",
+        route_id=f"route_{candidate_id}",
+        transport_class="long_distance",
+        provider_evidence_scope_id=scope_id,
+        selected_mode=TransportMode.HIGH_SPEED_RAIL,
+        from_endpoint=from_endpoint,
+        to_endpoint=to_endpoint,
+        duration_minutes=60,
+        segments=[segment],
+        booking_status="recommended",
+    )
+
+
+def _selection_option(
+    slot_id: str, candidate_id: str, rank: int, *, target_id: str
+) -> SelectionOption:
+    return SelectionOption(
+        option_id=f"option_{slot_id}_{candidate_id}",
+        selection_slot_id=slot_id,
+        candidate_id=candidate_id,
+        candidate_entity_ref=EntityRef(
+            entity_type=EntityType.VISIT_STOP, entity_id=target_id
+        ),
+        rank=rank,
+        selection_reasons=["verified identity", "comparison fixture"],
+        tradeoff="fixture",
+        comparison_facts=["name"],
+        availability_status="confirmed",
+        fact_assertion_ids=[f"fact_{candidate_id}"],
+        source_record_ids=[f"source_{candidate_id}"],
+    )
+
+
+def test_structural_connector_query_is_server_owned_and_idempotent():
+    spec = _spec(_intent("intent_architecture", "architecture"))
+    plan = build_research_query_plan(intent_spec=spec, brief=_brief(spec))
+
+    updated, query = append_structural_connector_query(
+        plan,
+        destination_id="destination_tokyo",
+        destination_name="Tokyo",
+        route_pairs=[("place_station", "place_garden"), ("place_garden", "place_cafe")],
+    )
+    replayed, replayed_query = append_structural_connector_query(
+        updated,
+        destination_id="destination_tokyo",
+        destination_name="Tokyo",
+        route_pairs=[("place_garden", "place_cafe"), ("place_station", "place_garden")],
+    )
+
+    assert query.domain is ResearchDomain.LOCAL_TRANSPORT
+    assert query.query_kind is ResearchQueryKind.STRUCTURAL
+    assert query.provider_route == "route_provider"
+    assert query.query_id in updated.query_index()
+    assert updated.content_hash != plan.content_hash
+    assert replayed == updated
+    assert replayed_query == query
+
+
+def test_long_distance_alternatives_must_share_the_exact_route_scope():
+    outbound_scope = "a" * 64
+    return_scope = "b" * 64
+    selected = _transport_candidate(
+        "outbound_primary",
+        scope_id=outbound_scope,
+        origin="SHH",
+        destination="HZH",
+    )
+    same_direction = _transport_candidate(
+        "outbound_alternative",
+        scope_id=outbound_scope,
+        origin="AOH",
+        destination="HZH",
+    )
+    reverse = _transport_candidate(
+        "return_train",
+        scope_id=return_scope,
+        origin="HZH",
+        destination="SHH",
+    )
+    leg = TransportLeg(
+        transport_leg_id="leg_outbound",
+        transport_class="long_distance",
+        selected_mode=selected.selected_mode,
+        from_endpoint=selected.from_endpoint,
+        to_endpoint=selected.to_endpoint,
+        duration_minutes=selected.duration_minutes,
+        transfer_count=0,
+        segments=selected.segments,
+        booking_status=selected.booking_status,
+        route_status="ready",
+        lineage=EntityLineage(
+            research_packet_id=selected.research_packet_id,
+            candidate_id=selected.candidate_id,
+            fact_assertion_ids=selected.fact_assertion_ids,
+            source_record_ids=selected.source_record_ids,
+        ),
+    )
+
+    alternatives = _transport_alternatives(
+        leg,
+        {
+            item.candidate_id: item
+            for item in (selected, same_direction, reverse)
+        },
+    )
+
+    assert {item.candidate_id for item in alternatives} == {
+        "outbound_primary",
+        "outbound_alternative",
+    }
+
+
+def test_report_alternatives_are_unique_and_never_already_selected():
+    slot_one_options = [
+        _selection_option("slot_one", "selected_one", 1, target_id="target_one"),
+        _selection_option("slot_one", "shared_alternative", 2, target_id="target_one"),
+    ]
+    slot_two_options = [
+        _selection_option("slot_two", "selected_two", 1, target_id="target_two"),
+        _selection_option("slot_two", "shared_alternative", 2, target_id="target_two"),
+        _selection_option("slot_two", "selected_one", 3, target_id="target_two"),
+    ]
+    slots = [
+        SelectionSlot(
+            selection_slot_id="slot_one",
+            slot_type="visit",
+            target_entity_id="target_one",
+            context={},
+            options=slot_one_options,
+            recommended_option_id=slot_one_options[0].option_id,
+            selected_option_id=slot_one_options[0].option_id,
+            status="ready",
+        ),
+        SelectionSlot(
+            selection_slot_id="slot_two",
+            slot_type="visit",
+            target_entity_id="target_two",
+            context={},
+            options=slot_two_options,
+            recommended_option_id=slot_two_options[0].option_id,
+            selected_option_id=slot_two_options[0].option_id,
+            status="ready",
+        ),
+    ]
+
+    reportable = _reportable_selection_options(slots)
+
+    assert [[option.candidate_id for option in row] for row in reportable] == [
+        ["selected_one", "shared_alternative"],
+        ["selected_two"],
+    ]
 
 
 def test_visit_must_fit_inside_published_opening_window():

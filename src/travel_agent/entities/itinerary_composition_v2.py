@@ -2250,14 +2250,22 @@ def _transport_alternatives(
 
     The filter is the mutation's own admission rule, restated on the offering
     side so a slot never shows an option that ``_check_transport_replacement``
-    would then refuse: a long-distance leg may only be replaced by another long-distance
-    service, and a local connector must join the *same ordered* pair of places —
-    a route between two other points is a different journey, not an alternative.
+    would then refuse: a long-distance leg may only be replaced by another service
+    researched for the same exact Provider route scope, and a local connector must
+    join the *same ordered* pair of places — a route between two other points is a
+    different journey, not an alternative.
     The mode preference is checked too, because a locked or excluded mode makes a
     candidate unusable no matter how well it fits.
     """
 
     preference = leg.mode_preference
+    selected = candidates.get(leg.lineage.candidate_id or "")
+    selected_scope_id = (
+        selected.provider_evidence_scope_id
+        if isinstance(selected, TransportCandidate)
+        and selected.transport_class == "long_distance"
+        else None
+    )
     eligible: list[TransportCandidate] = []
     for candidate in candidates.values():
         if not isinstance(candidate, TransportCandidate):
@@ -2270,7 +2278,11 @@ def _transport_alternatives(
         if candidate.selected_mode in preference.excluded_modes:
             continue
         if leg.transport_class == "long_distance":
-            if candidate.transport_class != "long_distance":
+            if (
+                candidate.transport_class != "long_distance"
+                or selected_scope_id is None
+                or candidate.provider_evidence_scope_id != selected_scope_id
+            ):
                 continue
         elif candidate.transport_class not in {"public_transit", "flexible"}:
             continue

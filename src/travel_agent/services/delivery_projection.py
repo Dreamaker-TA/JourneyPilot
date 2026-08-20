@@ -39,6 +39,8 @@ from ..entities.delivery_bundle import (
     SourceIndexDocument,
     SourceIndexProjection,
     SourceRecord,
+    SelectionOption,
+    SelectionSlot,
     StructuredItineraryV2,
     TransportCandidate,
     TransportLeg,
@@ -78,6 +80,43 @@ _INTERNAL_SELECTION_MARKERS = (
     "source_record",
     "research_packet",
 )
+
+
+def _reportable_selection_options(
+    slots: Sequence[SelectionSlot],
+) -> list[list[SelectionOption]]:
+    """Keep every decision, but publish each unused candidate at most once.
+
+    Workspace slots are contextual and may lawfully offer the same candidate in
+    more than one position.  The report's ``其它合格选择`` section is flattened,
+    though, so repeating that candidate there is duplicate product content.  A
+    candidate already selected anywhere in the itinerary is not an "other" choice
+    either.  This projection-only filter preserves the richer workspace mutation
+    model while giving the public report one unambiguous list.
+    """
+
+    selected_candidate_ids = {
+        option.candidate_id
+        for slot in slots
+        for option in slot.options
+        if option.option_id == slot.selected_option_id
+    }
+    projected_alternative_candidate_ids: set[str] = set()
+    result: list[list[SelectionOption]] = []
+    for slot in slots:
+        reportable: list[SelectionOption] = []
+        for option in slot.options:
+            is_selected = option.option_id == slot.selected_option_id
+            if not is_selected and (
+                option.candidate_id in selected_candidate_ids
+                or option.candidate_id in projected_alternative_candidate_ids
+            ):
+                continue
+            reportable.append(option)
+            if not is_selected:
+                projected_alternative_candidate_ids.add(option.candidate_id)
+        result.append(reportable)
+    return result
 
 _PUBLIC_COMPARISON_LABELS = {
     "branch_name": "具体餐厅",
@@ -959,12 +998,14 @@ def project_report(
 
     candidates = workspace.recommendation_catalog.candidate_index()
     selections: list[ReportSelectionSection] = []
-    for slot in workspace.selection_slots:
+    reportable_options = _reportable_selection_options(workspace.selection_slots)
+    for slot, slot_options in zip(workspace.selection_slots, reportable_options):
         options: list[ReportSelectionOption] = []
-        for option in slot.options:
+        for option in slot_options:
+            is_selected = option.option_id == slot.selected_option_id
             citation_entity_id = (
                 slot.target_entity_id
-                if option.option_id == slot.selected_option_id
+                if is_selected
                 else option.candidate_id
             )
             option_citations = [
@@ -977,7 +1018,7 @@ def project_report(
                     candidate_id=option.candidate_id,
                     name=candidate_display_name(candidates[option.candidate_id]),
                     rank=option.rank,
-                    selected=option.option_id == slot.selected_option_id,
+                    selected=is_selected,
                     recommended=option.option_id == slot.recommended_option_id,
                     selection_reasons=[
                         _public_selection_text(reason)
