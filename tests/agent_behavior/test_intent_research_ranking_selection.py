@@ -1800,6 +1800,103 @@ def test_packet_lineage_does_not_attach_hard_intent_to_generic_provider_query():
     assert record["origins"] == ["generic_fallback"]
 
 
+def test_targeted_packet_keeps_traced_candidate_and_prunes_unrelated_extras():
+    required = _packet(
+        "candidate_required",
+        "Required Garden",
+        origin=CandidateDiscoveryOrigin.TARGETED_REPAIR,
+        query_id="model_query",
+        intent_id="model_intent",
+    )
+    unrelated = _packet(
+        "candidate_unrelated",
+        "Unrelated Tower",
+        origin=CandidateDiscoveryOrigin.TARGETED_REPAIR,
+        query_id="model_query",
+        intent_id="model_intent",
+    )
+    payload = required.model_dump(mode="python")
+    payload["candidates"].extend(
+        candidate.model_dump(mode="python") for candidate in unrelated.candidates
+    )
+    payload["source_records"].extend(
+        source.model_dump(mode="python") for source in unrelated.source_records
+    )
+    payload["fact_assertions"].extend(
+        fact.model_dump(mode="python") for fact in unrelated.fact_assertions
+    )
+    payload["field_provenance"].extend(
+        item.model_dump(mode="python") for item in unrelated.field_provenance
+    )
+    payload["executed_query_ids"] = ["query_targeted"]
+    payload["query_context"] = {
+        "research_round": 1,
+        "query_lineage": [
+            {
+                "query_id": "query_targeted",
+                "domain": "visit",
+                "query_kind": "targeted_repair",
+                "query_text": "City Required Garden places",
+                "aliases": ["Required Garden"],
+                "intent_ids": ["intent_required"],
+            }
+        ],
+    }
+    payload["source_records"][0]["snapshot"]["query"] = "Required Garden City"
+    payload["source_records"][1]["snapshot"]["query"] = "Unrelated Tower City"
+
+    _bind_candidate_discovery_lineage(payload)
+
+    assert [candidate["candidate_id"] for candidate in payload["candidates"]] == [
+        "candidate_required"
+    ]
+    assert [
+        record["candidate_id"] for record in payload["candidate_discovery_records"]
+    ] == ["candidate_required"]
+    assert payload["candidate_discovery_records"][0]["intent_ids"] == [
+        "intent_required"
+    ]
+    assert [
+        fact["entity_ref"]["entity_id"] for fact in payload["fact_assertions"]
+    ] == ["candidate_required"]
+    assert [source["source_record_id"] for source in payload["source_records"]] == [
+        "source_candidate_required"
+    ]
+
+
+def test_targeted_packet_still_rejects_when_no_candidate_has_query_lineage():
+    from travel_agent.agents.research_packet_output import ResearchPacketOutputError
+
+    packet = _packet(
+        "candidate_unrelated",
+        "Unrelated Tower",
+        origin=CandidateDiscoveryOrigin.TARGETED_REPAIR,
+        query_id="model_query",
+        intent_id="model_intent",
+    )
+    payload = packet.model_dump(mode="python")
+    payload["executed_query_ids"] = ["query_targeted"]
+    payload["query_context"] = {
+        "query_lineage": [
+            {
+                "query_id": "query_targeted",
+                "domain": "visit",
+                "query_kind": "targeted_repair",
+                "query_text": "City Required Garden places",
+                "aliases": ["Required Garden"],
+                "intent_ids": ["intent_required"],
+            }
+        ]
+    }
+    payload["source_records"][0]["snapshot"]["query"] = "Unrelated Tower City"
+
+    with pytest.raises(
+        ResearchPacketOutputError,
+        match="no server-owned executed query lineage",
+    ):
+        _bind_candidate_discovery_lineage(payload)
+
+
 def test_provider_fallback_prioritizes_llm_structured_intent_aliases():
     base_payload = {
         "query_context": {

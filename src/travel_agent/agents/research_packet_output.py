@@ -2794,6 +2794,8 @@ def _bind_candidate_discovery_lineage(payload: dict[str, Any]) -> None:
         except (TypeError, ValueError):
             research_round = 0
     records = []
+    retained_candidate_ids: set[str] = set()
+    dropped_candidate_ids: list[str] = []
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             continue
@@ -2873,9 +2875,17 @@ def _bind_candidate_discovery_lineage(payload: dict[str, Any]) -> None:
             )
         )
         if not origins:
-            raise ResearchPacketOutputError(
-                "research candidate has no server-owned executed query lineage"
+            # A scoped repair may return the requested Provider entity together
+            # with extra model-nominated places.  The extras cannot inherit the
+            # one authorized query, but they also must not invalidate a traced
+            # candidate in the same typed packet.  Keep only the server-joinable
+            # closure; an entirely untraceable packet is still rejected below.
+            dropped_candidate_ids.append(
+                str(candidate.get("candidate_id") or "")
             )
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "")
+        retained_candidate_ids.add(candidate_id)
         provider_audit_ids = list(
             dict.fromkeys(
                 str(source.get("tool_audit_id") or "")
@@ -2886,7 +2896,7 @@ def _bind_candidate_discovery_lineage(payload: dict[str, Any]) -> None:
         )
         records.append(
             {
-                "candidate_id": str(candidate.get("candidate_id") or ""),
+                "candidate_id": candidate_id,
                 "generation_id": str(payload.get("generation_id") or ""),
                 "query_ids": query_ids,
                 "intent_ids": intent_ids,
@@ -2894,6 +2904,23 @@ def _bind_candidate_discovery_lineage(payload: dict[str, Any]) -> None:
                 "provider_audit_ids": provider_audit_ids,
                 "discovered_at_rounds": [research_round],
             }
+        )
+    if candidates and not records:
+        raise ResearchPacketOutputError(
+            "research candidate has no server-owned executed query lineage"
+        )
+    if dropped_candidate_ids:
+        payload["candidates"] = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, Mapping)
+            and str(candidate.get("candidate_id") or "") in retained_candidate_ids
+        ]
+        _prune_payload_to_candidate_closure(payload)
+        logger.info(
+            "Pruned %d candidate(s) without server-owned executed query lineage: %s",
+            len(dropped_candidate_ids),
+            ",".join(sorted(dropped_candidate_ids)),
         )
     payload["candidate_discovery_records"] = records
 
