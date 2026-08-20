@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Literal, Optional
 
+from openai import OpenAIError
 from pydantic import Field, ValidationError, model_validator
 
 from ..entities.delivery_bundle import StrictModel
@@ -31,6 +33,8 @@ from ..utils.json_helpers import safe_parse_json
 
 
 INTENT_NORMALIZATION_PROMPT_VERSION = "request_contract_normalization.v1"
+
+logger = logging.getLogger(__name__)
 
 
 class ConstraintParamsDraft(StrictModel):
@@ -241,7 +245,12 @@ async def normalize_clauses(
             ),
             clauses,
         )
-    except (ValidationError, TypeError, ValueError, RuntimeError):
+    except (OpenAIError, ValidationError, TypeError, ValueError, RuntimeError) as exc:
+        logger.warning(
+            "request contract model normalization failed; using deterministic fallback "
+            "| error_type=%s",
+            type(exc).__name__,
+        )
         return _enforce_deterministic_constraints(
             _enforce_deterministic_intents(
                 RequestContractNormalizationResult(

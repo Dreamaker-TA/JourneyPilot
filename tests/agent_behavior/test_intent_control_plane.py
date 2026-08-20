@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from openai import OpenAIError
 
 from travel_agent.agents.orchestrator.candidate_gate import _latest_packets
 from travel_agent.entities.delivery_bundle import ResearchPacket
@@ -414,12 +415,12 @@ async def test_explicit_required_items_replace_a_generic_model_objective(
 async def test_required_transport_service_gets_the_transport_domain():
     clause = _clause(0, "必须安排去返程高铁")
 
-    class _BrokenModel:
+    class _ProviderFailureModel:
         async def ainvoke(self, *_args, **_kwargs):
-            raise RuntimeError("normalizer unavailable")
+            raise OpenAIError("provider truncated structured output")
 
     result = await normalize_clauses(
-        clauses=[clause], controlled_identity=_identity(), llm=_BrokenModel()
+        clauses=[clause], controlled_identity=_identity(), llm=_ProviderFailureModel()
     )
 
     [intent] = result.clauses[0].intents
