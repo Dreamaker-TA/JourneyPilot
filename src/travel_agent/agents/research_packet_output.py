@@ -3391,6 +3391,116 @@ def _default_provider_place_selections(
     return {"selections": selections}
 
 
+def _validate_provider_place_selections(
+    selection_payload: Any,
+    *,
+    expected_worker: ResearchWorkerKind,
+    scoped_options: Mapping[str, Sequence[Mapping[str, str]]],
+    selection_schema: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate the model-owned part before Provider facts are materialized."""
+
+    selections = (
+        selection_payload.get("selections")
+        if isinstance(selection_payload, dict)
+        else None
+    )
+    if not isinstance(selections, list) or not selections:
+        raise ResearchPacketOutputError(
+            "provider place selection requires at least one explicit choice"
+        )
+    selection_limit = int(selection_schema["properties"]["selections"]["maxItems"])
+    if len(selections) > selection_limit:
+        raise ResearchPacketOutputError(
+            "provider place selection exceeds the bounded selection limit"
+        )
+    model_name_by_kind = dict(_WORKER_CANDIDATE_MODELS[expected_worker])
+    allowed_properties = {
+        candidate_kind: set(
+            selection_schema["$defs"][model_name_by_kind[candidate_kind]]["properties"]
+        )
+        for candidate_kind in scoped_options
+        if candidate_kind in model_name_by_kind
+    }
+    allowed_place_ids = {
+        candidate_kind: {str(option.get("place_id") or "") for option in kind_options}
+        for candidate_kind, kind_options in scoped_options.items()
+    }
+    validated: list[dict[str, Any]] = []
+    selected_pairs: set[tuple[str, str]] = set()
+    for selection in selections:
+        if not isinstance(selection, dict):
+            raise ResearchPacketOutputError(
+                "provider place selection contains a non-object choice"
+            )
+        candidate_kind = str(selection.get("candidate_kind") or "")
+        place_id = str(selection.get("place_id") or "")
+        if (
+            candidate_kind not in allowed_properties
+            or not set(selection) <= allowed_properties[candidate_kind]
+        ):
+            raise ResearchPacketOutputError(
+                "provider place selection contains fields outside its typed domain"
+            )
+        if place_id not in allowed_place_ids.get(candidate_kind, set()):
+            raise ResearchPacketOutputError(
+                "provider place selection contains an unavailable place"
+            )
+        pair = (candidate_kind, place_id)
+        if pair in selected_pairs:
+            raise ResearchPacketOutputError(
+                "provider place selection contains a duplicate place"
+            )
+        try:
+            WeatherSensitivity.model_validate(selection.get("weather_sensitivity"))
+        except ValidationError as exc:
+            raise ResearchPacketOutputError(
+                "provider place selection contains invalid weather sensitivity"
+            ) from exc
+        selected_pairs.add(pair)
+        validated.append(selection)
+    return validated
+
+
+def _provider_place_selections_or_default(
+    selection_payload: Any,
+    *,
+    model_authored: bool,
+    base_payload: Mapping[str, Any],
+    expected_worker: ResearchWorkerKind,
+    scoped_options: Mapping[str, Sequence[Mapping[str, str]]],
+    selection_schema: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Use a semantic choice when valid, otherwise preserve verified supply."""
+
+    try:
+        return _validate_provider_place_selections(
+            selection_payload,
+            expected_worker=expected_worker,
+            scoped_options=scoped_options,
+            selection_schema=selection_schema,
+        )
+    except ResearchPacketOutputError:
+        if not model_authored:
+            raise
+        logger.warning(
+            "provider place planning selection violated its typed contract; "
+            "applying deterministic policy",
+            exc_info=True,
+        )
+    fallback_payload = _default_provider_place_selections(
+        base_payload=base_payload,
+        scoped_options=scoped_options,
+        selection_limit=int(selection_schema["properties"]["selections"]["maxItems"]),
+    )
+    return _validate_provider_place_selections(
+        fallback_payload,
+        expected_worker=expected_worker,
+        scoped_options=scoped_options,
+        selection_schema=selection_schema,
+    )
+
+
 async def _repair_from_provider_selection(
     *,
     base_payload: Mapping[str, Any],
@@ -3476,6 +3586,7 @@ async def _repair_from_provider_selection(
                 ),
             }
         )
+        model_authored = True
         try:
             selected_raw = await _bounded_packet_model_call(
                 llm,
@@ -3516,33 +3627,17 @@ async def _repair_from_provider_selection(
                 scoped_options=scoped_options,
                 selection_limit=selection_ceiling,
             )
-        selections = (
-            selection_payload.get("selections")
-            if isinstance(selection_payload, dict)
-            else None
+            model_authored = False
+        selections = _provider_place_selections_or_default(
+            selection_payload,
+            model_authored=model_authored,
+            base_payload=base_payload,
+            expected_worker=expected_worker,
+            scoped_options=scoped_options,
+            selection_schema=selection_schema,
         )
-        if not isinstance(selections, list) or not selections:
-            raise ResearchPacketOutputError(
-                "provider place selection requires at least one explicit choice"
-            )
-        allowed_properties = {
-            candidate_kind: set(selection_schema["$defs"][model_name]["properties"])
-            for candidate_kind, model_name in _WORKER_CANDIDATE_MODELS[expected_worker]
-            if scoped_options.get(candidate_kind)
-        }
         for selection in selections:
-            if not isinstance(selection, dict):
-                raise ResearchPacketOutputError(
-                    "provider place selection contains a non-object choice"
-                )
             candidate_kind = str(selection.get("candidate_kind") or "")
-            if (
-                candidate_kind not in allowed_properties
-                or not set(selection) <= allowed_properties[candidate_kind]
-            ):
-                raise ResearchPacketOutputError(
-                    "provider place selection contains fields outside its typed domain"
-                )
             candidates.append(
                 {
                     **selection,
@@ -3685,20 +3780,49 @@ def _provider_route_selection_response_schema(
     }
 
 
+def _provider_route_option_group_key(
+    option: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    """The exact journey responsibility represented by one route option."""
+
+    provider_scope_id = str(option.get("provider_evidence_scope_id") or "")
+    if provider_scope_id:
+        return ("provider_scope", provider_scope_id, "")
+
+    def endpoint_identity(value: Any) -> str:
+        endpoint = value if isinstance(value, Mapping) else {}
+        return str(
+            endpoint.get("place_id")
+            or endpoint.get("station_code")
+            or endpoint.get("name")
+            or ""
+        )
+
+    from_identity = endpoint_identity(option.get("from_endpoint"))
+    to_identity = endpoint_identity(option.get("to_endpoint"))
+    if from_identity and to_identity:
+        return ("endpoint_pair", from_identity, to_identity)
+    return ("route", str(option.get("route_id") or ""), "")
+
+
 def _default_provider_route_selection(
     eligible_route_options: Sequence[Mapping[str, Any]],
     destination_ids: Sequence[str],
+    *,
+    selection_limit: int | None = None,
 ) -> dict[str, Any]:
     if not eligible_route_options or not destination_ids:
         raise ResearchPacketOutputError(
             "provider default route selection requires options and destination"
         )
-    options_by_scope: dict[str, list[Mapping[str, Any]]] = {}
+    options_by_scope: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
     for option in eligible_route_options:
-        scope_key = str(option.get("provider_evidence_scope_id") or "unscoped")
+        scope_key = _provider_route_option_group_key(option)
         options_by_scope.setdefault(scope_key, []).append(option)
     selections: list[dict[str, Any]] = []
     for scoped_options in options_by_scope.values():
+        if selection_limit is not None and len(selections) >= selection_limit:
+            break
         option = min(
             scoped_options,
             key=lambda item: (
@@ -3739,7 +3863,7 @@ def _provider_route_selection_limit(
     *,
     required_transport_classes: Sequence[str] | None,
 ) -> int:
-    """Bound one selection per exact Provider evidence scope.
+    """Bound one selection per exact Provider scope or local adjacency.
 
     Required route scopes describe the Run's complete transport contract, but
     the current authoritative results may cover only a subset of those scopes.
@@ -3749,29 +3873,110 @@ def _provider_route_selection_limit(
     represented by the eligible options in this repair batch.
     """
 
-    represented_scope_ids = {
-        str(option.get("provider_evidence_scope_id") or "")
-        for option in eligible_route_options
-        if option.get("provider_evidence_scope_id")
+    represented_responsibilities = {
+        _provider_route_option_group_key(option) for option in eligible_route_options
     }
-    if represented_scope_ids:
-        return len(represented_scope_ids)
-    if required_transport_classes:
-        # A local connector carries no ``provider_evidence_scope_id`` — that field
-        # names an exact long-distance responsibility.  Its equivalent is the
-        # **ordered endpoint pair**: one route per journey, and two adjacencies are
-        # two journeys.  Returning 1 here capped a whole connector round at a single
-        # selection, so a round that measured four adjacencies still delivered one
-        # Provider route and three invented durations.
-        represented_pairs = {
-            (
-                str((option.get("from_endpoint") or {}).get("place_id") or ""),
-                str((option.get("to_endpoint") or {}).get("place_id") or ""),
-            )
-            for option in eligible_route_options
-        }
-        return max(len(represented_pairs), 1)
+    if represented_responsibilities:
+        return len(represented_responsibilities)
     return _TRANSPORT_PROVIDER_SELECTION_LIMIT
+
+
+def _validate_provider_route_selections(
+    selection_payload: Any,
+    *,
+    eligible_route_options: Sequence[Mapping[str, Any]],
+    destination_ids: Sequence[str],
+    maximum_selections: int,
+) -> list[dict[str, Any]]:
+    selections = (
+        selection_payload.get("selections")
+        if isinstance(selection_payload, dict)
+        else None
+    )
+    if not isinstance(selections, list) or not selections:
+        raise ResearchPacketOutputError(
+            "provider route selection requires at least one explicit choice"
+        )
+    if len(selections) > maximum_selections:
+        raise ResearchPacketOutputError(
+            "provider route selection exceeds the bounded selection limit"
+        )
+    option_by_id = {
+        str(option["route_id"]): option for option in eligible_route_options
+    }
+    selected_ids: list[str] = []
+    selected_responsibilities: set[tuple[str, str, str]] = set()
+    for selection in selections:
+        if not isinstance(selection, dict) or set(selection) != {
+            "route_id",
+            "destination_id",
+            "selection_reasons",
+            "tradeoff",
+            "booking_status",
+            "weather_sensitivity",
+        }:
+            raise ResearchPacketOutputError(
+                "provider route selection contains fields outside its typed domain"
+            )
+        route_id = str(selection.get("route_id") or "")
+        if route_id not in option_by_id or route_id in selected_ids:
+            raise ResearchPacketOutputError(
+                "provider route selection contains an unavailable or duplicate route"
+            )
+        if str(selection.get("destination_id") or "") not in destination_ids:
+            raise ResearchPacketOutputError(
+                "provider route selection contains an uncontrolled destination"
+            )
+        try:
+            WeatherSensitivity.model_validate(selection.get("weather_sensitivity"))
+        except ValidationError as exc:
+            raise ResearchPacketOutputError(
+                "provider route selection contains invalid weather sensitivity"
+            ) from exc
+        responsibility = _provider_route_option_group_key(option_by_id[route_id])
+        if responsibility in selected_responsibilities:
+            raise ResearchPacketOutputError(
+                "provider route selection repeated an exact journey responsibility"
+            )
+        selected_responsibilities.add(responsibility)
+        selected_ids.append(route_id)
+    return selections
+
+
+def _provider_route_selections_or_default(
+    selection_payload: Any,
+    *,
+    model_authored: bool,
+    eligible_route_options: Sequence[Mapping[str, Any]],
+    destination_ids: Sequence[str],
+    maximum_selections: int,
+) -> list[dict[str, Any]]:
+    try:
+        return _validate_provider_route_selections(
+            selection_payload,
+            eligible_route_options=eligible_route_options,
+            destination_ids=destination_ids,
+            maximum_selections=maximum_selections,
+        )
+    except ResearchPacketOutputError:
+        if not model_authored:
+            raise
+        logger.warning(
+            "provider route planning selection violated its typed contract; "
+            "applying deterministic policy",
+            exc_info=True,
+        )
+    fallback_payload = _default_provider_route_selection(
+        eligible_route_options,
+        destination_ids,
+        selection_limit=maximum_selections,
+    )
+    return _validate_provider_route_selections(
+        fallback_payload,
+        eligible_route_options=eligible_route_options,
+        destination_ids=destination_ids,
+        maximum_selections=maximum_selections,
+    )
 
 
 def _provider_route_constraint_evaluation(
@@ -3871,6 +4076,7 @@ async def _repair_from_provider_route_selection(
         eligible_route_options,
         required_transport_classes=required_transport_classes,
     )
+    model_authored = False
     if (
         required_transport_classes
         and len(eligible_route_options) == 1
@@ -3937,6 +4143,7 @@ async def _repair_from_provider_route_selection(
                 ),
             }
         )
+        model_authored = True
         try:
             selected_raw = await _bounded_packet_model_call(
                 llm,
@@ -3950,6 +4157,7 @@ async def _repair_from_provider_route_selection(
                     },
                 },
                 temperature=0,
+                max_output_tokens=_PROVIDER_SELECTION_MAX_OUTPUT_TOKENS,
             )
             selection_payload = json.loads(selected_raw)
         except (
@@ -3970,58 +4178,19 @@ async def _repair_from_provider_route_selection(
             selection_payload = _default_provider_route_selection(
                 eligible_route_options,
                 destination_ids,
+                selection_limit=maximum_selections,
             )
-    selections = (
-        selection_payload.get("selections")
-        if isinstance(selection_payload, dict)
-        else None
+            model_authored = False
+    selections = _provider_route_selections_or_default(
+        selection_payload,
+        model_authored=model_authored,
+        eligible_route_options=eligible_route_options,
+        destination_ids=destination_ids,
+        maximum_selections=maximum_selections,
     )
-    if not isinstance(selections, list) or not selections:
-        raise ResearchPacketOutputError(
-            "provider route selection requires at least one explicit choice"
-        )
-    if len(selections) > maximum_selections:
-        raise ResearchPacketOutputError(
-            "provider route selection exceeds the bounded selection limit"
-        )
     option_by_id = {
         str(option["route_id"]): option for option in eligible_route_options
     }
-    option_ids = set(option_by_id)
-    selected_ids: list[str] = []
-    selected_scope_ids: set[str] = set()
-    for selection in selections:
-        if not isinstance(selection, dict) or set(selection) != {
-            "route_id",
-            "destination_id",
-            "selection_reasons",
-            "tradeoff",
-            "booking_status",
-            "weather_sensitivity",
-        }:
-            raise ResearchPacketOutputError(
-                "provider route selection contains fields outside its typed domain"
-            )
-        route_id = str(selection.get("route_id") or "")
-        if route_id not in option_ids or route_id in selected_ids:
-            raise ResearchPacketOutputError(
-                "provider route selection contains an unavailable or duplicate route"
-            )
-        if str(selection.get("destination_id") or "") not in destination_ids:
-            raise ResearchPacketOutputError(
-                "provider route selection contains an uncontrolled destination"
-            )
-        WeatherSensitivity.model_validate(selection.get("weather_sensitivity"))
-        option_scope_id = str(
-            option_by_id[route_id].get("provider_evidence_scope_id") or ""
-        )
-        if option_scope_id and option_scope_id in selected_scope_ids:
-            raise ResearchPacketOutputError(
-                "provider route selection repeated an exact route-leg scope"
-            )
-        if option_scope_id:
-            selected_scope_ids.add(option_scope_id)
-        selected_ids.append(route_id)
 
     records = _successful_route_records(evidence_messages)
     generated_at = base_payload.get("generated_at")

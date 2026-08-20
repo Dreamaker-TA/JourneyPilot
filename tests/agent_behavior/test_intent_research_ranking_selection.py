@@ -87,6 +87,10 @@ from travel_agent.agents.destination_researcher import node as destination_node
 from travel_agent.agents.research_packet_output import (
     _bind_candidate_discovery_lineage,
     _default_provider_place_selections,
+    _provider_place_selections_or_default,
+    _provider_route_selection_limit,
+    _provider_route_selections_or_default,
+    _provider_selection_response_schema,
 )
 from travel_agent.agents.orchestrator.candidate_gate import _apply_candidate_caps
 from travel_agent.agents.orchestrator.intent_fidelity_gate import (
@@ -1668,6 +1672,154 @@ def test_provider_fallback_prioritizes_llm_structured_intent_aliases():
         "place_generic",
     ]
     assert selected[0]["selection_reasons"][0].startswith("命中 LLM 结构化意图查询")
+
+
+def test_empty_model_place_selection_preserves_verified_provider_supply():
+    base_payload = {
+        "query_context": {
+            "controlled_trip_identity": {
+                "destinations": [{"place_id": "destination_city"}],
+                "start_date": "2026-08-28",
+                "end_date": "2026-08-29",
+            }
+        }
+    }
+    options = {
+        "lodging": [
+            {
+                "candidate_kind": "lodging",
+                "place_id": "hotel_one",
+                "name": "Provider Hotel",
+                "provider_query": "lodging in City",
+            }
+        ]
+    }
+    schema = _provider_selection_response_schema(
+        "accommodation_researcher",
+        options,
+    )
+
+    selections = _provider_place_selections_or_default(
+        {"selections": []},
+        model_authored=True,
+        base_payload=base_payload,
+        expected_worker="accommodation_researcher",
+        scoped_options=options,
+        selection_schema=schema,
+    )
+
+    assert [selection["place_id"] for selection in selections] == ["hotel_one"]
+    assert selections[0]["nights"] == 1
+
+
+def test_invalid_route_selection_fallback_keeps_each_local_adjacency():
+    def route_option(index: int, origin: str, destination: str) -> dict[str, object]:
+        return {
+            "route_id": f"route_{index}",
+            "transport_class": "public_transit",
+            "selected_mode": "bus",
+            "from_endpoint": {"place_id": origin, "name": origin},
+            "to_endpoint": {"place_id": destination, "name": destination},
+            "duration_minutes": 10 + index,
+            "provider_evidence_scope_id": None,
+        }
+
+    options = [
+        route_option(1, "station", "garden"),
+        route_option(2, "garden", "lake"),
+        route_option(3, "lake", "restaurant"),
+        route_option(4, "restaurant", "museum"),
+    ]
+    maximum = _provider_route_selection_limit(
+        options,
+        required_transport_classes=["public_transit"],
+    )
+    invalid_model_payload = {
+        "selections": [
+            {
+                "route_id": "route_1",
+                "destination_id": "destination_city",
+                "selection_reasons": ["端点正确", "路线可执行"],
+                "tradeoff": "动态路况待确认",
+                "booking_status": "not_required",
+                "weather_sensitivity": {
+                    "exposure": "mixed",
+                    "rain_sensitivity": "low",
+                    "heat_sensitivity": "low",
+                    "cold_sensitivity": "low",
+                    "wind_sensitivity": "low",
+                    "requires_clear_visibility": False,
+                },
+                "invented_field": "not in the typed domain",
+            }
+        ]
+    }
+
+    selections = _provider_route_selections_or_default(
+        invalid_model_payload,
+        model_authored=True,
+        eligible_route_options=options,
+        destination_ids=["destination_city"],
+        maximum_selections=maximum,
+    )
+
+    assert maximum == 4
+    assert [selection["route_id"] for selection in selections] == [
+        "route_1",
+        "route_2",
+        "route_3",
+        "route_4",
+    ]
+
+
+def test_route_fallback_keeps_one_option_per_long_distance_scope():
+    options = [
+        {
+            "route_id": "outbound_fast",
+            "transport_class": "long_distance",
+            "selected_mode": "high_speed_rail",
+            "from_endpoint": {"place_id": "origin"},
+            "to_endpoint": {"place_id": "destination"},
+            "duration_minutes": 45,
+            "provider_evidence_scope_id": "scope_outbound",
+        },
+        {
+            "route_id": "outbound_slow",
+            "transport_class": "long_distance",
+            "selected_mode": "high_speed_rail",
+            "from_endpoint": {"place_id": "origin"},
+            "to_endpoint": {"place_id": "destination"},
+            "duration_minutes": 60,
+            "provider_evidence_scope_id": "scope_outbound",
+        },
+        {
+            "route_id": "return_only",
+            "transport_class": "long_distance",
+            "selected_mode": "high_speed_rail",
+            "from_endpoint": {"place_id": "destination"},
+            "to_endpoint": {"place_id": "origin"},
+            "duration_minutes": 50,
+            "provider_evidence_scope_id": "scope_return",
+        },
+    ]
+    maximum = _provider_route_selection_limit(
+        options,
+        required_transport_classes=["long_distance"],
+    )
+
+    selections = _provider_route_selections_or_default(
+        {"selections": []},
+        model_authored=True,
+        eligible_route_options=options,
+        destination_ids=["destination_city"],
+        maximum_selections=maximum,
+    )
+
+    assert maximum == 2
+    assert [selection["route_id"] for selection in selections] == [
+        "outbound_fast",
+        "return_only",
+    ]
 
 
 def test_intent_fidelity_does_not_reopen_exhausted_candidate_domain():
