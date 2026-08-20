@@ -96,6 +96,7 @@ from travel_agent.agents.research_packet_output import (
 from travel_agent.agents.orchestrator.candidate_gate import (
     _apply_candidate_caps,
     _research_closeout_can_skip_connector_pass,
+    _closeout_blocks_targeted_round,
 )
 from travel_agent.agents.orchestrator.intent_fidelity_gate import (
     _candidate_retry_available,
@@ -1102,6 +1103,79 @@ def test_research_closeout_keeps_deterministic_connector_reconciliation():
     assert not _research_closeout_can_skip_connector_pass(
         TravelAgentState.model_construct(placement_skeleton=object()), closed
     )
+
+
+def test_closeout_only_allows_exact_connector_targeted_rounds():
+    connector = SimpleNamespace(gap_id="connector_gap_1")
+
+    assert not _closeout_blocks_targeted_round(
+        SimpleNamespace(research_closed=True, composition_closed=False),
+        [connector],
+    )
+    assert _closeout_blocks_targeted_round(
+        SimpleNamespace(research_closed=True, composition_closed=False),
+        [],
+    )
+    assert _closeout_blocks_targeted_round(
+        SimpleNamespace(research_closed=True, composition_closed=True),
+        [connector],
+    )
+
+
+def test_candidate_gate_routes_exact_connector_lookup_during_closeout(monkeypatch):
+    from travel_agent.agents.orchestrator import candidate_gate
+
+    state = TravelAgentState.model_construct(
+        candidate_gate_route="transport_researcher",
+        run_deadline=object(),
+        placement_skeleton=object(),
+        trip_workspace_v2=None,
+        agent_assignments={
+            "transport_researcher": {
+                "require_current_candidate": True,
+                "required_transport_classes": ["public_transit"],
+                "connector_gaps": [{"gap_id": "connector_gap_1"}],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        candidate_gate,
+        "observe_run_deadline",
+        lambda deadline: (
+            deadline,
+            SimpleNamespace(research_closed=True, composition_closed=False),
+        ),
+    )
+
+    assert candidate_gate.route_after_candidate_gate(state) == "transport_researcher"
+
+
+def test_candidate_gate_stops_exact_connector_lookup_after_composition(monkeypatch):
+    from travel_agent.agents.orchestrator import candidate_gate
+
+    state = TravelAgentState.model_construct(
+        candidate_gate_route="transport_researcher",
+        run_deadline=object(),
+        placement_skeleton=object(),
+        trip_workspace_v2=None,
+        agent_assignments={
+            "transport_researcher": {
+                "require_current_candidate": True,
+                "required_transport_classes": ["public_transit"],
+                "connector_gaps": [{"gap_id": "connector_gap_1"}],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        candidate_gate,
+        "observe_run_deadline",
+        lambda deadline: (
+            deadline,
+            SimpleNamespace(research_closed=True, composition_closed=True),
+        ),
+    )
+
+    assert candidate_gate.route_after_candidate_gate(state) == "passed"
 
 
 def test_selection_never_promotes_a_gate_rejected_candidate():

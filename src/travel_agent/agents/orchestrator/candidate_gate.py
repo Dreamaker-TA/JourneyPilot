@@ -83,6 +83,7 @@ from ...workflows.run_deadline import (
     DeadlineObservation,
     observe_run_deadline,
 )
+from ...workflows.run_control import is_structural_connector_round
 from ..utils import strip_round_suffix
 from .provider_failure import classify_provider_failure, is_provider_or_model_failure
 
@@ -1335,6 +1336,19 @@ def _research_closeout_can_skip_connector_pass(
     )
 
 
+def _closeout_blocks_targeted_round(
+    observation: DeadlineObservation | None,
+    connector_gaps: Sequence[LocalConnectorGap],
+) -> bool:
+    """Close discovery at closeout while preserving exact composition lookups."""
+
+    return bool(
+        observation is not None
+        and observation.research_closed
+        and (observation.composition_closed or not connector_gaps)
+    )
+
+
 _LONG_DISTANCE_EVIDENCE_REQUIREMENT = (
     "必须使用真实外部 Provider 结果，"
     "具体到可核验的出发/到达端点与时间。实时班次不可得时明确保留缺口，"
@@ -2472,7 +2486,7 @@ async def candidate_gate_node(
             message=str(exc),
             base_update=base_update,
         )
-    if observation is not None and observation.research_closed:
+    if _closeout_blocks_targeted_round(observation, connector_round_gaps):
         return _passed_update(
             state,
             base_update={
@@ -2762,7 +2776,17 @@ def route_after_candidate_gate(state: TravelAgentState) -> str:
     except ValueError:
         return "passed"
     if observation.research_closed:
-        # Legal non-model exits past the boundary; worker and repair routes hand
-        # the current catalog straight to composition instead.
+        # An exact connector sweep is composition work whose inputs do not exist
+        # until the placement skeleton does.  Its reusable implementation lives in
+        # the transport worker, but both its Provider calls and any typed packet
+        # repair draw on the later composition window.
+        if (
+            not observation.composition_closed
+            and route == "transport_researcher"
+            and is_structural_connector_round(state, route)
+        ):
+            return route
+        # Legal non-model exits past the boundary; discovery workers and semantic
+        # repair routes hand the current catalog straight to composition instead.
         return route if route == "passed" else "passed"
     return route

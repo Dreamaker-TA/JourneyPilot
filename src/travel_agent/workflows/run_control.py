@@ -656,10 +656,48 @@ _REQUEST_CONTRACT_NORMALIZER = "request_contract_normalizer"
 _INTENT_AMENDMENT_ROUTER = "intent_amendment_router"
 
 
-def _worker_window_closed(node_name: str, observation: DeadlineObservation) -> bool:
+def is_structural_connector_round(state: Any, node_name: str) -> bool:
+    """Whether this worker invocation only resolves a composed adjacency chain.
+
+    Exact local connectors cannot be known before the itinerary skeleton exists.
+    They are deterministic Provider lookups over already-selected endpoints, not a
+    new candidate-discovery round, so they belong to the composition window even
+    though the reusable implementation lives in ``transport_researcher``.
+    """
+
+    if node_name != "transport_researcher":
+        return False
+    assignments = getattr(state, "agent_assignments", None) or {}
+    assignment = assignments.get(node_name) or {}
+    connector_gaps = assignment.get("connector_gaps") or []
+    required_classes = set(assignment.get("required_transport_classes") or [])
+    return bool(
+        getattr(state, "placement_skeleton", None) is not None
+        and getattr(state, "trip_workspace_v2", None) is None
+        and assignment.get("require_current_candidate") is True
+        and connector_gaps
+        and required_classes
+        and required_classes <= {"public_transit", "flexible"}
+    )
+
+
+def _model_window_for_node(node_name: str, state: Any) -> ModelWindow:
+    if node_name in _COMPOSITION_MODEL_WINDOW_NODES or is_structural_connector_round(
+        state, node_name
+    ):
+        return "composition"
+    return "research"
+
+
+def _worker_window_closed(
+    node_name: str,
+    observation: DeadlineObservation,
+    *,
+    model_window: ModelWindow,
+) -> bool:
     """Whether ``node_name`` has run out of the window its own calls belong to."""
 
-    if node_name in _COMPOSITION_WORKER_NODES:
+    if model_window == "composition":
         return observation.composition_closed
     return observation.research_closed
 
@@ -718,11 +756,8 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
         # The window a node's model calls draw on is a property of the node, so
         # it is bound here with the other run attribution rather than inside each
         # node body — helper functions the node calls inherit it for free.
-        token_window = current_model_window.set(
-            "composition"
-            if node_name in _COMPOSITION_MODEL_WINDOW_NODES
-            else "research"
-        )
+        model_window = _model_window_for_node(node_name, state)
+        token_window = current_model_window.set(model_window)
         started = time.perf_counter()
         ts_ms = run_ts_ms()
         try:
@@ -735,7 +770,9 @@ def with_run_control(node_name: str, fn: NodeFn) -> Callable[..., Awaitable[Any]
                 state = state.model_copy(update={"run_deadline": observed_deadline})
                 current_run_deadline.set(observed_deadline)
                 if node_name in _DEADLINE_BLOCKED_WORKER_NODES and _worker_window_closed(
-                    node_name, observation
+                    node_name,
+                    observation,
+                    model_window=model_window,
                 ):
                     # Do not enter a worker once the window its model calls draw
                     # on is closed — research and composition close separately.
