@@ -32,7 +32,9 @@ from travel_agent.services.intent_normalization import (
     NormalizedClauseDraft,
     RequestContractNormalizationResult,
     SourceClause,
+    is_material_clause,
     normalize_clauses,
+    split_source_clauses,
 )
 from travel_agent.services.intent_revision import build_request_contract_revision
 from travel_agent.services.research_query_planner import build_research_query_plan
@@ -493,6 +495,69 @@ async def test_required_transport_service_gets_the_transport_domain():
     assert intent.kind is IntentKind.MUST_INCLUDE
     assert intent.target is IntentTarget.LONG_DISTANCE_TRANSPORT
     assert intent.value.categories == ["去返程高铁"]
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_maps_an_unnumbered_alternative_request():
+    clause = _clause(0, "并给出备选方案")
+
+    class _ProviderFailureModel:
+        async def ainvoke(self, *_args, **_kwargs):
+            raise OpenAIError("provider returned invalid structured output")
+
+    result = await normalize_clauses(
+        clauses=[clause],
+        controlled_identity=_identity(),
+        llm=_ProviderFailureModel(),
+    )
+
+    [intent] = result.clauses[0].intents
+    assert intent.kind is IntentKind.ALTERNATIVES
+    assert intent.target is IntentTarget.DELIVERY
+    assert intent.value.count == 2
+    assert result.clauses[0].reason_code is None
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_keeps_a_complete_multi_clause_trip_contract():
+    query = (
+        "规划两天一夜行程，2名成人，偏好建筑与本地文化，"
+        "必须安排甲景点、乙景点，总预算人民币3000元以内。"
+        "请安排去返程高铁、住宿、每天的具体时间和交通，并给出备选方案。"
+    )
+    clauses = split_source_clauses([("query_main", "current_request", query)])
+
+    class _ProviderFailureModel:
+        async def ainvoke(self, *_args, **_kwargs):
+            raise OpenAIError("provider returned invalid structured output")
+
+    result = await normalize_clauses(
+        clauses=clauses,
+        controlled_identity=_identity(),
+        llm=_ProviderFailureModel(),
+    )
+
+    material_dispositions = [
+        draft.disposition
+        for clause, draft in zip(clauses, result.clauses)
+        if is_material_clause(clause.source_text)
+    ]
+    assert ClauseDisposition.UNRESOLVED not in material_dispositions
+    intents = [intent for draft in result.clauses for intent in draft.intents]
+    assert [
+        intent.value.categories[0]
+        for intent in intents
+        if intent.kind is IntentKind.MUST_INCLUDE
+    ] == ["甲景点", "乙景点"]
+    assert any(intent.kind is IntentKind.ALTERNATIVES for intent in intents)
+    [budget] = [
+        constraint
+        for draft in result.clauses
+        for constraint in draft.constraints
+        if constraint.category == "budget_cap"
+    ]
+    assert budget.params.amount == 3000
+    assert budget.params.per == "total"
 
 
 def test_include_exclude_conflict_blocks_the_contract():

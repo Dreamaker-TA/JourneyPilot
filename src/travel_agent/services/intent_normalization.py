@@ -575,6 +575,30 @@ def _fallback_clause(
                     VerificationMode.DETERMINISTIC,
                 )
             )
+    elif any(
+        token in lowered
+        for token in (
+            "备选方案",
+            "备用方案",
+            "替代方案",
+            "alternative option",
+            "backup option",
+        )
+    ):
+        # A singular request for an alternative means one primary plus one
+        # fallback option.  Unlike the numbered grammar above there is no count
+        # to infer, so two is the smallest contract that satisfies the request.
+        intents.append(
+            _intent(
+                IntentKind.ALTERNATIVES,
+                IntentTarget.DELIVERY,
+                IntentStrength.HARD,
+                AlternativeIntentValue(count=2),
+                text,
+                ["composition", "projection"],
+                VerificationMode.DETERMINISTIC,
+            )
+        )
     if not intents and any(token in text for token in ("规划", "行程", "安排")):
         intents.append(
             _intent(
