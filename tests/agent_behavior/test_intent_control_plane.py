@@ -154,6 +154,11 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
     wrapper = model.response_format["json_schema"]
     assert model.max_output_tokens == 8192
     assert wrapper["strict"] is supports_native_schema
+    clause_array = wrapper["schema"]["properties"]["clauses"]
+    assert clause_array["minItems"] == clause_array["maxItems"] == 1
+    assert wrapper["schema"]["$defs"]["NormalizedClauseDraft"]["properties"][
+        "clause_id"
+    ]["enum"] == [clause.clause_id]
     params_schema = wrapper["schema"]["$defs"]["ConstraintParamsDraft"]
     if supports_native_schema:
         assert "amount" in params_schema["required"]
@@ -259,9 +264,10 @@ async def test_repeated_repair_failure_gets_an_unanchored_semantic_regeneration(
     )
 
     assert len(model.calls) == 3
-    assert any(message["role"] == "assistant" for message in model.calls[1])
+    assert not any(message["role"] == "assistant" for message in model.calls[1])
     assert not any(message["role"] == "assistant" for message in model.calls[2])
-    assert "独立的语义归一化" in model.calls[2][-1]["content"]
+    assert "只处理当前输入列出的" in model.calls[1][-1]["content"]
+    assert "只处理当前输入列出的" in model.calls[2][-1]["content"]
     [intent] = result.clauses[0].intents
     assert intent.strength is IntentStrength.HARD
     assert intent.target is IntentTarget.DELIVERY
@@ -306,6 +312,88 @@ async def test_slow_normalization_calls_share_one_operation_budget(monkeypatch):
     [intent] = result.clauses[0].intents
     assert intent.kind is IntentKind.ALTERNATIVES
     assert intent.strength is IntentStrength.HARD
+
+
+@pytest.mark.asyncio
+async def test_semantic_repair_only_regenerates_invalid_clause_rows():
+    clauses = [
+        _clause(0, "偏好建筑与本地文化"),
+        _clause(1, "并给出备选方案"),
+    ]
+
+    class _Model:
+        capabilities = SimpleNamespace(supports_json_schema=False)
+
+        def __init__(self):
+            self.calls = []
+
+        async def ainvoke(self, messages, **_kwargs):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                rows = [
+                    {
+                        "clause_id": clauses[0].clause_id,
+                        "disposition": "mapped_to_intent",
+                        "intents": [
+                            {
+                                "kind": "theme",
+                                "target": "trip",
+                                "strength": "soft",
+                                "priority": 70,
+                                "value": {
+                                    "value_type": "category",
+                                    "categories": ["建筑与本地文化"],
+                                },
+                                "verification_mode": "semantic",
+                                "impact_stages": ["research", "ranking"],
+                                "public_summary": "偏好建筑与本地文化",
+                            }
+                        ],
+                    },
+                    {
+                        "clause_id": clauses[1].clause_id,
+                        "disposition": "mapped_to_intent",
+                        "intents": [],
+                    },
+                ]
+            else:
+                rows = [
+                    {
+                        "clause_id": clauses[1].clause_id,
+                        "disposition": "mapped_to_intent",
+                        "intents": [
+                            {
+                                "kind": "alternatives",
+                                "target": "delivery",
+                                "strength": "hard",
+                                "priority": 80,
+                                "value": {
+                                    "value_type": "alternative",
+                                    "count": 2,
+                                },
+                                "verification_mode": "semantic",
+                                "impact_stages": ["composition", "projection"],
+                                "public_summary": "提供备选方案",
+                            }
+                        ],
+                    }
+                ]
+            return json.dumps({"clauses": rows})
+
+    model = _Model()
+    result = await normalize_clauses(
+        clauses=clauses,
+        controlled_identity=_identity(),
+        llm=model,
+    )
+
+    assert len(model.calls) == 2
+    retry_payload = json.loads(model.calls[1][1]["content"])
+    assert [row["clause_id"] for row in retry_payload["clauses"]] == [
+        clauses[1].clause_id
+    ]
+    assert result.clauses[0].intents[0].kind is IntentKind.THEME
+    assert result.clauses[1].intents[0].kind is IntentKind.ALTERNATIVES
 
 
 def _contract():
@@ -613,7 +701,7 @@ def test_full_trip_sentence_does_not_treat_party_size_as_nightly_budget():
         ("一定要打卡良渚博物院，京杭大运河博物馆", ["良渚博物院", "京杭大运河博物馆"]),
     ],
 )
-async def test_invalid_generic_model_objective_uses_required_items_fallback(
+async def test_valid_model_semantics_are_not_overruled_by_fallback_grammar(
     source_text, expected_terms
 ):
     clause = _clause(0, source_text)
@@ -656,22 +744,31 @@ async def test_invalid_generic_model_objective_uses_required_items_fallback(
         clauses=[clause], controlled_identity=_identity(), llm=_Model()
     )
 
-    intents = result.clauses[0].intents
-    assert [intent.kind for intent in intents] == [
-        IntentKind.MUST_INCLUDE,
-        IntentKind.MUST_INCLUDE,
+    [intent] = result.clauses[0].intents
+    assert expected_terms
+    assert intent.kind is IntentKind.OBJECTIVE
+    assert intent.target is IntentTarget.TRIP
+    assert intent.value.value == source_text
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_uses_required_items_grammar_only_as_fallback():
+    clause = _clause(0, "必须安排西湖、郭庄")
+
+    class _ProviderFailureModel:
+        async def ainvoke(self, *_args, **_kwargs):
+            raise OpenAIError("provider returned invalid structured output")
+
+    result = await normalize_clauses(
+        clauses=[clause],
+        controlled_identity=_identity(),
+        llm=_ProviderFailureModel(),
+    )
+
+    assert [intent.value.categories for intent in result.clauses[0].intents] == [
+        ["西湖"],
+        ["郭庄"],
     ]
-    assert [intent.target for intent in intents] == [
-        IntentTarget.VISIT,
-        IntentTarget.VISIT,
-    ]
-    assert [intent.value.categories for intent in intents] == [
-        [term] for term in expected_terms
-    ]
-    assert [intent.public_summary for intent in intents] == [
-        f"必须安排{term}" for term in expected_terms
-    ]
-    assert all("ranking" in intent.impact_stages for intent in intents)
 
 
 @pytest.mark.asyncio

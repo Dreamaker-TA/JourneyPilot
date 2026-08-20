@@ -240,33 +240,25 @@ async def normalize_clauses(
 ) -> RequestContractNormalizationResult:
     if not clauses:
         raise ValueError("request normalization requires at least one clause")
-    model_schema = RequestContractNormalizationResult.model_json_schema()
     capabilities = getattr(llm, "capabilities", None)
     supports_native_schema = bool(getattr(capabilities, "supports_json_schema", False))
-    # 原生 Structured Output 要求所有字段 required；json_object 降级则把 Schema
-    # 放进 prompt，此时保留 Pydantic 的可选/default 语义，避免模型把数十个可选字段
-    # 全部展开成 null/[] 并撞上输出上限。两条路径最后都由同一 Pydantic 模型校验。
-    schema = as_strict_schema(model_schema) if supports_native_schema else model_schema
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "request_contract_normalization",
-            "strict": supports_native_schema,
-            "schema": schema,
-        },
-    }
-    messages = _normalization_prompt(clauses, controlled_identity)
+    accepted: Dict[str, NormalizedClauseDraft] = {}
+    pending = list(clauses)
+    messages = _normalization_prompt(pending, controlled_identity)
     last_error: Exception | None = None
     loop = asyncio.get_running_loop()
     operation_deadline = loop.time() + INTENT_NORMALIZATION_OPERATION_TIMEOUT_SECONDS
     for attempt in range(3):
-        raw = ""
         remaining_seconds = operation_deadline - loop.time()
         if remaining_seconds <= 0:
             last_error = TimeoutError(
                 "request contract normalization operation budget exhausted"
             )
             break
+        response_format = _normalization_response_format(
+            pending,
+            supports_native_schema=supports_native_schema,
+        )
         try:
             raw = await asyncio.wait_for(
                 llm.ainvoke(
@@ -281,10 +273,34 @@ async def normalize_clauses(
                 ),
             )
             parsed = safe_parse_json(raw, strip_think_tags=True)
-            result = RequestContractNormalizationResult.model_validate(parsed)
-            _validate_clause_coverage(result, clauses)
-            _validate_model_contract(result, clauses)
-            return result
+            newly_accepted, validation_errors = _validated_model_clause_rows(
+                parsed,
+                pending,
+            )
+            accepted.update(newly_accepted)
+            pending = [clause for clause in pending if clause.clause_id not in accepted]
+            if not pending:
+                result = RequestContractNormalizationResult(
+                    clauses=[accepted[clause.clause_id] for clause in clauses]
+                )
+                _validate_clause_coverage(result, clauses)
+                return result
+            last_error = ValueError("; ".join(validation_errors)[:2400])
+            if attempt < 2:
+                logger.info(
+                    "request contract model normalization partially rejected; "
+                    "requesting targeted semantic repair | accepted=%d pending=%d "
+                    "error=%s",
+                    len(newly_accepted),
+                    len(pending),
+                    str(last_error)[:800],
+                )
+                messages = _normalization_targeted_retry_prompt(
+                    clauses=pending,
+                    controlled_identity=controlled_identity,
+                    error=last_error,
+                )
+                continue
         except asyncio.TimeoutError as exc:
             last_error = exc
             remaining_seconds = operation_deadline - loop.time()
@@ -294,8 +310,8 @@ async def normalize_clauses(
                     "fresh semantic regeneration | remaining_seconds=%.1f",
                     remaining_seconds,
                 )
-                messages = _normalization_fresh_retry_prompt(
-                    clauses=clauses,
+                messages = _normalization_targeted_retry_prompt(
+                    clauses=pending,
                     controlled_identity=controlled_identity,
                     error=TimeoutError(
                         "the previous semantic normalization exceeded its call budget"
@@ -305,103 +321,134 @@ async def normalize_clauses(
             break
         except (
             OpenAIError,
-            ValidationError,
             TypeError,
             ValueError,
             RuntimeError,
         ) as exc:
             last_error = exc
-            if attempt == 0:
+            if attempt < 2:
                 logger.info(
-                    "request contract model normalization rejected; requesting semantic repair "
-                    "| error_type=%s",
+                    "request contract model normalization unavailable; requesting "
+                    "targeted semantic retry | pending=%d error_type=%s error=%s",
+                    len(pending),
                     type(exc).__name__,
+                    str(exc)[:800],
                 )
-                messages = _normalization_repair_prompt(
-                    clauses=clauses,
-                    controlled_identity=controlled_identity,
-                    previous_output=raw,
-                    error=exc,
-                )
-                continue
-            if attempt == 1:
-                logger.info(
-                    "request contract semantic repair rejected; requesting fresh semantic "
-                    "regeneration | error_type=%s",
-                    type(exc).__name__,
-                )
-                messages = _normalization_fresh_retry_prompt(
-                    clauses=clauses,
+                messages = _normalization_targeted_retry_prompt(
+                    clauses=pending,
                     controlled_identity=controlled_identity,
                     error=exc,
                 )
                 continue
     logger.warning(
-        "request contract model normalization failed after semantic repair; "
-        "using deterministic fallback | error_type=%s",
+        "request contract model normalization failed for %d clause(s) after "
+        "semantic repair; using clause-scoped deterministic fallback | "
+        "error_type=%s error=%s",
+        len(pending),
         type(last_error).__name__ if last_error is not None else "unknown",
+        str(last_error)[:800] if last_error is not None else "",
     )
-    return _fallback_normalization(clauses, controlled_identity)
+    fallback = _fallback_normalization(pending, controlled_identity)
+    fallback_by_id = {draft.clause_id: draft for draft in fallback.clauses}
+    return RequestContractNormalizationResult(
+        clauses=[
+            accepted.get(clause.clause_id) or fallback_by_id[clause.clause_id]
+            for clause in clauses
+        ]
+    )
 
 
-def _normalization_fresh_retry_prompt(
+def _normalization_response_format(
+    clauses: List[SourceClause],
+    *,
+    supports_native_schema: bool,
+) -> Dict[str, object]:
+    """Bind the generic contract schema to this call's exact clause ledger."""
+
+    model_schema = RequestContractNormalizationResult.model_json_schema()
+    clause_array = model_schema["properties"]["clauses"]
+    clause_array["minItems"] = len(clauses)
+    clause_array["maxItems"] = len(clauses)
+    clause_definition = model_schema["$defs"]["NormalizedClauseDraft"]
+    clause_definition["properties"]["clause_id"]["enum"] = [
+        clause.clause_id for clause in clauses
+    ]
+    schema = as_strict_schema(model_schema) if supports_native_schema else model_schema
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "request_contract_normalization",
+            "strict": supports_native_schema,
+            "schema": schema,
+        },
+    }
+
+
+def _normalization_targeted_retry_prompt(
     *,
     clauses: List[SourceClause],
     controlled_identity: Dict[str, object],
     error: Exception,
 ) -> List[Dict[str, str]]:
-    """Regenerate independently when editing the rejected draft stays anchored.
-
-    The original clauses and schema remain authoritative.  Omitting the previous
-    JSON is intentional: an otherwise capable model can repeat a structural
-    mistake simply because the repair conversation presents that mistake as its
-    latest assistant answer.
-    """
+    """Regenerate only clauses that still lack a valid semantic mapping."""
 
     messages = _normalization_prompt(clauses, controlled_identity)
     messages.append(
         {
             "role": "user",
             "content": (
-                "前两次结构化结果均未通过合同校验。请从原始 clauses 重新做一次独立的"
-                "语义归一化，不要沿用或猜测之前的 JSON。每个 clause 仍须按原顺序恰好返回一次；"
-                "复合要求要拆成各自可验收的 Intent。只输出完整 JSON 对象。"
-                f"最近校验反馈：{str(error)[:1200]}"
-            ),
-        }
-    )
-    return messages
-
-
-def _normalization_repair_prompt(
-    *,
-    clauses: List[SourceClause],
-    controlled_identity: Dict[str, object],
-    previous_output: str,
-    error: Exception,
-) -> List[Dict[str, str]]:
-    """Ask the semantic authority to repair its own rejected structured draft."""
-
-    messages = _normalization_prompt(clauses, controlled_identity)
-    if previous_output.strip():
-        messages.append(
-            {
-                "role": "assistant",
-                "content": previous_output[-12_000:],
-            }
-        )
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                "上一个结构化结果未通过请求合同校验。请重新理解全部原始 clauses，"
-                "修复语义映射后输出一份完整的新 JSON 对象，不要解释、不要只输出差异。"
-                f"校验错误类型：{type(error).__name__}；"
+                "上一轮中其余 clause 已分别通过合同校验，本轮只处理当前输入列出的"
+                "未通过 clause；不要重复已通过内容。请重新做语义理解，按输入顺序为"
+                "每个当前 clause 恰好输出一行完整结构，不要解释。"
                 f"校验反馈：{str(error)[:1200]}"
             ),
         }
     )
     return messages
+
+
+def _validated_model_clause_rows(
+    parsed: object,
+    clauses: List[SourceClause],
+) -> tuple[Dict[str, NormalizedClauseDraft], List[str]]:
+    """Salvage independently valid LLM rows without authoring any semantics."""
+
+    if not isinstance(parsed, dict) or set(parsed) != {"clauses"}:
+        raise ValueError("normalizer root must contain exactly the clauses field")
+    rows = parsed.get("clauses")
+    if not isinstance(rows, list):
+        raise ValueError("normalizer clauses field must be a list")
+    rows_by_id: Dict[str, List[object]] = {}
+    for row in rows:
+        clause_id = str(row.get("clause_id") or "") if isinstance(row, dict) else ""
+        rows_by_id.setdefault(clause_id, []).append(row)
+
+    accepted: Dict[str, NormalizedClauseDraft] = {}
+    errors: List[str] = []
+    for source in clauses:
+        matches = rows_by_id.get(source.clause_id, [])
+        if len(matches) != 1:
+            errors.append(
+                f"{source.clause_id}: expected one row, received {len(matches)}"
+            )
+            continue
+        try:
+            draft = NormalizedClauseDraft.model_validate(matches[0])
+            one = RequestContractNormalizationResult(clauses=[draft])
+            _validate_clause_coverage(one, [source])
+            _validate_model_contract(one, [source])
+        except (ValidationError, TypeError, ValueError) as exc:
+            errors.append(f"{source.clause_id}: {type(exc).__name__}: {str(exc)[:500]}")
+            continue
+        accepted[source.clause_id] = draft
+    unknown_ids = sorted(
+        clause_id
+        for clause_id in rows_by_id
+        if clause_id and clause_id not in {clause.clause_id for clause in clauses}
+    )
+    if unknown_ids:
+        errors.append(f"unknown clause ids: {unknown_ids}")
+    return accepted, errors
 
 
 def _validate_clause_coverage(
@@ -542,9 +589,10 @@ def _validate_model_contract(
     """Reject a structurally valid model answer that violates source invariants.
 
     This validator never authors or rewrites an intent.  Semantic normalization
-    belongs to the model; these checks only decide whether its structured answer
-    is safe to accept.  A rejected result enters the isolated deterministic
-    fallback path as a whole, so model and rule drafts are never mixed.
+    belongs to the model; these checks only protect exact numeric constraints and
+    explicit delivery flags whose omission would make later verification
+    impossible.  Named-item parsing is deliberately absent here: syntax rules
+    may assist the final fallback, but they do not overrule a valid LLM mapping.
     """
 
     for source, draft in zip(clauses, result.clauses):
@@ -553,35 +601,6 @@ def _validate_model_contract(
             ClauseDisposition.NON_ACTIONABLE,
         }:
             raise ValueError("model dropped a material request clause")
-
-        terms = _explicit_must_include_terms(source.source_text)
-        if terms:
-            available = {
-                index: intent
-                for index, intent in enumerate(draft.intents)
-                if intent.kind is IntentKind.MUST_INCLUDE
-                and intent.strength is IntentStrength.HARD
-                and isinstance(intent.value, CategoryIntentValue)
-            }
-            for term in terms:
-                normalized_term = term.casefold()
-                match_index = next(
-                    (
-                        index
-                        for index, intent in available.items()
-                        if any(
-                            normalized_term in category.casefold()
-                            or category.casefold() in normalized_term
-                            for category in intent.value.categories
-                        )
-                    ),
-                    None,
-                )
-                if match_index is None:
-                    raise ValueError(
-                        "model did not emit one hard must-include intent per required item"
-                    )
-                available.pop(match_index)
 
         deterministic_budget = deterministic_budget_constraints(source.source_text)
         if deterministic_budget:
