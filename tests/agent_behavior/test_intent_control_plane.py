@@ -131,8 +131,10 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
         def __init__(self):
             self.response_format = None
             self.max_output_tokens = None
+            self.messages = None
 
-        async def ainvoke(self, *_args, **kwargs):
+        async def ainvoke(self, messages, **kwargs):
+            self.messages = messages
             self.response_format = kwargs["response_format"]
             self.max_output_tokens = kwargs["max_output_tokens"]
             return json.dumps(
@@ -159,6 +161,9 @@ async def test_normalizer_projects_one_schema_by_provider_capability(
     assert wrapper["schema"]["$defs"]["NormalizedClauseDraft"]["properties"][
         "clause_id"
     ]["enum"] == [clause.clause_id]
+    assert "value_type" in model.messages[0]["content"]
+    assert "禁止 intent_type 或 type" in model.messages[0]["content"]
+    assert "target=long_distance_transport" in model.messages[0]["content"]
     params_schema = wrapper["schema"]["$defs"]["ConstraintParamsDraft"]
     if supports_native_schema:
         assert "amount" in params_schema["required"]
